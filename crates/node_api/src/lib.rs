@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use node_ai::InferenceBackend;
-use node_mesh::PeerDirectory;
+use node_mesh::transport::Transport;
+use node_mesh::{ConsultConfig, PeerDirectory};
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
 use node_storage::search;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub peer_dir: RwLock<PeerDirectory>,
     pub backend: Arc<dyn InferenceBackend>,
+    pub transport: Option<Arc<dyn Transport>>,
+    pub consult_config: ConsultConfig,
     pub node_id: String,
     pub admin_token: String,
 }
@@ -230,9 +233,53 @@ async fn handle_ask(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let local_confidence: f32 = if context_bullets.is_empty() { 0.3 } else { 0.7 };
+
+    // If local confidence is low and we have a transport, consult peers
+    let mut peer_answers = Vec::new();
+    if local_confidence < 0.6 {
+        if let Some(ref transport) = state.transport {
+            let result = node_mesh::consult::consult_peers(
+                transport,
+                &state.peer_dir,
+                &state.consult_config,
+                &state.node_id,
+                "public",
+                &req.question,
+                &context_bullets,
+            )
+            .await;
+
+            for pa in &result.answers {
+                peer_answers.push(format!("[{}] {}", pa.peer_id, pa.answer));
+            }
+
+            if let Some(best) = result.best_answer {
+                if best.confidence > local_confidence {
+                    return Ok(Json(AskResponse {
+                        answer: best.answer,
+                        confidence: best.confidence,
+                        model: format!("peer:{}", best.peer_id),
+                        context_used: best.evidence_refs,
+                    }));
+                }
+            }
+        }
+    }
+
+    let answer = if peer_answers.is_empty() {
+        gen_resp.text
+    } else {
+        format!(
+            "{}\n\n--- Peer insights ---\n{}",
+            gen_resp.text,
+            peer_answers.join("\n")
+        )
+    };
+
     Ok(Json(AskResponse {
-        answer: gen_resp.text,
-        confidence: if context_bullets.is_empty() { 0.3 } else { 0.7 },
+        answer,
+        confidence: local_confidence,
         model: gen_resp.model,
         context_used: context_hits.iter().map(|h| h.case_id.clone()).collect(),
     }))
@@ -353,6 +400,8 @@ mod tests {
             db_path,
             peer_dir: RwLock::new(PeerDirectory::new()),
             backend: Arc::new(MockBackend::new()),
+            transport: None,
+            consult_config: ConsultConfig::default(),
             node_id: "test-node-001".into(),
             admin_token: "test-token".into(),
         })

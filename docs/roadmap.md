@@ -58,6 +58,15 @@
 - [x] 11.2 Training job queue with policy + eval gates
 - [x] 11.3 Dataset manifests + bounded CPU jobs
 
+## Wire-up: Full Mesh Integration
+- [x] TCP+mTLS transport wired into node_app main binary
+- [x] mDNS discovery started on boot, auto-populates PeerDirectory
+- [x] Envelope handler: PING/PONG, HELLO, ASK/ANSWER/REFUSE
+- [x] /ask endpoint consults peers when local confidence is low
+- [x] Periodic replication loop pings peers + gossip handshake
+- [x] End-to-end integration tests: 4 tests (ping, ask-peer, status-with-mesh, bidirectional)
+- [x] Node identity derived from mTLS certificate fingerprint
+
 ## Phase 12: Tauri UI
 - [ ] 12.1 Build tray UI + connect to API
 
@@ -67,5 +76,5 @@
 
 ---
 
-**Current status**: 146 tests, 0 failures, 0 clippy warnings across 13 crates.
-All core phases (0-11) implemented. Remaining: Tauri UI (Phase 12), Internet Mode (Phase 13).
+**Current status**: 159 tests, 0 failures, 0 clippy warnings across 13 crates.
+All core phases (0-11) plus full mesh wiring implemented. Remaining: Tauri UI (Phase 12), Internet Mode (Phase 13).

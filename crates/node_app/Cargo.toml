@@ -30,6 +30,11 @@ uuid = { workspace = true }
 axum = { workspace = true }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
+mdns-sd = { workspace = true }
+prost = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tower = "0.5"
+http-body-util = "0.1"
+node_ai_mock = { path = "../node_ai_mock" }

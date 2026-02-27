@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
@@ -9,7 +10,12 @@ use node_ai::InferenceBackend;
 use node_ai_mock::MockBackend;
 use node_ai_ollama::OllamaBackend;
 use node_api::AppState;
-use node_mesh::PeerDirectory;
+use node_crypto::DevCa;
+use node_mesh::tcp_transport::{EnvelopeHandler, TcpServer, TcpTransport};
+use node_mesh::{ConsultConfig, PeerDirectory};
+use node_policy::PolicyEngine;
+use node_proto::common::*;
+use node_proto::mesh::*;
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
 use node_storage::sqlite_views;
@@ -20,6 +26,8 @@ struct NodeConfig {
     data_dir: PathBuf,
     #[serde(default = "default_listen")]
     listen: String,
+    #[serde(default = "default_mesh_port")]
+    mesh_port: u16,
     #[serde(default = "default_backend")]
     backend: String,
     #[serde(default)]
@@ -28,6 +36,10 @@ struct NodeConfig {
     ollama_model: Option<String>,
     #[serde(default = "default_admin_token")]
     admin_token: String,
+    #[serde(default = "default_true")]
+    enable_mdns: bool,
+    #[serde(default = "default_repl_interval")]
+    replication_interval_secs: u64,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -36,11 +48,20 @@ fn default_data_dir() -> PathBuf {
 fn default_listen() -> String {
     "127.0.0.1:9900".into()
 }
+fn default_mesh_port() -> u16 {
+    9901
+}
 fn default_backend() -> String {
     "mock".into()
 }
 fn default_admin_token() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_repl_interval() -> u64 {
+    30
 }
 
 impl Default for NodeConfig {
@@ -48,10 +69,13 @@ impl Default for NodeConfig {
         Self {
             data_dir: default_data_dir(),
             listen: default_listen(),
+            mesh_port: default_mesh_port(),
             backend: default_backend(),
             ollama_endpoint: None,
             ollama_model: None,
             admin_token: default_admin_token(),
+            enable_mdns: true,
+            replication_interval_secs: 30,
         }
     }
 }
@@ -84,6 +108,196 @@ fn create_backend(config: &NodeConfig) -> Arc<dyn InferenceBackend> {
     }
 }
 
+fn build_envelope_handler(node_id: String, backend: Arc<dyn InferenceBackend>) -> EnvelopeHandler {
+    Arc::new(move |env: Envelope| -> Option<Envelope> {
+        match env.body {
+            Some(envelope::Body::Ping(ping)) => Some(Envelope {
+                msg_id: format!("{}-pong", env.msg_id),
+                r#type: MsgType::Pong as i32,
+                from_node_id: Some(NodeId {
+                    value: node_id.clone(),
+                }),
+                body: Some(envelope::Body::Pong(Pong { nonce: ping.nonce })),
+                ..Default::default()
+            }),
+            Some(envelope::Body::Hello(_)) => Some(Envelope {
+                msg_id: format!("{}-hello-ack", env.msg_id),
+                r#type: MsgType::Hello as i32,
+                from_node_id: Some(NodeId {
+                    value: node_id.clone(),
+                }),
+                body: Some(envelope::Body::Hello(Hello {
+                    capabilities: vec!["inference".into(), "storage".into()],
+                    version: env!("CARGO_PKG_VERSION").into(),
+                })),
+                ..Default::default()
+            }),
+            Some(envelope::Body::Ask(ask)) => {
+                if env.ttl_hops == 0 {
+                    return Some(Envelope {
+                        msg_id: format!("{}-refuse", env.msg_id),
+                        r#type: MsgType::Refuse as i32,
+                        from_node_id: Some(NodeId {
+                            value: node_id.clone(),
+                        }),
+                        body: Some(envelope::Body::Refuse(Refuse {
+                            code: "TTL_EXPIRED".into(),
+                            message: "ttl_hops exhausted".into(),
+                        })),
+                        ..Default::default()
+                    });
+                }
+
+                let be = backend.clone();
+                let nid = node_id.clone();
+                let question = ask.question.clone();
+
+                let rt = tokio::runtime::Handle::try_current();
+                if let Ok(handle) = rt {
+                    let result = std::thread::spawn(move || {
+                        handle.block_on(async {
+                            let req = node_ai::GenerateRequest {
+                                prompt: format!("Answer concisely: {question}"),
+                                system: Some("You are a helpful AI assistant.".into()),
+                                max_tokens: 256,
+                                ..Default::default()
+                            };
+                            be.generate(req).await.ok()
+                        })
+                    })
+                    .join()
+                    .ok()
+                    .flatten();
+
+                    if let Some(resp) = result {
+                        Some(Envelope {
+                            msg_id: format!("{}-answer", env.msg_id),
+                            r#type: MsgType::Answer as i32,
+                            from_node_id: Some(NodeId { value: nid }),
+                            body: Some(envelope::Body::Answer(Answer {
+                                answer: resp.text,
+                                confidence: 0.6,
+                                evidence_refs: vec![],
+                                warnings: vec![],
+                            })),
+                            ..Default::default()
+                        })
+                    } else {
+                        Some(Envelope {
+                            msg_id: format!("{}-refuse", env.msg_id),
+                            r#type: MsgType::Refuse as i32,
+                            from_node_id: Some(NodeId { value: nid }),
+                            body: Some(envelope::Body::Refuse(Refuse {
+                                code: "INFERENCE_FAILED".into(),
+                                message: "could not generate answer".into(),
+                            })),
+                            ..Default::default()
+                        })
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
+async fn replication_loop(state: Arc<AppState>, policy: Arc<PolicyEngine>, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+
+        let peers: Vec<(String, String, u16)> = {
+            let dir = state.peer_dir.read().await;
+            dir.reachable_peers()
+                .iter()
+                .map(|p| (p.node_id.clone(), p.address.clone(), p.port))
+                .collect()
+        };
+
+        if peers.is_empty() {
+            continue;
+        }
+
+        let transport = match &state.transport {
+            Some(t) => t.clone(),
+            None => continue,
+        };
+
+        for (peer_id, address, port) in &peers {
+            let ping = Envelope {
+                msg_id: uuid::Uuid::new_v4().to_string(),
+                r#type: MsgType::Ping as i32,
+                from_node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                body: Some(envelope::Body::Ping(Ping { nonce: 1 })),
+                ..Default::default()
+            };
+
+            match transport.request(address, *port, &ping).await {
+                Ok(resp) => {
+                    if resp.r#type == MsgType::Pong as i32 {
+                        tracing::debug!("peer {peer_id} alive (pong received)");
+                        let mut dir = state.peer_dir.write().await;
+                        if let Some(peer) = dir.get_mut(peer_id) {
+                            peer.mark_alive();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("peer {peer_id} unreachable: {e}");
+                    let mut dir = state.peer_dir.write().await;
+                    if let Some(peer) = dir.get_mut(peer_id) {
+                        peer.mark_suspect();
+                    }
+                }
+            }
+        }
+
+        // Pull-based replication with first alive peer
+        let event_log = state.event_log.read().await;
+        let local_gossip =
+            node_repl::build_gossip_meta(&state.node_id, "public", &event_log, &state.cas, &[]);
+        drop(event_log);
+
+        let local_gossip = match local_gossip {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("failed to build gossip: {e}");
+                continue;
+            }
+        };
+
+        for (peer_id, address, port) in &peers {
+            let gossip_ask = Envelope {
+                msg_id: uuid::Uuid::new_v4().to_string(),
+                r#type: MsgType::Hello as i32,
+                from_node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                body: Some(envelope::Body::Hello(Hello {
+                    capabilities: vec!["replication".into()],
+                    version: format!("events:{}", local_gossip.segments.len()),
+                })),
+                ..Default::default()
+            };
+
+            match transport.request(address, *port, &gossip_ask).await {
+                Ok(_resp) => {
+                    tracing::debug!("replication handshake with {peer_id} complete");
+                }
+                Err(e) => {
+                    tracing::debug!("replication handshake with {peer_id} failed: {e}");
+                }
+            }
+        }
+
+        let _ = &policy;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -95,9 +309,10 @@ async fn main() -> Result<()> {
     let config = load_config()?;
 
     tracing::info!("MeshMind starting...");
-    tracing::info!("data_dir = {:?}", config.data_dir);
-    tracing::info!("listen   = {}", config.listen);
-    tracing::info!("backend  = {}", config.backend);
+    tracing::info!("data_dir   = {:?}", config.data_dir);
+    tracing::info!("listen     = {}", config.listen);
+    tracing::info!("mesh_port  = {}", config.mesh_port);
+    tracing::info!("backend    = {}", config.backend);
 
     std::fs::create_dir_all(&config.data_dir)?;
 
@@ -107,9 +322,15 @@ async fn main() -> Result<()> {
     let _conn = sqlite_views::open_db(&db_path).context("open SQLite")?;
 
     let backend = create_backend(&config);
-    let node_id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    // Load seed data if available
+    // Generate node identity (dev CA for now)
+    let ca = DevCa::generate().context("generate dev CA")?;
+    let identity = ca
+        .generate_node_cert("meshmind-node")
+        .context("generate node cert")?;
+    let node_id = identity.node_id.clone();
+
+    // Load seed data
     let seed_dir = PathBuf::from("seed/public");
     if seed_dir.exists() {
         match node_app::load_seed_data(&seed_dir, &mut event_log, &cas, &db_path, &node_id) {
@@ -119,25 +340,77 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("node_id  = {}", node_id);
-    tracing::info!("admin_token = {}", config.admin_token);
+    tracing::info!("node_id    = {}", node_id);
+    tracing::info!("admin_token= {}", config.admin_token);
+
+    // Build TCP+mTLS transport for peer communication
+    let transport: Arc<dyn node_mesh::transport::Transport> =
+        Arc::new(TcpTransport::new(&identity, &ca.cert_pem).context("create TCP transport")?);
+
+    let peer_dir = Arc::new(RwLock::new(PeerDirectory::new()));
 
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
         cas,
         db_path,
         peer_dir: RwLock::new(PeerDirectory::new()),
-        backend,
-        node_id,
+        backend: backend.clone(),
+        transport: Some(transport),
+        consult_config: ConsultConfig::default(),
+        node_id: node_id.clone(),
         admin_token: config.admin_token,
     });
 
-    let app = node_api::build_router(state);
+    // Start TCP mesh server
+    let mesh_server = TcpServer::bind(&identity, &ca.cert_pem, "0.0.0.0", config.mesh_port)
+        .await
+        .context("bind mesh server")?;
+    let actual_mesh_port = mesh_server.local_port().unwrap_or(config.mesh_port);
+    tracing::info!("mesh server listening on 0.0.0.0:{actual_mesh_port}");
 
+    let handler = build_envelope_handler(node_id.clone(), backend);
+    tokio::spawn(async move {
+        if let Err(e) = mesh_server.serve(handler).await {
+            tracing::error!("mesh server error: {e}");
+        }
+    });
+
+    // Start mDNS discovery
+    if config.enable_mdns {
+        match mdns_sd::ServiceDaemon::new() {
+            Ok(daemon) => {
+                if let Err(e) = node_mesh::register_service(&daemon, &node_id, actual_mesh_port) {
+                    tracing::warn!("mDNS register failed: {e}");
+                }
+
+                match node_mesh::start_discovery(&daemon, peer_dir.clone(), node_id.clone()) {
+                    Ok(handle) => {
+                        tracing::info!("mDNS discovery started");
+                        tokio::spawn(async move {
+                            handle.await.ok();
+                        });
+                    }
+                    Err(e) => tracing::warn!("mDNS browse failed: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("mDNS daemon failed: {e}"),
+        }
+    }
+
+    // Start replication loop
+    let policy = Arc::new(PolicyEngine::with_defaults());
+    let repl_state = state.clone();
+    let repl_interval = Duration::from_secs(config.replication_interval_secs);
+    tokio::spawn(async move {
+        replication_loop(repl_state, policy, repl_interval).await;
+    });
+
+    // Start HTTP API
+    let app = node_api::build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.listen)
         .await
         .with_context(|| format!("bind to {}", config.listen))?;
-    tracing::info!("listening on {}", config.listen);
+    tracing::info!("HTTP API listening on {}", config.listen);
 
     axum::serve(listener, app).await.context("serve")?;
 
