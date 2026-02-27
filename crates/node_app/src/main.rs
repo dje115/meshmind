@@ -101,13 +101,23 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&config.data_dir)?;
 
-    let event_log = EventLog::open(&config.data_dir).context("open event log")?;
+    let mut event_log = EventLog::open(&config.data_dir).context("open event log")?;
     let cas = CasStore::open(&config.data_dir).context("open CAS")?;
     let db_path = config.data_dir.join("sqlite").join("meshmind.db");
     let _conn = sqlite_views::open_db(&db_path).context("open SQLite")?;
 
     let backend = create_backend(&config);
     let node_id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    // Load seed data if available
+    let seed_dir = PathBuf::from("seed/public");
+    if seed_dir.exists() {
+        match node_app::load_seed_data(&seed_dir, &mut event_log, &cas, &db_path, &node_id) {
+            Ok(n) if n > 0 => tracing::info!("loaded {n} seed items"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("seed loading failed: {e}"),
+        }
+    }
 
     tracing::info!("node_id  = {}", node_id);
     tracing::info!("admin_token = {}", config.admin_token);

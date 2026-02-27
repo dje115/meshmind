@@ -1,0 +1,74 @@
+[
+  {
+    "event_id": "seed-case-001",
+    "title": "DNS resolution failure causing service outage",
+    "summary": "The internal DNS resolver failed to resolve api.internal.corp after a network config change. Root cause: stale DHCP lease pushed wrong DNS servers to containers. Fix: pin DNS config in pod spec, add health check for DNS resolution.",
+    "tags": ["dns", "networking", "outage", "kubernetes"]
+  },
+  {
+    "event_id": "seed-case-002",
+    "title": "Memory leak in Java service after 24h uptime",
+    "summary": "Java heap grows unbounded due to a static HashMap caching user sessions without eviction. The WeakHashMap replacement resolved the leak. Monitoring: set heap usage alert at 80% of Xmx.",
+    "tags": ["java", "memory-leak", "monitoring", "performance"]
+  },
+  {
+    "event_id": "seed-case-003",
+    "title": "TLS certificate expired on API gateway",
+    "summary": "Production API gateway TLS cert expired causing 502 errors for all HTTPS traffic. Root cause: cert-manager renewal job was paused during maintenance window and never re-enabled. Fix: added monitoring for cert expiry < 14 days.",
+    "tags": ["tls", "certificate", "outage", "cert-manager"]
+  },
+  {
+    "event_id": "seed-case-004",
+    "title": "Kubernetes pod CrashLoopBackOff due to OOM",
+    "summary": "Payment service pod enters CrashLoopBackOff every peak hour. Container memory limit set to 256Mi but service needs 512Mi under load. Fix: increased memory limit and added HPA for horizontal scaling.",
+    "tags": ["kubernetes", "oom", "scaling", "resources"]
+  },
+  {
+    "event_id": "seed-case-005",
+    "title": "Database connection pool exhaustion",
+    "summary": "PostgreSQL connection pool (max 20) exhausted during Black Friday traffic spike. Queries backed up causing cascading timeouts. Fix: tuned pool to max 50, added PgBouncer as connection pooler, added circuit breaker.",
+    "tags": ["database", "postgresql", "connection-pool", "scaling"]
+  },
+  {
+    "event_id": "seed-case-006",
+    "title": "Redis cluster split-brain after network partition",
+    "summary": "Redis Sentinel promoted a new primary during a 30-second network partition. When connectivity restored, two primaries existed causing data divergence. Fix: configured CLUSTER-REQUIRE-FULL-COVERAGE and reduced sentinel down-after-milliseconds.",
+    "tags": ["redis", "split-brain", "network-partition", "high-availability"]
+  },
+  {
+    "event_id": "seed-case-007",
+    "title": "CI/CD pipeline failing on npm audit vulnerability",
+    "summary": "Build pipeline blocked by high-severity lodash prototype pollution (CVE-2021-23337). Transitive dependency from legacy charting library. Fix: overrode lodash version in package.json resolutions, scheduled library upgrade.",
+    "tags": ["ci-cd", "security", "npm", "vulnerability"]
+  },
+  {
+    "event_id": "seed-case-008",
+    "title": "Slow API responses due to N+1 query pattern",
+    "summary": "GET /users endpoint took 12s for 100 users. Each user triggered separate queries for roles, permissions, and team data. Fix: replaced with eager loading using JOINs. Response time dropped to 200ms.",
+    "tags": ["performance", "database", "n-plus-one", "api"]
+  },
+  {
+    "event_id": "seed-case-009",
+    "title": "Docker image size bloated to 2.5GB",
+    "summary": "Development Docker image grew to 2.5GB due to build tools, test data, and debug symbols in final image. Fix: multi-stage build, .dockerignore for test fixtures, alpine base for runtime stage. Final size: 180MB.",
+    "tags": ["docker", "optimization", "container", "build"]
+  },
+  {
+    "event_id": "seed-case-010",
+    "title": "Terraform state lock conflict in team workflow",
+    "summary": "Two engineers ran terraform apply simultaneously, causing state lock conflict and partial infrastructure deployment. Fix: migrated state to S3 backend with DynamoDB locking, added CI-only apply workflow with approval gates.",
+    "tags": ["terraform", "infrastructure", "state-management", "ci-cd"]
+  },
+  {
+    "event_id": "seed-case-011",
+    "title": "gRPC deadline exceeded errors under load",
+    "summary": "gRPC calls between microservices returning DEADLINE_EXCEEDED at 95th percentile during peak. Default 5s deadline too tight for chain of 4 downstream calls. Fix: increased deadline to 15s, added retry with exponential backoff, circuit breaker on slow paths.",
+    "tags": ["grpc", "microservices", "timeout", "performance"]
+  },
+  {
+    "event_id": "seed-case-012",
+    "title": "Log volume causing disk pressure on nodes",
+    "summary": "Application debug logging at 50GB/day filled /var/log on Kubernetes nodes. Fix: changed default log level to INFO, added structured logging with sampling for high-volume paths, configured log rotation at 100MB.",
+    "tags": ["logging", "disk", "kubernetes", "observability"]
+  }
+]

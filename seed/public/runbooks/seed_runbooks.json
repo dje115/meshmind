@@ -1,0 +1,32 @@
+[
+  {
+    "artifact_id": "seed-runbook-001",
+    "title": "Runbook: Responding to DNS resolution failures",
+    "content": "1. Verify DNS resolution: nslookup <domain> or dig <domain>\n2. Check /etc/resolv.conf for correct nameservers\n3. Test from inside the pod: kubectl exec -it <pod> -- nslookup <domain>\n4. Check CoreDNS pods: kubectl -n kube-system get pods -l k8s-app=kube-dns\n5. Review CoreDNS logs: kubectl -n kube-system logs -l k8s-app=kube-dns\n6. If DHCP-assigned DNS, pin DNS in pod spec with dnsConfig\n7. Escalate to network team if upstream DNS is unreachable",
+    "tags": ["dns", "networking", "runbook", "kubernetes"]
+  },
+  {
+    "artifact_id": "seed-runbook-002",
+    "title": "Runbook: Diagnosing Java memory leaks",
+    "content": "1. Check current heap: jmap -heap <pid>\n2. Take heap dump: jmap -dump:live,format=b,file=heap.hprof <pid>\n3. Analyze with Eclipse MAT or VisualVM\n4. Look for: static collections, event listeners not deregistered, thread-local variables\n5. Monitor with: -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp\n6. Consider WeakHashMap or Caffeine cache with eviction for caches\n7. Set alerts on JVM heap usage at 80% of Xmx",
+    "tags": ["java", "memory-leak", "runbook", "jvm"]
+  },
+  {
+    "artifact_id": "seed-runbook-003",
+    "title": "Runbook: TLS certificate renewal and monitoring",
+    "content": "1. Check cert expiry: openssl x509 -enddate -noout -in cert.pem\n2. Check remote: openssl s_client -connect host:443 | openssl x509 -enddate -noout\n3. For cert-manager: kubectl get certificates -A\n4. Force renewal: kubectl cert-manager renew <cert-name>\n5. Verify issuer is healthy: kubectl get clusterissuers\n6. Set monitoring alert for certs expiring within 14 days\n7. Post-incident: ensure renewal CronJobs are not paused",
+    "tags": ["tls", "certificate", "runbook", "cert-manager", "security"]
+  },
+  {
+    "artifact_id": "seed-runbook-004",
+    "title": "Runbook: Kubernetes OOM troubleshooting",
+    "content": "1. Check events: kubectl describe pod <pod> | grep OOM\n2. Check resource usage: kubectl top pod <pod>\n3. Review limits: kubectl get pod <pod> -o jsonpath='{.spec.containers[*].resources}'\n4. Check node pressure: kubectl describe node | grep -A5 Conditions\n5. If limit too low: increase memory limit in deployment spec\n6. If leak: take heap dump before restart, analyze for growing objects\n7. Consider VPA (Vertical Pod Autoscaler) for auto-tuning limits\n8. Add HPA for horizontal scaling if load-dependent",
+    "tags": ["kubernetes", "oom", "runbook", "resources", "scaling"]
+  },
+  {
+    "artifact_id": "seed-runbook-005",
+    "title": "Runbook: Database connection pool tuning",
+    "content": "1. Check current connections: SELECT count(*) FROM pg_stat_activity;\n2. Check pool config: max_connections in postgresql.conf\n3. Identify idle connections: SELECT * FROM pg_stat_activity WHERE state = 'idle';\n4. Kill long-running queries: SELECT pg_terminate_backend(<pid>);\n5. Tune application pool: set max to (core_count * 2) + disk_spindles\n6. Consider PgBouncer for connection multiplexing\n7. Add circuit breaker to prevent cascading failures\n8. Alert on pool utilization > 80%",
+    "tags": ["database", "postgresql", "connection-pool", "runbook", "performance"]
+  }
+]
