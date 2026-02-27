@@ -226,6 +226,19 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
             | Payload::DataSharedRecorded(_) => {
                 // Audit entry already written above
             }
+            // Discovery, ingestion, dataset, federated events — audit only for now
+            Payload::DataSourceDiscovered(_)
+            | Payload::DataSourceClassified(_)
+            | Payload::DataSourceApproved(_)
+            | Payload::IngestStarted(_)
+            | Payload::IngestCompleted(_)
+            | Payload::DatasetManifestCreated(_)
+            | Payload::TrainDeltaPublished(_)
+            | Payload::TrainDeltaApplied(_)
+            | Payload::FederatedRoundStarted(_)
+            | Payload::FederatedRoundCompleted(_) => {
+                // Audit entry already written above; view projections added in later phases
+            }
         }
     }
 
@@ -291,6 +304,34 @@ fn event_summary(event: &EventEnvelope) -> String {
         }
         Some(Payload::ToolInvocationRecorded(ti)) => format!("tool invoked: {}", ti.tool_name),
         Some(Payload::DataSharedRecorded(ds)) => format!("data shared: {}", ds.share_id),
+        Some(Payload::DataSourceDiscovered(d)) => {
+            format!("data source discovered: {}", d.display_name)
+        }
+        Some(Payload::DataSourceClassified(c)) => {
+            format!("data source classified: {}", c.source_id)
+        }
+        Some(Payload::DataSourceApproved(a)) => {
+            format!("data source approved: {}", a.source_id)
+        }
+        Some(Payload::IngestStarted(i)) => format!("ingest started: {}", i.ingest_id),
+        Some(Payload::IngestCompleted(i)) => {
+            format!("ingest completed: {} rows={}", i.ingest_id, i.rows_ingested)
+        }
+        Some(Payload::DatasetManifestCreated(dm)) => {
+            format!("dataset manifest: {}", dm.manifest_id)
+        }
+        Some(Payload::TrainDeltaPublished(td)) => {
+            format!("train delta published: {}", td.delta_id)
+        }
+        Some(Payload::TrainDeltaApplied(td)) => {
+            format!("train delta applied: {}", td.delta_id)
+        }
+        Some(Payload::FederatedRoundStarted(fr)) => {
+            format!("federated round started: {}", fr.round_id)
+        }
+        Some(Payload::FederatedRoundCompleted(fr)) => {
+            format!("federated round completed: {}", fr.round_id)
+        }
         None => "unknown event".to_string(),
     }
 }

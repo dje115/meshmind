@@ -8,6 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/mesh.proto",
         "../../proto/research.proto",
         "../../proto/training.proto",
+        "../../proto/datasets.proto",
+        "../../proto/federated.proto",
     ];
 
     prost_build::Config::new().compile_protos(protos, &["../../proto/"])?;

@@ -11,7 +11,12 @@ members = [
     "crates/node_ai_ollama",
     "crates/node_ai_mock",
     "crates/node_research",
+    "crates/node_discovery",
+    "crates/node_connectors",
+    "crates/node_ingest",
+    "crates/node_datasets",
     "crates/node_trainer",
+    "crates/node_federated",
     "crates/node_api",
     "crates/node_app",
 ]
@@ -84,6 +89,11 @@ node_ai = { path = "crates/node_ai" }
 node_ai_ollama = { path = "crates/node_ai_ollama" }
 node_ai_mock = { path = "crates/node_ai_mock" }
 node_research = { path = "crates/node_research" }
+node_discovery = { path = "crates/node_discovery" }
+node_connectors = { path = "crates/node_connectors" }
+node_ingest = { path = "crates/node_ingest" }
+node_datasets = { path = "crates/node_datasets" }
 node_trainer = { path = "crates/node_trainer" }
+node_federated = { path = "crates/node_federated" }
 node_api = { path = "crates/node_api" }
 node_app = { path = "crates/node_app" }

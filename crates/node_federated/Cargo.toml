@@ -1,0 +1,20 @@
+[package]
+name = "node_federated"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+node_storage = { workspace = true }
+node_policy = { workspace = true }
+node_mesh = { workspace = true }
+node_trainer = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

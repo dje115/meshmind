@@ -32,6 +32,14 @@ pub mod training {
     include!(concat!(env!("OUT_DIR"), "/meshmind.training.rs"));
 }
 
+pub mod datasets {
+    include!(concat!(env!("OUT_DIR"), "/meshmind.datasets.rs"));
+}
+
+pub mod federated {
+    include!(concat!(env!("OUT_DIR"), "/meshmind.federated.rs"));
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
@@ -41,6 +49,8 @@ mod tests {
         assert!(!encoded.is_empty(), "encoded message should not be empty");
         M::decode(encoded.as_slice()).expect("decode should succeed")
     }
+
+    // ===== Common types =====
 
     #[test]
     fn common_types_roundtrip() {
@@ -89,6 +99,8 @@ mod tests {
         assert_eq!(Sensitivity::Restricted as i32, 3);
     }
 
+    // ===== CAS types =====
+
     #[test]
     fn cas_manifest_roundtrip() {
         use super::cas::*;
@@ -114,6 +126,8 @@ mod tests {
         };
         assert_eq!(roundtrip(&manifest), manifest);
     }
+
+    // ===== Event types =====
 
     #[test]
     fn event_envelope_case_created() {
@@ -372,6 +386,764 @@ mod tests {
         assert_eq!(roundtrip(&env), env);
     }
 
+    // ===== NEW: Data discovery event payloads =====
+
+    #[test]
+    fn event_data_source_discovered() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-dsd-1".into(),
+            r#type: EventType::DataSourceDiscovered as i32,
+            payload: Some(event_envelope::Payload::DataSourceDiscovered(
+                DataSourceDiscovered {
+                    source_id: "src-001".into(),
+                    connector_type: ConnectorType::SqliteDb as i32,
+                    path_or_uri: "/data/inventory.db".into(),
+                    display_name: "Inventory Database".into(),
+                    estimated_size_bytes: 5_000_000,
+                    estimated_tables: 8,
+                    discovered_at: Some(Timestamp {
+                        unix_ms: 1700000000000,
+                    }),
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&env);
+        match decoded.payload {
+            Some(event_envelope::Payload::DataSourceDiscovered(d)) => {
+                assert_eq!(d.source_id, "src-001");
+                assert_eq!(d.connector_type, ConnectorType::SqliteDb as i32);
+                assert_eq!(d.estimated_tables, 8);
+            }
+            other => panic!("expected DataSourceDiscovered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_data_source_classified() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-dsc-1".into(),
+            r#type: EventType::DataSourceClassified as i32,
+            payload: Some(event_envelope::Payload::DataSourceClassified(
+                DataSourceClassified {
+                    source_id: "src-001".into(),
+                    schema_snapshot_ref: Some(HashRef {
+                        sha256: "schema-hash".into(),
+                    }),
+                    suggested_sensitivity: Sensitivity::Internal as i32,
+                    pii_detected: true,
+                    secrets_detected: false,
+                    total_columns: 24,
+                    restricted_columns: 3,
+                    classification_summary: "PII in email, phone, address columns".into(),
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&env);
+        match decoded.payload {
+            Some(event_envelope::Payload::DataSourceClassified(c)) => {
+                assert!(c.pii_detected);
+                assert_eq!(c.restricted_columns, 3);
+            }
+            other => panic!("expected DataSourceClassified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_data_source_approved() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-dsa-1".into(),
+            r#type: EventType::DataSourceApproved as i32,
+            payload: Some(event_envelope::Payload::DataSourceApproved(
+                DataSourceApproved {
+                    source_id: "src-001".into(),
+                    source_profile_ref: Some(HashRef {
+                        sha256: "profile-hash".into(),
+                    }),
+                    approved_by: "admin".into(),
+                    approved_at: Some(Timestamp {
+                        unix_ms: 1700000100000,
+                    }),
+                    allowed_tables: vec!["orders".into(), "products".into()],
+                    row_limit: 10000,
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&env);
+        match decoded.payload {
+            Some(event_envelope::Payload::DataSourceApproved(a)) => {
+                assert_eq!(a.allowed_tables.len(), 2);
+                assert_eq!(a.row_limit, 10000);
+            }
+            other => panic!("expected DataSourceApproved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_ingest_started_completed() {
+        use super::common::*;
+        use super::events::*;
+
+        let started = EventEnvelope {
+            event_id: "evt-is-1".into(),
+            r#type: EventType::IngestStarted as i32,
+            payload: Some(event_envelope::Payload::IngestStarted(IngestStarted {
+                ingest_id: "ing-001".into(),
+                source_id: "src-001".into(),
+                connector_type: ConnectorType::SqliteDb as i32,
+                source_profile_ref: Some(HashRef {
+                    sha256: "profile-hash".into(),
+                }),
+                started_at: Some(Timestamp {
+                    unix_ms: 1700000200000,
+                }),
+            })),
+            ..Default::default()
+        };
+        assert_eq!(roundtrip(&started), started);
+
+        let completed = EventEnvelope {
+            event_id: "evt-ic-1".into(),
+            r#type: EventType::IngestCompleted as i32,
+            payload: Some(event_envelope::Payload::IngestCompleted(IngestCompleted {
+                ingest_id: "ing-001".into(),
+                source_id: "src-001".into(),
+                success: true,
+                rows_ingested: 5000,
+                documents_created: 5000,
+                facts_created: 150,
+                bytes_stored: 2_500_000,
+                duration_ms: 12000,
+                notes: "all tables ingested".into(),
+            })),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&completed);
+        match decoded.payload {
+            Some(event_envelope::Payload::IngestCompleted(c)) => {
+                assert!(c.success);
+                assert_eq!(c.rows_ingested, 5000);
+                assert_eq!(c.documents_created, 5000);
+            }
+            other => panic!("expected IngestCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_dataset_manifest_created() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-dm-1".into(),
+            r#type: EventType::DatasetManifestCreated as i32,
+            payload: Some(event_envelope::Payload::DatasetManifestCreated(
+                DatasetManifestCreated {
+                    manifest_id: "dm-001".into(),
+                    manifest_ref: Some(HashRef {
+                        sha256: "manifest-hash".into(),
+                    }),
+                    source_id: "src-001".into(),
+                    preset: "public_shareable_only".into(),
+                    item_count: 5000,
+                    total_bytes: 2_500_000,
+                },
+            )),
+            ..Default::default()
+        };
+        assert_eq!(roundtrip(&env), env);
+    }
+
+    // ===== NEW: Federated learning event payloads =====
+
+    #[test]
+    fn event_train_delta_published() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-tdp-1".into(),
+            r#type: EventType::TrainDeltaPublished as i32,
+            payload: Some(event_envelope::Payload::TrainDeltaPublished(
+                TrainDeltaPublished {
+                    delta_id: "delta-001".into(),
+                    model_id: "router-v1".into(),
+                    base_version: "v2".into(),
+                    delta_ref: Some(HashRef {
+                        sha256: "delta-hash".into(),
+                    }),
+                    metrics: vec![TrainMetric {
+                        name: "loss".into(),
+                        value: 0.04,
+                    }],
+                    from_node_id: Some(NodeId {
+                        value: "node-3".into(),
+                    }),
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&env);
+        match decoded.payload {
+            Some(event_envelope::Payload::TrainDeltaPublished(d)) => {
+                assert_eq!(d.delta_id, "delta-001");
+                assert_eq!(d.base_version, "v2");
+            }
+            other => panic!("expected TrainDeltaPublished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_train_delta_applied() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-tda-1".into(),
+            r#type: EventType::TrainDeltaApplied as i32,
+            payload: Some(event_envelope::Payload::TrainDeltaApplied(
+                TrainDeltaApplied {
+                    delta_id: "delta-001".into(),
+                    model_id: "router-v1".into(),
+                    resulting_version: "v3".into(),
+                    applied_by: Some(NodeId {
+                        value: "node-1".into(),
+                    }),
+                    metrics: vec![TrainMetric {
+                        name: "f1".into(),
+                        value: 0.96,
+                    }],
+                },
+            )),
+            ..Default::default()
+        };
+        assert_eq!(roundtrip(&env), env);
+    }
+
+    #[test]
+    fn event_federated_round_started() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-frs-1".into(),
+            r#type: EventType::FederatedRoundStarted as i32,
+            payload: Some(event_envelope::Payload::FederatedRoundStarted(
+                FederatedRoundStarted {
+                    round_id: "round-001".into(),
+                    model_id: "router-v1".into(),
+                    round_number: 1,
+                    expected_participants: 3,
+                    coordinator: Some(NodeId {
+                        value: "node-1".into(),
+                    }),
+                    started_at: Some(Timestamp {
+                        unix_ms: 1700000300000,
+                    }),
+                },
+            )),
+            ..Default::default()
+        };
+        assert_eq!(roundtrip(&env), env);
+    }
+
+    #[test]
+    fn event_federated_round_completed() {
+        use super::common::*;
+        use super::events::*;
+
+        let env = EventEnvelope {
+            event_id: "evt-frc-1".into(),
+            r#type: EventType::FederatedRoundCompleted as i32,
+            payload: Some(event_envelope::Payload::FederatedRoundCompleted(
+                FederatedRoundCompleted {
+                    round_id: "round-001".into(),
+                    model_id: "router-v1".into(),
+                    round_number: 1,
+                    actual_participants: 3,
+                    success: true,
+                    aggregate_metrics: vec![
+                        TrainMetric {
+                            name: "avg_loss".into(),
+                            value: 0.035,
+                        },
+                        TrainMetric {
+                            name: "avg_f1".into(),
+                            value: 0.97,
+                        },
+                    ],
+                    resulting_model_ref: Some(HashRef {
+                        sha256: "agg-model-hash".into(),
+                    }),
+                    notes: "all participants contributed".into(),
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&env);
+        match decoded.payload {
+            Some(event_envelope::Payload::FederatedRoundCompleted(c)) => {
+                assert!(c.success);
+                assert_eq!(c.actual_participants, 3);
+                assert_eq!(c.aggregate_metrics.len(), 2);
+            }
+            other => panic!("expected FederatedRoundCompleted, got {other:?}"),
+        }
+    }
+
+    // ===== NEW: datasets.proto types =====
+
+    #[test]
+    fn datasets_discovered_source_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let src = DiscoveredSource {
+            source_id: "src-csv-1".into(),
+            connector_type: "csv_folder".into(),
+            path_or_uri: "/data/exports/sales".into(),
+            display_name: "Sales Exports".into(),
+            estimated_size_bytes: 10_000_000,
+            estimated_tables: 5,
+            discovered_at: Some(Timestamp {
+                unix_ms: 1700000000000,
+            }),
+            metadata: [("format".into(), "csv".into())].into(),
+        };
+        assert_eq!(roundtrip(&src), src);
+    }
+
+    #[test]
+    fn datasets_column_classification_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let cc = ColumnClassification {
+            table_name: "customers".into(),
+            column_name: "email".into(),
+            data_type: "TEXT".into(),
+            classification: ColumnClass::Pii as i32,
+            suggested_sensitivity: Sensitivity::Restricted as i32,
+            confidence: 0.95,
+            pattern_matched: "email_pattern".into(),
+            redact_by_default: true,
+        };
+        assert_eq!(roundtrip(&cc), cc);
+    }
+
+    #[test]
+    fn datasets_schema_snapshot_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let snapshot = SchemaSnapshot {
+            source_id: "src-001".into(),
+            connector_type: "sqlite".into(),
+            tables: vec![TableSchema {
+                table_name: "orders".into(),
+                columns: vec![
+                    ColumnDef {
+                        name: "id".into(),
+                        data_type: "INTEGER".into(),
+                        nullable: false,
+                        is_primary_key: true,
+                    },
+                    ColumnDef {
+                        name: "customer_email".into(),
+                        data_type: "TEXT".into(),
+                        nullable: true,
+                        is_primary_key: false,
+                    },
+                ],
+                row_count_estimate: 50000,
+                size_bytes_estimate: 2_000_000,
+            }],
+            column_classifications: vec![ColumnClassification {
+                table_name: "orders".into(),
+                column_name: "customer_email".into(),
+                data_type: "TEXT".into(),
+                classification: ColumnClass::Pii as i32,
+                suggested_sensitivity: Sensitivity::Restricted as i32,
+                confidence: 0.95,
+                pattern_matched: "email".into(),
+                redact_by_default: true,
+            }],
+            inspected_at: Some(Timestamp {
+                unix_ms: 1700000050000,
+            }),
+            total_rows_estimate: 50000,
+        };
+        assert_eq!(roundtrip(&snapshot), snapshot);
+    }
+
+    #[test]
+    fn datasets_source_profile_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let profile = SourceProfile {
+            profile_id: "prof-001".into(),
+            source_id: "src-001".into(),
+            approved_by: "admin".into(),
+            approved_at: Some(Timestamp {
+                unix_ms: 1700000100000,
+            }),
+            table_rules: vec![TableRule {
+                table_name: "orders".into(),
+                allowed: true,
+                allowed_columns: vec!["id".into(), "product".into(), "amount".into()],
+                redacted_columns: vec!["customer_email".into()],
+                row_limit: 10000,
+                where_clause: "".into(),
+            }],
+            redaction_policy: Some(RedactionPolicy {
+                redact_pii: true,
+                redact_secrets: true,
+                additional_redact_columns: vec![],
+                redaction_method: "hash".into(),
+            }),
+            retention_policy: Some(RetentionPolicy {
+                max_age_days: 365,
+                max_size_bytes: 100_000_000,
+                keep_raw: false,
+            }),
+            row_limit: 10000,
+            allow_raw_retention: false,
+            allow_training: true,
+            max_sensitivity: Sensitivity::Internal as i32,
+        };
+        assert_eq!(roundtrip(&profile), profile);
+    }
+
+    #[test]
+    fn datasets_manifest_extended_roundtrip() {
+        use super::common::*;
+        use super::datasets;
+
+        let manifest = datasets::DatasetManifest {
+            manifest_id: "dm-ext-001".into(),
+            from_event_hash: Some(HashRef {
+                sha256: "from".into(),
+            }),
+            to_event_hash: Some(HashRef {
+                sha256: "to".into(),
+            }),
+            cas_objects: vec![HashRef {
+                sha256: "obj-a".into(),
+            }],
+            notes: vec!["extended manifest".into()],
+            source_id: "src-001".into(),
+            connector_type: "sqlite".into(),
+            preset: "public_shareable_only".into(),
+            schema_snapshot_ref: Some(HashRef {
+                sha256: "schema-hash".into(),
+            }),
+            redaction_rules_applied: vec![datasets::RedactionRule {
+                column_name: "email".into(),
+                method: "hash".into(),
+            }],
+            stats: Some(datasets::DatasetStats {
+                total_items: 5000,
+                total_bytes: 2_500_000,
+                tables_included: 2,
+                columns_included: 8,
+                columns_redacted: 1,
+            }),
+            created_at: Some(Timestamp {
+                unix_ms: 1700000200000,
+            }),
+        };
+        assert_eq!(roundtrip(&manifest), manifest);
+    }
+
+    #[test]
+    fn datasets_ingest_checkpoint_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let cp = IngestCheckpoint {
+            ingest_id: "ing-001".into(),
+            source_id: "src-001".into(),
+            table_name: "orders".into(),
+            last_row_offset: 5000,
+            last_event_hash: Some(HashRef {
+                sha256: "evt-hash".into(),
+            }),
+            updated_at: Some(Timestamp {
+                unix_ms: 1700000250000,
+            }),
+        };
+        assert_eq!(roundtrip(&cp), cp);
+    }
+
+    #[test]
+    fn datasets_ingest_batch_roundtrip() {
+        use super::common::*;
+        use super::datasets::*;
+
+        let batch = IngestBatch {
+            ingest_id: "ing-001".into(),
+            table_name: "orders".into(),
+            batch_index: 0,
+            row_offset: 0,
+            row_count: 100,
+            items: vec![IngestItem {
+                entity_id: "order-1".into(),
+                content_ref: Some(HashRef {
+                    sha256: "item-hash".into(),
+                }),
+                item_type: "document".into(),
+                attributes: [("title".into(), "Order #1".into())].into(),
+            }],
+        };
+        assert_eq!(roundtrip(&batch), batch);
+    }
+
+    // ===== NEW: federated.proto types =====
+
+    #[test]
+    fn federated_round_config_roundtrip() {
+        use super::common::*;
+        use super::federated::*;
+
+        let config = FederatedRoundConfig {
+            round_id: "round-001".into(),
+            model_id: "router-v1".into(),
+            round_number: 1,
+            min_participants: 2,
+            max_participants: 5,
+            deadline_seconds: 300,
+            aggregation_strategy: "fedavg".into(),
+            base_model_ref: Some(HashRef {
+                sha256: "base-model".into(),
+            }),
+            policy: Some(FederatedPolicy {
+                share_deltas: true,
+                share_aggregate_stats: true,
+                share_synthetic_examples: false,
+                max_delta_size_bytes: 10_000_000,
+                max_sensitivity: Sensitivity::Internal as i32,
+            }),
+        };
+        assert_eq!(roundtrip(&config), config);
+    }
+
+    #[test]
+    fn federated_model_delta_roundtrip() {
+        use super::common::*;
+        use super::federated::*;
+
+        let delta = ModelDelta {
+            delta_id: "delta-001".into(),
+            round_id: "round-001".into(),
+            model_id: "router-v1".into(),
+            base_version: "v2".into(),
+            delta_ref: Some(HashRef {
+                sha256: "delta-hash".into(),
+            }),
+            from_node: Some(NodeId {
+                value: "node-3".into(),
+            }),
+            training_samples: 500,
+            training_steps: 100,
+            metrics: vec![DeltaMetric {
+                name: "loss".into(),
+                value: 0.04,
+            }],
+            created_at: Some(Timestamp {
+                unix_ms: 1700000350000,
+            }),
+        };
+        assert_eq!(roundtrip(&delta), delta);
+    }
+
+    #[test]
+    fn federated_aggregate_result_roundtrip() {
+        use super::common::*;
+        use super::federated::*;
+
+        let result = AggregateResult {
+            round_id: "round-001".into(),
+            model_id: "router-v1".into(),
+            round_number: 1,
+            participants_count: 3,
+            deltas_applied: 3,
+            resulting_model_ref: Some(HashRef {
+                sha256: "agg-model".into(),
+            }),
+            aggregate_metrics: vec![
+                DeltaMetric {
+                    name: "avg_loss".into(),
+                    value: 0.035,
+                },
+                DeltaMetric {
+                    name: "avg_f1".into(),
+                    value: 0.97,
+                },
+            ],
+            promoted: true,
+            promotion_reason: "all gates passed".into(),
+            completed_at: Some(Timestamp {
+                unix_ms: 1700000400000,
+            }),
+        };
+        assert_eq!(roundtrip(&result), result);
+    }
+
+    #[test]
+    fn federated_round_summary_roundtrip() {
+        use super::common::*;
+        use super::federated::*;
+
+        let summary = FederatedRoundSummary {
+            round_id: "round-001".into(),
+            model_id: "router-v1".into(),
+            round_number: 1,
+            participants: vec![
+                RoundParticipant {
+                    node_id: Some(NodeId {
+                        value: "node-2".into(),
+                    }),
+                    status: ParticipantStatus::DeltaSubmitted as i32,
+                    delta_ref: Some(HashRef {
+                        sha256: "delta-2".into(),
+                    }),
+                    training_samples: 300,
+                    last_update: Some(Timestamp {
+                        unix_ms: 1700000360000,
+                    }),
+                },
+                RoundParticipant {
+                    node_id: Some(NodeId {
+                        value: "node-3".into(),
+                    }),
+                    status: ParticipantStatus::TimedOut as i32,
+                    delta_ref: None,
+                    training_samples: 0,
+                    last_update: Some(Timestamp {
+                        unix_ms: 1700000370000,
+                    }),
+                },
+            ],
+            result: None,
+        };
+        assert_eq!(roundtrip(&summary), summary);
+    }
+
+    // ===== Training proto extended =====
+
+    #[test]
+    fn training_types_roundtrip() {
+        use super::common::*;
+        use super::training::*;
+
+        let manifest = DatasetManifest {
+            manifest_id: "dm-001".into(),
+            from_event_hash: Some(HashRef {
+                sha256: "from".into(),
+            }),
+            to_event_hash: Some(HashRef {
+                sha256: "to".into(),
+            }),
+            cas_objects: vec![
+                HashRef {
+                    sha256: "obj-a".into(),
+                },
+                HashRef {
+                    sha256: "obj-b".into(),
+                },
+            ],
+            notes: vec!["cases only".into()],
+            source_id: "src-001".into(),
+            connector_type: "sqlite".into(),
+            preset: "public_shareable_only".into(),
+            schema_snapshot_ref: Some(HashRef {
+                sha256: "schema".into(),
+            }),
+            redaction_rules: vec!["email:hash".into()],
+            item_count: 5000,
+            total_bytes: 2_500_000,
+        };
+        assert_eq!(roundtrip(&manifest), manifest);
+
+        let config = TrainConfig {
+            job_id: "job-001".into(),
+            target: "router".into(),
+            max_steps: 500,
+            max_minutes: 5,
+            max_dataset_items: 1000,
+            max_threads: 4,
+            dataset_preset: "public_shareable_only".into(),
+            dataset_manifest_ref: Some(HashRef {
+                sha256: "manifest-hash".into(),
+            }),
+        };
+        assert_eq!(roundtrip(&config), config);
+
+        let result = TrainResult {
+            job_id: "job-001".into(),
+            success: true,
+            metrics: vec![
+                Metric {
+                    name: "loss".into(),
+                    value: 0.03,
+                },
+                Metric {
+                    name: "f1".into(),
+                    value: 0.97,
+                },
+            ],
+            model_bundle_ref: Some(HashRef {
+                sha256: "model-bundle".into(),
+            }),
+            notes: "converged early".into(),
+        };
+        assert_eq!(roundtrip(&result), result);
+    }
+
+    #[test]
+    fn training_eval_gate_roundtrip() {
+        use super::training::*;
+
+        let gate = EvalGate {
+            metric_name: "f1".into(),
+            min_threshold: 0.9,
+            max_threshold: 1.0,
+            must_improve_over_baseline: true,
+        };
+        assert_eq!(roundtrip(&gate), gate);
+
+        let result = EvalResult {
+            model_id: "router".into(),
+            version: "v3".into(),
+            metrics: vec![Metric {
+                name: "f1".into(),
+                value: 0.95,
+            }],
+            gate_results: vec![EvalGateResult {
+                metric_name: "f1".into(),
+                actual_value: 0.95,
+                threshold: 0.9,
+                passed: true,
+            }],
+            all_gates_passed: true,
+        };
+        assert_eq!(roundtrip(&result), result);
+    }
+
+    // ===== Snapshot =====
+
     #[test]
     fn snapshot_file_roundtrip() {
         use super::common::*;
@@ -402,6 +1174,8 @@ mod tests {
         };
         assert_eq!(roundtrip(&snap), snap);
     }
+
+    // ===== Replication =====
 
     #[test]
     fn replication_gossip_roundtrip() {
@@ -520,6 +1294,8 @@ mod tests {
         };
         assert_eq!(roundtrip(&resp), resp);
     }
+
+    // ===== Mesh =====
 
     #[test]
     fn mesh_envelope_hello() {
@@ -644,6 +1420,8 @@ mod tests {
         assert_eq!(roundtrip(&refuse), refuse);
     }
 
+    // ===== Research =====
+
     #[test]
     fn research_request_response_roundtrip() {
         use super::common::*;
@@ -680,61 +1458,7 @@ mod tests {
         assert_eq!(roundtrip(&resp), resp);
     }
 
-    #[test]
-    fn training_types_roundtrip() {
-        use super::common::*;
-        use super::training::*;
-
-        let manifest = DatasetManifest {
-            manifest_id: "dm-001".into(),
-            from_event_hash: Some(HashRef {
-                sha256: "from".into(),
-            }),
-            to_event_hash: Some(HashRef {
-                sha256: "to".into(),
-            }),
-            cas_objects: vec![
-                HashRef {
-                    sha256: "obj-a".into(),
-                },
-                HashRef {
-                    sha256: "obj-b".into(),
-                },
-            ],
-            notes: vec!["cases only".into()],
-        };
-        assert_eq!(roundtrip(&manifest), manifest);
-
-        let config = TrainConfig {
-            job_id: "job-001".into(),
-            target: "router".into(),
-            max_steps: 500,
-            max_minutes: 5,
-            max_dataset_items: 1000,
-            max_threads: 4,
-        };
-        assert_eq!(roundtrip(&config), config);
-
-        let result = TrainResult {
-            job_id: "job-001".into(),
-            success: true,
-            metrics: vec![
-                Metric {
-                    name: "loss".into(),
-                    value: 0.03,
-                },
-                Metric {
-                    name: "f1".into(),
-                    value: 0.97,
-                },
-            ],
-            model_bundle_ref: Some(HashRef {
-                sha256: "model-bundle".into(),
-            }),
-            notes: "converged early".into(),
-        };
-        assert_eq!(roundtrip(&result), result);
-    }
+    // ===== Enum coverage =====
 
     #[test]
     fn event_type_enum_coverage() {
@@ -758,6 +1482,16 @@ mod tests {
             (EventType::ModelRolledBack, 53),
             (EventType::ToolInvocationRecorded, 60),
             (EventType::DataSharedRecorded, 61),
+            (EventType::DataSourceDiscovered, 70),
+            (EventType::DataSourceClassified, 71),
+            (EventType::DataSourceApproved, 72),
+            (EventType::IngestStarted, 80),
+            (EventType::IngestCompleted, 81),
+            (EventType::DatasetManifestCreated, 82),
+            (EventType::TrainDeltaPublished, 90),
+            (EventType::TrainDeltaApplied, 91),
+            (EventType::FederatedRoundStarted, 92),
+            (EventType::FederatedRoundCompleted, 93),
         ];
         for (variant, val) in expected {
             assert_eq!(
@@ -765,6 +1499,61 @@ mod tests {
                 "EventType::{variant:?} should be {val}"
             );
         }
+    }
+
+    #[test]
+    fn connector_type_enum_coverage() {
+        use super::events::ConnectorType;
+
+        assert_eq!(ConnectorType::Unspecified as i32, 0);
+        assert_eq!(ConnectorType::SqliteDb as i32, 1);
+        assert_eq!(ConnectorType::CsvFolder as i32, 2);
+        assert_eq!(ConnectorType::JsonFolder as i32, 3);
+        assert_eq!(ConnectorType::Postgres as i32, 4);
+        assert_eq!(ConnectorType::Mysql as i32, 5);
+        assert_eq!(ConnectorType::Odbc as i32, 6);
+    }
+
+    #[test]
+    fn artifact_type_enum_coverage() {
+        use super::events::ArtifactType;
+
+        assert_eq!(ArtifactType::Unspecified as i32, 0);
+        assert_eq!(ArtifactType::Runbook as i32, 1);
+        assert_eq!(ArtifactType::Template as i32, 2);
+        assert_eq!(ArtifactType::Recipe as i32, 3);
+        assert_eq!(ArtifactType::WebBrief as i32, 4);
+        assert_eq!(ArtifactType::ModelBundle as i32, 5);
+        assert_eq!(ArtifactType::Document as i32, 6);
+        assert_eq!(ArtifactType::Fact as i32, 7);
+    }
+
+    #[test]
+    fn column_class_enum_coverage() {
+        use super::datasets::ColumnClass;
+
+        assert_eq!(ColumnClass::Unspecified as i32, 0);
+        assert_eq!(ColumnClass::Identifier as i32, 1);
+        assert_eq!(ColumnClass::Pii as i32, 2);
+        assert_eq!(ColumnClass::Financial as i32, 3);
+        assert_eq!(ColumnClass::Operational as i32, 4);
+        assert_eq!(ColumnClass::FreeText as i32, 5);
+        assert_eq!(ColumnClass::TimestampCol as i32, 6);
+        assert_eq!(ColumnClass::Numeric as i32, 7);
+        assert_eq!(ColumnClass::Secret as i32, 8);
+        assert_eq!(ColumnClass::Unknown as i32, 9);
+    }
+
+    #[test]
+    fn participant_status_enum_coverage() {
+        use super::federated::ParticipantStatus;
+
+        assert_eq!(ParticipantStatus::Unspecified as i32, 0);
+        assert_eq!(ParticipantStatus::Enrolled as i32, 1);
+        assert_eq!(ParticipantStatus::Training as i32, 2);
+        assert_eq!(ParticipantStatus::DeltaSubmitted as i32, 3);
+        assert_eq!(ParticipantStatus::TimedOut as i32, 4);
+        assert_eq!(ParticipantStatus::Failed as i32, 5);
     }
 
     #[test]

@@ -1015,6 +1015,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "node_connectors"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "node_policy",
+ "node_proto",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "node_crypto"
 version = "0.1.0"
 dependencies = [
@@ -1030,6 +1044,72 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "node_datasets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "node_policy",
+ "node_proto",
+ "node_storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "node_discovery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "node_policy",
+ "node_proto",
+ "node_storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "node_federated"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "node_mesh",
+ "node_policy",
+ "node_proto",
+ "node_storage",
+ "node_trainer",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "node_ingest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "node_connectors",
+ "node_policy",
+ "node_proto",
+ "node_storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

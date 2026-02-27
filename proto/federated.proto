@@ -1,0 +1,89 @@
+syntax = "proto3";
+package meshmind.federated;
+import "common.proto";
+
+// Configuration for a federated learning round.
+message FederatedRoundConfig {
+  string round_id = 1;
+  string model_id = 2;
+  uint32 round_number = 3;
+  uint32 min_participants = 4;
+  uint32 max_participants = 5;
+  uint32 deadline_seconds = 6;
+
+  string aggregation_strategy = 7;
+  meshmind.common.HashRef base_model_ref = 8;
+
+  FederatedPolicy policy = 9;
+}
+
+message FederatedPolicy {
+  bool share_deltas = 1;
+  bool share_aggregate_stats = 2;
+  bool share_synthetic_examples = 3;
+  uint32 max_delta_size_bytes = 4;
+  meshmind.common.Sensitivity max_sensitivity = 5;
+}
+
+// A model delta produced by a participant node.
+message ModelDelta {
+  string delta_id = 1;
+  string round_id = 2;
+  string model_id = 3;
+  string base_version = 4;
+  meshmind.common.HashRef delta_ref = 5;
+  meshmind.common.NodeId from_node = 6;
+
+  uint64 training_samples = 7;
+  uint32 training_steps = 8;
+  repeated DeltaMetric metrics = 9;
+  meshmind.common.Timestamp created_at = 10;
+}
+
+message DeltaMetric {
+  string name = 1;
+  double value = 2;
+}
+
+// Result after aggregating deltas from participants.
+message AggregateResult {
+  string round_id = 1;
+  string model_id = 2;
+  uint32 round_number = 3;
+  uint32 participants_count = 4;
+  uint32 deltas_applied = 5;
+
+  meshmind.common.HashRef resulting_model_ref = 6;
+  repeated DeltaMetric aggregate_metrics = 7;
+
+  bool promoted = 8;
+  string promotion_reason = 9;
+  meshmind.common.Timestamp completed_at = 10;
+}
+
+// Participant status within a round.
+enum ParticipantStatus {
+  PARTICIPANT_STATUS_UNSPECIFIED = 0;
+  ENROLLED = 1;
+  TRAINING = 2;
+  DELTA_SUBMITTED = 3;
+  TIMED_OUT = 4;
+  FAILED = 5;
+}
+
+message RoundParticipant {
+  meshmind.common.NodeId node_id = 1;
+  ParticipantStatus status = 2;
+  meshmind.common.HashRef delta_ref = 3;
+  uint64 training_samples = 4;
+  meshmind.common.Timestamp last_update = 5;
+}
+
+// Summary of a federated round for views.
+message FederatedRoundSummary {
+  string round_id = 1;
+  string model_id = 2;
+  uint32 round_number = 3;
+  repeated RoundParticipant participants = 4;
+  AggregateResult result = 5;
+}

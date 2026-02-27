@@ -20,6 +20,20 @@ enum EventType {
   MODEL_ROLLED_BACK = 53;
   TOOL_INVOCATION_RECORDED = 60;
   DATA_SHARED_RECORDED = 61;
+
+  // Data discovery & ingestion
+  DATA_SOURCE_DISCOVERED = 70;
+  DATA_SOURCE_CLASSIFIED = 71;
+  DATA_SOURCE_APPROVED = 72;
+  INGEST_STARTED = 80;
+  INGEST_COMPLETED = 81;
+  DATASET_MANIFEST_CREATED = 82;
+
+  // Federated learning
+  TRAIN_DELTA_PUBLISHED = 90;
+  TRAIN_DELTA_APPLIED = 91;
+  FEDERATED_ROUND_STARTED = 92;
+  FEDERATED_ROUND_COMPLETED = 93;
 }
 
 enum ArtifactType {
@@ -29,6 +43,8 @@ enum ArtifactType {
   RECIPE = 3;
   WEB_BRIEF = 4;
   MODEL_BUNDLE = 5;
+  DOCUMENT = 6;
+  FACT = 7;
 }
 
 message EventEnvelope {
@@ -67,10 +83,26 @@ message EventEnvelope {
 
     ToolInvocationRecorded tool_invocation_recorded = 150;
     DataSharedRecorded data_shared_recorded = 151;
+
+    // Data discovery & ingestion payloads
+    DataSourceDiscovered data_source_discovered = 160;
+    DataSourceClassified data_source_classified = 161;
+    DataSourceApproved data_source_approved = 162;
+    IngestStarted ingest_started = 170;
+    IngestCompleted ingest_completed = 171;
+    DatasetManifestCreated dataset_manifest_created = 172;
+
+    // Federated learning payloads
+    TrainDeltaPublished train_delta_published = 180;
+    TrainDeltaApplied train_delta_applied = 181;
+    FederatedRoundStarted federated_round_started = 182;
+    FederatedRoundCompleted federated_round_completed = 183;
   }
 
   repeated string tags = 200;
 }
+
+// --- Existing payloads ---
 
 message CaseCreated {
   string case_id = 1;
@@ -150,4 +182,114 @@ message DataSharedRecorded {
   string redaction_summary = 5;
   bool allowed = 6;
   string policy_reason = 7;
+}
+
+// --- Data discovery & ingestion payloads ---
+
+enum ConnectorType {
+  CONNECTOR_TYPE_UNSPECIFIED = 0;
+  SQLITE_DB = 1;
+  CSV_FOLDER = 2;
+  JSON_FOLDER = 3;
+  POSTGRES = 4;
+  MYSQL = 5;
+  ODBC = 6;
+}
+
+message DataSourceDiscovered {
+  string source_id = 1;
+  ConnectorType connector_type = 2;
+  string path_or_uri = 3;
+  string display_name = 4;
+  uint64 estimated_size_bytes = 5;
+  uint32 estimated_tables = 6;
+  meshmind.common.Timestamp discovered_at = 7;
+}
+
+message DataSourceClassified {
+  string source_id = 1;
+  meshmind.common.HashRef schema_snapshot_ref = 2;
+  meshmind.common.Sensitivity suggested_sensitivity = 3;
+  bool pii_detected = 4;
+  bool secrets_detected = 5;
+  uint32 total_columns = 6;
+  uint32 restricted_columns = 7;
+  string classification_summary = 8;
+}
+
+message DataSourceApproved {
+  string source_id = 1;
+  meshmind.common.HashRef source_profile_ref = 2;
+  string approved_by = 3;
+  meshmind.common.Timestamp approved_at = 4;
+  repeated string allowed_tables = 5;
+  uint32 row_limit = 6;
+}
+
+message IngestStarted {
+  string ingest_id = 1;
+  string source_id = 2;
+  ConnectorType connector_type = 3;
+  meshmind.common.HashRef source_profile_ref = 4;
+  meshmind.common.Timestamp started_at = 5;
+}
+
+message IngestCompleted {
+  string ingest_id = 1;
+  string source_id = 2;
+  bool success = 3;
+  uint64 rows_ingested = 4;
+  uint64 documents_created = 5;
+  uint64 facts_created = 6;
+  uint64 bytes_stored = 7;
+  uint32 duration_ms = 8;
+  string notes = 9;
+}
+
+message DatasetManifestCreated {
+  string manifest_id = 1;
+  meshmind.common.HashRef manifest_ref = 2;
+  string source_id = 3;
+  string preset = 4;
+  uint64 item_count = 5;
+  uint64 total_bytes = 6;
+}
+
+// --- Federated learning payloads ---
+
+message TrainDeltaPublished {
+  string delta_id = 1;
+  string model_id = 2;
+  string base_version = 3;
+  meshmind.common.HashRef delta_ref = 4;
+  repeated TrainMetric metrics = 5;
+  meshmind.common.NodeId from_node_id = 6;
+}
+
+message TrainDeltaApplied {
+  string delta_id = 1;
+  string model_id = 2;
+  string resulting_version = 3;
+  meshmind.common.NodeId applied_by = 4;
+  repeated TrainMetric metrics = 5;
+}
+
+message FederatedRoundStarted {
+  string round_id = 1;
+  string model_id = 2;
+  uint32 round_number = 3;
+  uint32 expected_participants = 4;
+  meshmind.common.NodeId coordinator = 5;
+  meshmind.common.Timestamp started_at = 6;
+}
+
+message FederatedRoundCompleted {
+  string round_id = 1;
+  string model_id = 2;
+  uint32 round_number = 3;
+  uint32 actual_participants = 4;
+  bool success = 5;
+  repeated TrainMetric aggregate_metrics = 6;
+  meshmind.common.HashRef resulting_model_ref = 7;
+  string notes = 8;
 }

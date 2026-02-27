@@ -1,0 +1,17 @@
+[package]
+name = "node_datasets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+node_storage = { workspace = true }
+node_policy = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
