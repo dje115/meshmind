@@ -1,0 +1,12 @@
+/target
+/data
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.pdb
+*.exe
+.env
+meshmind.toml
+.cargo/config.toml

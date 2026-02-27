@@ -1,0 +1,11 @@
+[package]
+name = "node_policy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }

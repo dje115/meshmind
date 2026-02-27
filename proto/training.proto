@@ -1,0 +1,30 @@
+syntax = "proto3";
+package meshmind.training;
+import "common.proto";
+
+message DatasetManifest {
+  string manifest_id = 1;
+  meshmind.common.HashRef from_event_hash = 2;
+  meshmind.common.HashRef to_event_hash = 3;
+  repeated meshmind.common.HashRef cas_objects = 4;
+  repeated string notes = 5;
+}
+
+message TrainConfig {
+  string job_id = 1;
+  string target = 2;
+  uint32 max_steps = 3;
+  uint32 max_minutes = 4;
+  uint32 max_dataset_items = 5;
+  uint32 max_threads = 6;
+}
+
+message Metric { string name = 1; double value = 2; }
+
+message TrainResult {
+  string job_id = 1;
+  bool success = 2;
+  repeated Metric metrics = 3;
+  meshmind.common.HashRef model_bundle_ref = 4;
+  string notes = 5;
+}

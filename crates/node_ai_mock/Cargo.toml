@@ -1,0 +1,11 @@
+[package]
+name = "node_ai_mock"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_ai = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"

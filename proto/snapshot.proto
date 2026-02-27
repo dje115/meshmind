@@ -1,0 +1,15 @@
+syntax = "proto3";
+package meshmind.snapshot;
+import "common.proto";
+
+message SnapshotHeader {
+  uint32 snapshot_version = 1;
+  meshmind.common.Timestamp created_at = 2;
+  meshmind.common.HashRef last_applied_event_hash = 3;
+  meshmind.common.HashRef snapshot_hash = 4;
+}
+message SnapshotPayload {
+  meshmind.common.HashRef sqlite_dump_ref = 1;
+  repeated meshmind.common.KeyValue notes = 2;
+}
+message SnapshotFile { SnapshotHeader header = 1; SnapshotPayload payload = 2; }

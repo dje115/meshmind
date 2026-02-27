@@ -1,0 +1,53 @@
+syntax = "proto3";
+package meshmind.repl;
+import "common.proto";
+
+message SegmentId { string value = 1; }
+message SegmentMeta {
+  SegmentId segment_id = 1;
+  meshmind.common.HashRef first_event_hash = 2;
+  meshmind.common.HashRef last_event_hash = 3;
+  uint64 size_bytes = 4;
+}
+
+message GossipMeta {
+  meshmind.common.NodeId from_node_id = 1;
+  meshmind.common.TenantId tenant_id = 2;
+  repeated SegmentMeta segments = 3;
+  repeated meshmind.common.HashRef small_object_hashes = 4;
+}
+
+message PullSegmentsRequest {
+  meshmind.common.NodeId requester = 1;
+  meshmind.common.TenantId tenant_id = 2;
+  repeated SegmentId want_segments = 3;
+  meshmind.common.Budget budget = 4;
+}
+message SegmentChunk {
+  SegmentId segment_id = 1;
+  uint32 chunk_index = 2;
+  uint32 chunk_count = 3;
+  bytes data = 4;
+}
+message PullSegmentsResponse {
+  meshmind.common.NodeId responder = 1;
+  repeated SegmentChunk chunks = 2;
+}
+
+message PullCasObjectsRequest {
+  meshmind.common.NodeId requester = 1;
+  repeated meshmind.common.HashRef want_hashes = 2;
+  meshmind.common.Budget budget = 3;
+}
+message CasObjectChunk {
+  meshmind.common.HashRef hash = 1;
+  uint32 chunk_index = 2;
+  uint32 chunk_count = 3;
+  bytes data = 4;
+  string content_type = 5;
+  uint64 size_bytes = 6;
+}
+message PullCasObjectsResponse {
+  meshmind.common.NodeId responder = 1;
+  repeated CasObjectChunk chunks = 2;
+}

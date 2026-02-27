@@ -1,0 +1,33 @@
+[package]
+name = "node_app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "meshmind"
+path = "src/main.rs"
+
+[dependencies]
+node_proto = { workspace = true }
+node_crypto = { workspace = true }
+node_storage = { workspace = true }
+node_policy = { workspace = true }
+node_repl = { workspace = true }
+node_mesh = { workspace = true }
+node_ai = { workspace = true }
+node_ai_ollama = { workspace = true }
+node_ai_mock = { workspace = true }
+node_research = { workspace = true }
+node_trainer = { workspace = true }
+node_api = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

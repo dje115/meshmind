@@ -1,0 +1,18 @@
+[package]
+name = "node_repl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+node_storage = { workspace = true }
+node_policy = { workspace = true }
+prost = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

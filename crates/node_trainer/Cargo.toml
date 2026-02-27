@@ -1,0 +1,15 @@
+[package]
+name = "node_trainer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+node_storage = { workspace = true }
+node_policy = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }

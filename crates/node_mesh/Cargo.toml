@@ -1,0 +1,20 @@
+[package]
+name = "node_mesh"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+node_proto = { workspace = true }
+node_crypto = { workspace = true }
+mdns-sd = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+prost = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"

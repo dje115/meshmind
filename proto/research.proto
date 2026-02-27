@@ -1,0 +1,22 @@
+syntax = "proto3";
+package meshmind.research;
+import "common.proto";
+import "events.proto";
+
+message ResearchRequest {
+  string request_id = 1;
+  string query = 2;
+  repeated string allowed_domains = 3;
+  uint32 recency_days = 4;
+  uint32 max_pages = 5;
+  uint32 max_bytes = 6;
+  bool require_citations = 7;
+}
+
+message ResearchResponse {
+  string request_id = 1;
+  bool success = 2;
+  string notes = 3;
+  meshmind.events.WebBriefCreated web_brief = 4;
+  meshmind.common.HashRef content_ref = 5;
+}

@@ -1,0 +1,11 @@
+syntax = "proto3";
+package meshmind.cas;
+import "common.proto";
+
+message CasObjectHeader {
+  meshmind.common.HashRef hash = 1;
+  uint64 size_bytes = 2;
+  string content_type = 3;
+}
+
+message CasManifest { repeated CasObjectHeader objects = 1; }

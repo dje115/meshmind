@@ -1,0 +1,23 @@
+syntax = "proto3";
+package meshmind.common;
+
+message Timestamp { int64 unix_ms = 1; }
+
+enum Sensitivity {
+  SENSITIVITY_UNSPECIFIED = 0;
+  PUBLIC = 1;
+  INTERNAL = 2;
+  RESTRICTED = 3;
+}
+
+message TenantId { string value = 1; }
+message NodeId { string value = 1; }
+message HashRef { string sha256 = 1; }
+
+message Budget {
+  uint32 max_bytes = 1;
+  uint32 max_items = 2;
+  uint32 max_ms = 3;
+}
+
+message KeyValue { string key = 1; string value = 2; }

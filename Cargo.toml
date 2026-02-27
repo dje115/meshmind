@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/node_proto",
+    "crates/node_crypto",
+    "crates/node_storage",
+    "crates/node_policy",
+    "crates/node_repl",
+    "crates/node_mesh",
+    "crates/node_ai",
+    "crates/node_ai_ollama",
+    "crates/node_ai_mock",
+    "crates/node_research",
+    "crates/node_trainer",
+    "crates/node_api",
+    "crates/node_app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / API
+axum = { version = "0.7", features = ["macros"] }
+
+# Serialization
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+
+# TLS
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+webpki = "0.22"
+
+# Crypto
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+# Discovery
+mdns-sd = "0.11"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serde (config, JSON API)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# HTTP client (for Ollama, web research)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+tempfile = "3"
+
+# Workspace crates
+node_proto = { path = "crates/node_proto" }
+node_crypto = { path = "crates/node_crypto" }
+node_storage = { path = "crates/node_storage" }
+node_policy = { path = "crates/node_policy" }
+node_repl = { path = "crates/node_repl" }
+node_mesh = { path = "crates/node_mesh" }
+node_ai = { path = "crates/node_ai" }
+node_ai_ollama = { path = "crates/node_ai_ollama" }
+node_ai_mock = { path = "crates/node_ai_mock" }
+node_research = { path = "crates/node_research" }
+node_trainer = { path = "crates/node_trainer" }
+node_api = { path = "crates/node_api" }
+node_app = { path = "crates/node_app" }

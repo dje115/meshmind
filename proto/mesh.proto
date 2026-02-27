@@ -1,0 +1,46 @@
+syntax = "proto3";
+package meshmind.mesh;
+import "common.proto";
+
+enum MsgType { MSG_TYPE_UNSPECIFIED=0; HELLO=1; PING=2; PONG=3; ASK=4; ANSWER=5; REFUSE=6; }
+
+message PolicyFlags {
+  bool allow_web = 1;
+  bool allow_train = 2;
+  bool require_citations = 3;
+  bool redaction_required = 4;
+  bool freshness_required = 5;
+  repeated string allowed_domains = 6;
+  repeated string blocked_domains = 7;
+  meshmind.common.Budget web_budget = 8;
+}
+
+message Envelope {
+  string msg_id = 1;
+  MsgType type = 2;
+  meshmind.common.NodeId from_node_id = 3;
+  meshmind.common.NodeId to_node_id = 4;
+  meshmind.common.TenantId tenant_id = 5;
+  meshmind.common.Sensitivity sensitivity = 6;
+  uint32 ttl_hops = 7;
+  uint32 deadline_ms = 8;
+  uint32 max_context_bytes = 9;
+  uint32 max_answer_bytes = 10;
+  PolicyFlags policy = 11;
+
+  oneof body {
+    Hello hello = 100;
+    Ping ping = 101;
+    Pong pong = 102;
+    Ask ask = 103;
+    Answer answer = 104;
+    Refuse refuse = 105;
+  }
+}
+
+message Hello { repeated string capabilities = 1; string version = 2; }
+message Ping { uint64 nonce = 1; }
+message Pong { uint64 nonce = 1; }
+message Ask { string question = 1; repeated string context_bullets = 2; }
+message Answer { string answer = 1; float confidence = 2; repeated string evidence_refs = 3; repeated string warnings = 4; }
+message Refuse { string code = 1; string message = 2; }
