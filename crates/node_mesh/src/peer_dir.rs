@@ -43,10 +43,8 @@ impl PeerDirectory {
         }
 
         if self.peers.len() < self.max_peers {
-            self.peers.insert(
-                node_id.to_string(),
-                PeerEntry::new(node_id, address, port),
-            );
+            self.peers
+                .insert(node_id.to_string(), PeerEntry::new(node_id, address, port));
             true
         } else {
             false

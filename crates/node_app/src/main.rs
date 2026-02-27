@@ -30,10 +30,18 @@ struct NodeConfig {
     admin_token: String,
 }
 
-fn default_data_dir() -> PathBuf { PathBuf::from("./data") }
-fn default_listen() -> String { "127.0.0.1:9900".into() }
-fn default_backend() -> String { "mock".into() }
-fn default_admin_token() -> String { uuid::Uuid::new_v4().to_string() }
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
+}
+fn default_listen() -> String {
+    "127.0.0.1:9900".into()
+}
+fn default_backend() -> String {
+    "mock".into()
+}
+fn default_admin_token() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 impl Default for NodeConfig {
     fn default() -> Self {
@@ -51,10 +59,8 @@ impl Default for NodeConfig {
 fn load_config() -> Result<NodeConfig> {
     let config_path = PathBuf::from("meshmind.toml");
     if config_path.exists() {
-        let text = std::fs::read_to_string(&config_path)
-            .context("read meshmind.toml")?;
-        let config: NodeConfig = toml::from_str(&text)
-            .context("parse meshmind.toml")?;
+        let text = std::fs::read_to_string(&config_path).context("read meshmind.toml")?;
+        let config: NodeConfig = toml::from_str(&text).context("parse meshmind.toml")?;
         Ok(config)
     } else {
         Ok(NodeConfig::default())
@@ -82,8 +88,7 @@ fn create_backend(config: &NodeConfig) -> Arc<dyn InferenceBackend> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -96,13 +101,10 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&config.data_dir)?;
 
-    let event_log = EventLog::open(&config.data_dir)
-        .context("open event log")?;
-    let cas = CasStore::open(&config.data_dir)
-        .context("open CAS")?;
+    let event_log = EventLog::open(&config.data_dir).context("open event log")?;
+    let cas = CasStore::open(&config.data_dir).context("open CAS")?;
     let db_path = config.data_dir.join("sqlite").join("meshmind.db");
-    let _conn = sqlite_views::open_db(&db_path)
-        .context("open SQLite")?;
+    let _conn = sqlite_views::open_db(&db_path).context("open SQLite")?;
 
     let backend = create_backend(&config);
     let node_id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -127,9 +129,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind to {}", config.listen))?;
     tracing::info!("listening on {}", config.listen);
 
-    axum::serve(listener, app)
-        .await
-        .context("serve")?;
+    axum::serve(listener, app).await.context("serve")?;
 
     Ok(())
 }

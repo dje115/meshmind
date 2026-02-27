@@ -301,7 +301,9 @@ mod tests {
 
     #[test]
     fn truncate_context_respects_budget() {
-        let bullets: Vec<String> = (0..100).map(|i| format!("Bullet {i} with some text")).collect();
+        let bullets: Vec<String> = (0..100)
+            .map(|i| format!("Bullet {i} with some text"))
+            .collect();
         let result = truncate_context(&bullets, 100);
         let total_bytes: usize = result.iter().map(|s| s.len()).sum();
         assert!(total_bytes <= 100);

@@ -71,7 +71,10 @@ impl PeerEntry {
     }
 
     pub fn is_reachable(&self) -> bool {
-        matches!(self.state, MembershipState::Alive | MembershipState::Suspect)
+        matches!(
+            self.state,
+            MembershipState::Alive | MembershipState::Suspect
+        )
     }
 }
 

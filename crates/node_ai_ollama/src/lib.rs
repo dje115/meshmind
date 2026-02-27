@@ -90,9 +90,10 @@ impl InferenceBackend for OllamaBackend {
         let url = format!("{}/api/tags", self.endpoint);
         match self.client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let tags: OllamaTagsResponse = resp.json().await.unwrap_or(OllamaTagsResponse {
-                    models: vec![],
-                });
+                let tags: OllamaTagsResponse = resp
+                    .json()
+                    .await
+                    .unwrap_or(OllamaTagsResponse { models: vec![] });
                 let has_model = tags.models.iter().any(|m| m.name.starts_with(&self.model));
                 Ok(BackendHealth {
                     healthy: true,
@@ -140,12 +141,7 @@ impl InferenceBackend for OllamaBackend {
             },
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.client.post(&url).json(&body).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

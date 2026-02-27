@@ -52,11 +52,7 @@ pub fn search_cases(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
 }
 
 /// Search artifacts by FTS5 query.
-pub fn search_artifacts(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<ArtifactHit>> {
+pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<ArtifactHit>> {
     let mut stmt = conn.prepare(
         "SELECT artifact_id, title, rank
          FROM artifacts_fts
@@ -92,22 +88,50 @@ mod tests {
         sqlite_views::create_schema(&conn).unwrap();
 
         let cases = vec![
-            ("c1", "DNS resolution failure", "The DNS resolver times out when querying api.example.com"),
-            ("c2", "Memory leak in Java service", "The Java heap grows unbounded after 24h"),
-            ("c3", "SSL certificate expired", "TLS handshake fails due to expired certificate on gateway"),
-            ("c4", "Kubernetes pod crash loop", "Pod in CrashBackOff state due to OOM kill"),
-            ("c5", "Database connection pool exhaustion", "All connections used, new requests timeout"),
+            (
+                "c1",
+                "DNS resolution failure",
+                "The DNS resolver times out when querying api.example.com",
+            ),
+            (
+                "c2",
+                "Memory leak in Java service",
+                "The Java heap grows unbounded after 24h",
+            ),
+            (
+                "c3",
+                "SSL certificate expired",
+                "TLS handshake fails due to expired certificate on gateway",
+            ),
+            (
+                "c4",
+                "Kubernetes pod crash loop",
+                "Pod in CrashBackOff state due to OOM kill",
+            ),
+            (
+                "c5",
+                "Database connection pool exhaustion",
+                "All connections used, new requests timeout",
+            ),
         ];
 
         for (id, title, summary) in cases {
             let event = EventEnvelope {
                 event_id: format!("e-{id}"),
                 r#type: EventType::CaseCreated as i32,
-                ts: Some(Timestamp { unix_ms: 1700000000000 }),
-                node_id: Some(NodeId { value: "node-1".into() }),
-                tenant_id: Some(TenantId { value: "public".into() }),
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000,
+                }),
+                node_id: Some(NodeId {
+                    value: "node-1".into(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
                 sensitivity: Sensitivity::Public as i32,
-                event_hash: Some(HashRef { sha256: format!("h-{id}") }),
+                event_hash: Some(HashRef {
+                    sha256: format!("h-{id}"),
+                }),
                 payload: Some(event_envelope::Payload::CaseCreated(CaseCreated {
                     case_id: id.to_string(),
                     title: title.to_string(),
@@ -131,18 +155,28 @@ mod tests {
             let event = EventEnvelope {
                 event_id: format!("e-{id}"),
                 r#type: EventType::ArtifactPublished as i32,
-                ts: Some(Timestamp { unix_ms: 1700000000000 }),
-                node_id: Some(NodeId { value: "node-1".into() }),
-                tenant_id: Some(TenantId { value: "public".into() }),
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000,
+                }),
+                node_id: Some(NodeId {
+                    value: "node-1".into(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
                 sensitivity: Sensitivity::Public as i32,
-                event_hash: Some(HashRef { sha256: format!("h-{id}") }),
+                event_hash: Some(HashRef {
+                    sha256: format!("h-{id}"),
+                }),
                 payload: Some(event_envelope::Payload::ArtifactPublished(
                     ArtifactPublished {
                         artifact_id: id.to_string(),
                         artifact_type: atype as i32,
                         version: 1,
                         title: title.to_string(),
-                        content_ref: Some(HashRef { sha256: format!("content-{id}") }),
+                        content_ref: Some(HashRef {
+                            sha256: format!("content-{id}"),
+                        }),
                         shareable: true,
                         expires_unix_ms: 0,
                     },

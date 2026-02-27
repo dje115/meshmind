@@ -9,15 +9,15 @@
 
 use std::collections::HashSet;
 
+use node_policy::{PolicyDecision, PolicyEngine};
 use node_proto::common::{HashRef, NodeId, TenantId};
 use node_proto::events::EventEnvelope;
 use node_proto::repl::{
-    CasObjectChunk, GossipMeta, PullCasObjectsRequest, PullCasObjectsResponse,
-    PullSegmentsRequest, PullSegmentsResponse, SegmentChunk, SegmentId, SegmentMeta,
+    CasObjectChunk, GossipMeta, PullCasObjectsRequest, PullCasObjectsResponse, PullSegmentsRequest,
+    PullSegmentsResponse, SegmentChunk, SegmentId, SegmentMeta,
 };
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
-use node_policy::{PolicyDecision, PolicyEngine};
 use prost::Message;
 use thiserror::Error;
 
@@ -60,38 +60,33 @@ pub fn build_gossip_meta(
         if (segment_events.len() >= 100 || std::ptr::eq(event, events.last().unwrap()))
             && !segment_events.is_empty()
         {
-                let first_hash = segment_events
-                    .first()
-                    .and_then(|e| e.event_hash.as_ref())
-                    .cloned()
-                    .unwrap_or_default();
-                let last_hash = segment_events
-                    .last()
-                    .and_then(|e| e.event_hash.as_ref())
-                    .cloned()
-                    .unwrap_or_default();
+            let first_hash = segment_events
+                .first()
+                .and_then(|e| e.event_hash.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let last_hash = segment_events
+                .last()
+                .and_then(|e| e.event_hash.as_ref())
+                .cloned()
+                .unwrap_or_default();
 
-                let size: usize = segment_events
-                    .iter()
-                    .map(|e| e.encode_to_vec().len())
-                    .sum();
+            let size: usize = segment_events.iter().map(|e| e.encode_to_vec().len()).sum();
 
-                segments.push(SegmentMeta {
-                    segment_id: Some(SegmentId {
-                        value: format!("seg-{seg_counter}"),
-                    }),
-                    first_event_hash: Some(first_hash),
-                    last_event_hash: Some(last_hash),
-                    size_bytes: size as u64,
-                });
-                seg_counter += 1;
-                segment_events.clear();
+            segments.push(SegmentMeta {
+                segment_id: Some(SegmentId {
+                    value: format!("seg-{seg_counter}"),
+                }),
+                first_event_hash: Some(first_hash),
+                last_event_hash: Some(last_hash),
+                size_bytes: size as u64,
+            });
+            seg_counter += 1;
+            segment_events.clear();
         }
 
         for href in &event.refs {
-            if cas.has(&href.sha256)
-                && !known_hashes.contains(&href.sha256)
-            {
+            if cas.has(&href.sha256) && !known_hashes.contains(&href.sha256) {
                 small_objects.push(href.clone());
             }
         }
@@ -134,10 +129,7 @@ pub fn find_missing_segments(
 }
 
 /// Determine which CAS objects are missing.
-pub fn find_missing_objects(
-    local_cas: &CasStore,
-    remote_gossip: &GossipMeta,
-) -> Vec<HashRef> {
+pub fn find_missing_objects(local_cas: &CasStore, remote_gossip: &GossipMeta) -> Vec<HashRef> {
     remote_gossip
         .small_object_hashes
         .iter()
@@ -278,11 +270,7 @@ pub fn import_cas_objects(
     let mut deny_reasons = Vec::new();
 
     for chunk in &response.chunks {
-        let hash = chunk
-            .hash
-            .as_ref()
-            .map(|h| h.sha256.as_str())
-            .unwrap_or("");
+        let hash = chunk.hash.as_ref().map(|h| h.sha256.as_str()).unwrap_or("");
 
         match policy.can_accept_object(hash, tenant_id, sensitivity) {
             PolicyDecision::Allow => {
@@ -617,8 +605,7 @@ mod tests {
             want_hashes: missing_objs,
             budget: None,
         };
-        let obj_response =
-            serve_pull_cas_objects(&obj_request, &node_a.cas, "node-a").unwrap();
+        let obj_response = serve_pull_cas_objects(&obj_request, &node_a.cas, "node-a").unwrap();
         import_cas_objects(
             &obj_response,
             &node_b.cas,

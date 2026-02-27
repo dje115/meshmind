@@ -89,11 +89,7 @@ pub fn create_snapshot(
 
 /// Restore a snapshot: copy SQLite dump from CAS to the target db_path.
 /// Returns the last_applied_event_hash from the snapshot header.
-pub fn restore_snapshot(
-    snap_path: &Path,
-    cas: &CasStore,
-    db_path: &Path,
-) -> Result<String> {
+pub fn restore_snapshot(snap_path: &Path, cas: &CasStore, db_path: &Path) -> Result<String> {
     let snap_bytes = fs::read(snap_path)?;
     let snap = SnapshotFile::decode(snap_bytes.as_slice())?;
 
@@ -162,11 +158,19 @@ mod tests {
             let event = EventEnvelope {
                 event_id: format!("e{i}"),
                 r#type: EventType::CaseCreated as i32,
-                ts: Some(Timestamp { unix_ms: 1700000000000 + i as i64 * 1000 }),
-                node_id: Some(NodeId { value: "node-1".into() }),
-                tenant_id: Some(TenantId { value: "public".into() }),
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000 + i as i64 * 1000,
+                }),
+                node_id: Some(NodeId {
+                    value: "node-1".into(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
                 sensitivity: Sensitivity::Public as i32,
-                event_hash: Some(HashRef { sha256: hash.clone() }),
+                event_hash: Some(HashRef {
+                    sha256: hash.clone(),
+                }),
                 payload: Some(event_envelope::Payload::CaseCreated(CaseCreated {
                     case_id: format!("case-{i}"),
                     title: format!("Case {i}"),
@@ -231,11 +235,19 @@ mod tests {
             let event = EventEnvelope {
                 event_id: format!("e{i}"),
                 r#type: EventType::CaseCreated as i32,
-                ts: Some(Timestamp { unix_ms: 1700000000000 + i * 1000 }),
-                node_id: Some(NodeId { value: "node-1".into() }),
-                tenant_id: Some(TenantId { value: "public".into() }),
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000 + i * 1000,
+                }),
+                node_id: Some(NodeId {
+                    value: "node-1".into(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
                 sensitivity: Sensitivity::Public as i32,
-                event_hash: Some(HashRef { sha256: format!("hash-{i}") }),
+                event_hash: Some(HashRef {
+                    sha256: format!("hash-{i}"),
+                }),
                 payload: Some(event_envelope::Payload::CaseCreated(CaseCreated {
                     case_id: format!("case-{i}"),
                     title: format!("Case {i}"),

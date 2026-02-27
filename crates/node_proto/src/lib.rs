@@ -46,13 +46,19 @@ mod tests {
     fn common_types_roundtrip() {
         use super::common::*;
 
-        let ts = Timestamp { unix_ms: 1700000000000 };
+        let ts = Timestamp {
+            unix_ms: 1700000000000,
+        };
         assert_eq!(roundtrip(&ts), ts);
 
-        let tid = TenantId { value: "acme-corp".into() };
+        let tid = TenantId {
+            value: "acme-corp".into(),
+        };
         assert_eq!(roundtrip(&tid), tid);
 
-        let nid = NodeId { value: "node-abc-123".into() };
+        let nid = NodeId {
+            value: "node-abc-123".into(),
+        };
         assert_eq!(roundtrip(&nid), nid);
 
         let href = HashRef {
@@ -60,10 +66,17 @@ mod tests {
         };
         assert_eq!(roundtrip(&href), href);
 
-        let budget = Budget { max_bytes: 1_000_000, max_items: 100, max_ms: 5000 };
+        let budget = Budget {
+            max_bytes: 1_000_000,
+            max_items: 100,
+            max_ms: 5000,
+        };
         assert_eq!(roundtrip(&budget), budget);
 
-        let kv = KeyValue { key: "env".into(), value: "prod".into() };
+        let kv = KeyValue {
+            key: "env".into(),
+            value: "prod".into(),
+        };
         assert_eq!(roundtrip(&kv), kv);
     }
 
@@ -84,12 +97,16 @@ mod tests {
         let manifest = CasManifest {
             objects: vec![
                 CasObjectHeader {
-                    hash: Some(HashRef { sha256: "aabb".into() }),
+                    hash: Some(HashRef {
+                        sha256: "aabb".into(),
+                    }),
                     size_bytes: 1024,
                     content_type: "application/octet-stream".into(),
                 },
                 CasObjectHeader {
-                    hash: Some(HashRef { sha256: "ccdd".into() }),
+                    hash: Some(HashRef {
+                        sha256: "ccdd".into(),
+                    }),
                     size_bytes: 2048,
                     content_type: "text/plain".into(),
                 },
@@ -106,19 +123,33 @@ mod tests {
         let env = EventEnvelope {
             event_id: "evt-001".into(),
             r#type: EventType::CaseCreated as i32,
-            ts: Some(Timestamp { unix_ms: 1700000000000 }),
-            node_id: Some(NodeId { value: "node-1".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            ts: Some(Timestamp {
+                unix_ms: 1700000000000,
+            }),
+            node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             sensitivity: Sensitivity::Public as i32,
-            prev_hash: Some(HashRef { sha256: "0000".into() }),
-            event_hash: Some(HashRef { sha256: "1111".into() }),
+            prev_hash: Some(HashRef {
+                sha256: "0000".into(),
+            }),
+            event_hash: Some(HashRef {
+                sha256: "1111".into(),
+            }),
             signature: vec![0xDE, 0xAD],
-            refs: vec![HashRef { sha256: "ref1".into() }],
+            refs: vec![HashRef {
+                sha256: "ref1".into(),
+            }],
             payload: Some(event_envelope::Payload::CaseCreated(CaseCreated {
                 case_id: "case-1".into(),
                 title: "DNS failure".into(),
                 summary: "DNS resolution failed for api.example.com".into(),
-                content_ref: Some(HashRef { sha256: "content-hash".into() }),
+                content_ref: Some(HashRef {
+                    sha256: "content-hash".into(),
+                }),
                 shareable: false,
             })),
             tags: vec!["dns".into(), "network".into()],
@@ -143,9 +174,15 @@ mod tests {
         let env = EventEnvelope {
             event_id: "evt-002".into(),
             r#type: EventType::ArtifactPublished as i32,
-            ts: Some(Timestamp { unix_ms: 1700000001000 }),
-            node_id: Some(NodeId { value: "node-1".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            ts: Some(Timestamp {
+                unix_ms: 1700000001000,
+            }),
+            node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             sensitivity: Sensitivity::Internal as i32,
             payload: Some(event_envelope::Payload::ArtifactPublished(
                 ArtifactPublished {
@@ -153,7 +190,9 @@ mod tests {
                     artifact_type: ArtifactType::Runbook as i32,
                     version: 1,
                     title: "K8s rollback playbook".into(),
-                    content_ref: Some(HashRef { sha256: "abcd".into() }),
+                    content_ref: Some(HashRef {
+                        sha256: "abcd".into(),
+                    }),
                     shareable: true,
                     expires_unix_ms: 0,
                 },
@@ -171,9 +210,15 @@ mod tests {
         let env = EventEnvelope {
             event_id: "evt-003".into(),
             r#type: EventType::WebBriefCreated as i32,
-            ts: Some(Timestamp { unix_ms: 1700000002000 }),
-            node_id: Some(NodeId { value: "node-2".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            ts: Some(Timestamp {
+                unix_ms: 1700000002000,
+            }),
+            node_id: Some(NodeId {
+                value: "node-2".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             sensitivity: Sensitivity::Public as i32,
             payload: Some(event_envelope::Payload::WebBriefCreated(WebBriefCreated {
                 artifact_id: "wb-1".into(),
@@ -181,7 +226,9 @@ mod tests {
                 summary: "Rust ownership is...".into(),
                 sources: vec![WebSource {
                     url: "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html".into(),
-                    retrieved_at: Some(Timestamp { unix_ms: 1700000001500 }),
+                    retrieved_at: Some(Timestamp {
+                        unix_ms: 1700000001500,
+                    }),
                     publisher: "Rust Book".into(),
                     snippet: "Each value in Rust has a variable...".into(),
                 }],
@@ -211,7 +258,9 @@ mod tests {
             payload: Some(event_envelope::Payload::TrainJobStarted(TrainJobStarted {
                 job_id: "job-1".into(),
                 target: "router".into(),
-                dataset_manifest_ref: Some(HashRef { sha256: "ds-hash".into() }),
+                dataset_manifest_ref: Some(HashRef {
+                    sha256: "ds-hash".into(),
+                }),
                 max_steps: 1000,
                 max_minutes: 10,
             })),
@@ -228,10 +277,18 @@ mod tests {
                     success: true,
                     notes: "converged at step 800".into(),
                     metrics: vec![
-                        TrainMetric { name: "loss".into(), value: 0.05 },
-                        TrainMetric { name: "accuracy".into(), value: 0.95 },
+                        TrainMetric {
+                            name: "loss".into(),
+                            value: 0.05,
+                        },
+                        TrainMetric {
+                            name: "accuracy".into(),
+                            value: 0.95,
+                        },
                     ],
-                    model_bundle_ref: Some(HashRef { sha256: "model-hash".into() }),
+                    model_bundle_ref: Some(HashRef {
+                        sha256: "model-hash".into(),
+                    }),
                 },
             )),
             ..Default::default()
@@ -279,7 +336,9 @@ mod tests {
                     summary: "searched for Rust async patterns".into(),
                     success: true,
                     duration_ms: 1500,
-                    output_ref: Some(HashRef { sha256: "out-hash".into() }),
+                    output_ref: Some(HashRef {
+                        sha256: "out-hash".into(),
+                    }),
                 },
             )),
             ..Default::default()
@@ -299,7 +358,9 @@ mod tests {
                 DataSharedRecorded {
                     share_id: "share-1".into(),
                     channel: ShareChannel::Peer as i32,
-                    peer_node_id: Some(NodeId { value: "node-2".into() }),
+                    peer_node_id: Some(NodeId {
+                        value: "node-2".into(),
+                    }),
                     destination: "".into(),
                     redaction_summary: "PII removed".into(),
                     allowed: true,
@@ -319,15 +380,24 @@ mod tests {
         let snap = SnapshotFile {
             header: Some(SnapshotHeader {
                 snapshot_version: 1,
-                created_at: Some(Timestamp { unix_ms: 1700000000000 }),
-                last_applied_event_hash: Some(HashRef { sha256: "last-evt".into() }),
-                snapshot_hash: Some(HashRef { sha256: "snap-hash".into() }),
+                created_at: Some(Timestamp {
+                    unix_ms: 1700000000000,
+                }),
+                last_applied_event_hash: Some(HashRef {
+                    sha256: "last-evt".into(),
+                }),
+                snapshot_hash: Some(HashRef {
+                    sha256: "snap-hash".into(),
+                }),
             }),
             payload: Some(SnapshotPayload {
-                sqlite_dump_ref: Some(HashRef { sha256: "sqlite-dump".into() }),
-                notes: vec![
-                    KeyValue { key: "events_count".into(), value: "1000".into() },
-                ],
+                sqlite_dump_ref: Some(HashRef {
+                    sha256: "sqlite-dump".into(),
+                }),
+                notes: vec![KeyValue {
+                    key: "events_count".into(),
+                    value: "1000".into(),
+                }],
             }),
         };
         assert_eq!(roundtrip(&snap), snap);
@@ -339,15 +409,27 @@ mod tests {
         use super::repl::*;
 
         let gossip = GossipMeta {
-            from_node_id: Some(NodeId { value: "node-1".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            from_node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             segments: vec![SegmentMeta {
-                segment_id: Some(SegmentId { value: "seg-001".into() }),
-                first_event_hash: Some(HashRef { sha256: "first".into() }),
-                last_event_hash: Some(HashRef { sha256: "last".into() }),
+                segment_id: Some(SegmentId {
+                    value: "seg-001".into(),
+                }),
+                first_event_hash: Some(HashRef {
+                    sha256: "first".into(),
+                }),
+                last_event_hash: Some(HashRef {
+                    sha256: "last".into(),
+                }),
                 size_bytes: 50_000,
             }],
-            small_object_hashes: vec![HashRef { sha256: "obj1".into() }],
+            small_object_hashes: vec![HashRef {
+                sha256: "obj1".into(),
+            }],
         };
         assert_eq!(roundtrip(&gossip), gossip);
     }
@@ -358,20 +440,36 @@ mod tests {
         use super::repl::*;
 
         let req = PullSegmentsRequest {
-            requester: Some(NodeId { value: "node-2".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            requester: Some(NodeId {
+                value: "node-2".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             want_segments: vec![
-                SegmentId { value: "seg-001".into() },
-                SegmentId { value: "seg-002".into() },
+                SegmentId {
+                    value: "seg-001".into(),
+                },
+                SegmentId {
+                    value: "seg-002".into(),
+                },
             ],
-            budget: Some(Budget { max_bytes: 1_000_000, max_items: 10, max_ms: 5000 }),
+            budget: Some(Budget {
+                max_bytes: 1_000_000,
+                max_items: 10,
+                max_ms: 5000,
+            }),
         };
         assert_eq!(roundtrip(&req), req);
 
         let resp = PullSegmentsResponse {
-            responder: Some(NodeId { value: "node-1".into() }),
+            responder: Some(NodeId {
+                value: "node-1".into(),
+            }),
             chunks: vec![SegmentChunk {
-                segment_id: Some(SegmentId { value: "seg-001".into() }),
+                segment_id: Some(SegmentId {
+                    value: "seg-001".into(),
+                }),
                 chunk_index: 0,
                 chunk_count: 1,
                 data: vec![0x01, 0x02, 0x03],
@@ -386,19 +484,33 @@ mod tests {
         use super::repl::*;
 
         let req = PullCasObjectsRequest {
-            requester: Some(NodeId { value: "node-2".into() }),
+            requester: Some(NodeId {
+                value: "node-2".into(),
+            }),
             want_hashes: vec![
-                HashRef { sha256: "hash-a".into() },
-                HashRef { sha256: "hash-b".into() },
+                HashRef {
+                    sha256: "hash-a".into(),
+                },
+                HashRef {
+                    sha256: "hash-b".into(),
+                },
             ],
-            budget: Some(Budget { max_bytes: 500_000, max_items: 5, max_ms: 3000 }),
+            budget: Some(Budget {
+                max_bytes: 500_000,
+                max_items: 5,
+                max_ms: 3000,
+            }),
         };
         assert_eq!(roundtrip(&req), req);
 
         let resp = PullCasObjectsResponse {
-            responder: Some(NodeId { value: "node-1".into() }),
+            responder: Some(NodeId {
+                value: "node-1".into(),
+            }),
             chunks: vec![CasObjectChunk {
-                hash: Some(HashRef { sha256: "hash-a".into() }),
+                hash: Some(HashRef {
+                    sha256: "hash-a".into(),
+                }),
                 chunk_index: 0,
                 chunk_count: 1,
                 data: b"hello world".to_vec(),
@@ -417,9 +529,15 @@ mod tests {
         let env = Envelope {
             msg_id: "msg-001".into(),
             r#type: MsgType::Hello as i32,
-            from_node_id: Some(NodeId { value: "node-1".into() }),
-            to_node_id: Some(NodeId { value: "node-2".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            from_node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            to_node_id: Some(NodeId {
+                value: "node-2".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             sensitivity: Sensitivity::Public as i32,
             ttl_hops: 3,
             deadline_ms: 5000,
@@ -433,7 +551,11 @@ mod tests {
                 freshness_required: false,
                 allowed_domains: vec!["example.com".into()],
                 blocked_domains: vec![],
-                web_budget: Some(Budget { max_bytes: 100_000, max_items: 5, max_ms: 10_000 }),
+                web_budget: Some(Budget {
+                    max_bytes: 100_000,
+                    max_items: 5,
+                    max_ms: 10_000,
+                }),
             }),
             body: Some(envelope::Body::Hello(Hello {
                 capabilities: vec!["inference".into(), "research_web".into()],
@@ -479,10 +601,7 @@ mod tests {
             deadline_ms: 3000,
             body: Some(envelope::Body::Ask(Ask {
                 question: "How to fix OOM in Java?".into(),
-                context_bullets: vec![
-                    "Running OpenJDK 17".into(),
-                    "Container limit 512MB".into(),
-                ],
+                context_bullets: vec!["Running OpenJDK 17".into(), "Container limit 512MB".into()],
             })),
             ..Default::default()
         };
@@ -554,7 +673,9 @@ mod tests {
                 confidence: 0.88,
                 expires_unix_ms: 1700086400000,
             }),
-            content_ref: Some(HashRef { sha256: "brief-content".into() }),
+            content_ref: Some(HashRef {
+                sha256: "brief-content".into(),
+            }),
         };
         assert_eq!(roundtrip(&resp), resp);
     }
@@ -566,11 +687,19 @@ mod tests {
 
         let manifest = DatasetManifest {
             manifest_id: "dm-001".into(),
-            from_event_hash: Some(HashRef { sha256: "from".into() }),
-            to_event_hash: Some(HashRef { sha256: "to".into() }),
+            from_event_hash: Some(HashRef {
+                sha256: "from".into(),
+            }),
+            to_event_hash: Some(HashRef {
+                sha256: "to".into(),
+            }),
             cas_objects: vec![
-                HashRef { sha256: "obj-a".into() },
-                HashRef { sha256: "obj-b".into() },
+                HashRef {
+                    sha256: "obj-a".into(),
+                },
+                HashRef {
+                    sha256: "obj-b".into(),
+                },
             ],
             notes: vec!["cases only".into()],
         };
@@ -590,10 +719,18 @@ mod tests {
             job_id: "job-001".into(),
             success: true,
             metrics: vec![
-                Metric { name: "loss".into(), value: 0.03 },
-                Metric { name: "f1".into(), value: 0.97 },
+                Metric {
+                    name: "loss".into(),
+                    value: 0.03,
+                },
+                Metric {
+                    name: "f1".into(),
+                    value: 0.97,
+                },
             ],
-            model_bundle_ref: Some(HashRef { sha256: "model-bundle".into() }),
+            model_bundle_ref: Some(HashRef {
+                sha256: "model-bundle".into(),
+            }),
             notes: "converged early".into(),
         };
         assert_eq!(roundtrip(&result), result);
@@ -623,7 +760,10 @@ mod tests {
             (EventType::DataSharedRecorded, 61),
         ];
         for (variant, val) in expected {
-            assert_eq!(variant as i32, val, "EventType::{variant:?} should be {val}");
+            assert_eq!(
+                variant as i32, val,
+                "EventType::{variant:?} should be {val}"
+            );
         }
     }
 
@@ -649,19 +789,23 @@ mod tests {
 
     #[test]
     fn length_prefixed_stream() {
-        use super::events::*;
         use super::common::*;
+        use super::events::*;
 
         let events: Vec<EventEnvelope> = (0..10)
             .map(|i| EventEnvelope {
                 event_id: format!("evt-{i}"),
                 r#type: EventType::CaseCreated as i32,
-                ts: Some(Timestamp { unix_ms: 1700000000000 + i * 1000 }),
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000 + i * 1000,
+                }),
                 payload: Some(event_envelope::Payload::CaseCreated(CaseCreated {
                     case_id: format!("case-{i}"),
                     title: format!("Case {i}"),
                     summary: format!("Summary for case {i}"),
-                    content_ref: Some(HashRef { sha256: format!("hash-{i}") }),
+                    content_ref: Some(HashRef {
+                        sha256: format!("hash-{i}"),
+                    }),
                     shareable: i % 2 == 0,
                 })),
                 ..Default::default()

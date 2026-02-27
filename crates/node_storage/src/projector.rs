@@ -76,8 +76,7 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     )
                     .unwrap_or_else(|_| "[]".into());
 
-                let mut tags: Vec<String> =
-                    serde_json::from_str(&existing).unwrap_or_default();
+                let mut tags: Vec<String> = serde_json::from_str(&existing).unwrap_or_default();
                 for add in &ct.add_tags {
                     if !tags.contains(add) {
                         tags.push(add.clone());
@@ -108,7 +107,11 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                         tenant_id,
                         event.sensitivity,
                         node_id,
-                        if ap.expires_unix_ms > 0 { Some(ap.expires_unix_ms) } else { None },
+                        if ap.expires_unix_ms > 0 {
+                            Some(ap.expires_unix_ms)
+                        } else {
+                            None
+                        },
                         ts,
                     ],
                 )?;
@@ -122,15 +125,19 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                 )?;
             }
             Payload::WebBriefCreated(wb) => {
-                let sources_json =
-                    serde_json::to_string(&wb.sources.iter().map(|s| {
-                        serde_json::json!({
-                            "url": s.url,
-                            "publisher": s.publisher,
-                            "snippet": s.snippet,
+                let sources_json = serde_json::to_string(
+                    &wb.sources
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "url": s.url,
+                                "publisher": s.publisher,
+                                "snippet": s.snippet,
+                            })
                         })
-                    }).collect::<Vec<_>>())
-                    .unwrap_or_else(|_| "[]".into());
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| "[]".into());
 
                 conn.execute(
                     "INSERT OR REPLACE INTO web_briefs_view
@@ -143,7 +150,11 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                         wb.summary,
                         sources_json,
                         wb.confidence,
-                        if wb.expires_unix_ms > 0 { Some(wb.expires_unix_ms) } else { None },
+                        if wb.expires_unix_ms > 0 {
+                            Some(wb.expires_unix_ms)
+                        } else {
+                            None
+                        },
                         tenant_id,
                         node_id,
                         ts,
@@ -157,8 +168,8 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                 )?;
             }
             Payload::PeerSeen(ps) => {
-                let caps_json = serde_json::to_string(&ps.capabilities)
-                    .unwrap_or_else(|_| "[]".into());
+                let caps_json =
+                    serde_json::to_string(&ps.capabilities).unwrap_or_else(|_| "[]".into());
                 let peer_id = ps
                     .peer_node_id
                     .as_ref()
@@ -252,7 +263,9 @@ fn apply_audit(
 fn event_summary(event: &EventEnvelope) -> String {
     match &event.payload {
         Some(Payload::CaseCreated(cc)) => format!("case created: {}", cc.title),
-        Some(Payload::CaseConfirmed(cf)) => format!("case confirmed: {} ({})", cf.case_id, cf.outcome),
+        Some(Payload::CaseConfirmed(cf)) => {
+            format!("case confirmed: {} ({})", cf.case_id, cf.outcome)
+        }
         Some(Payload::CaseTagged(ct)) => format!("case tagged: {}", ct.case_id),
         Some(Payload::ArtifactPublished(ap)) => format!("artifact published: {}", ap.title),
         Some(Payload::ArtifactDeprecated(ad)) => format!("artifact deprecated: {}", ad.artifact_id),
@@ -267,9 +280,14 @@ fn event_summary(event: &EventEnvelope) -> String {
         Some(Payload::TrainJobCompleted(tc)) => {
             format!("training completed: {} success={}", tc.job_id, tc.success)
         }
-        Some(Payload::ModelPromoted(mp)) => format!("model promoted: {} v{}", mp.model_id, mp.version),
+        Some(Payload::ModelPromoted(mp)) => {
+            format!("model promoted: {} v{}", mp.model_id, mp.version)
+        }
         Some(Payload::ModelRolledBack(mr)) => {
-            format!("model rolled back: {} v{} -> v{}", mr.model_id, mr.from_version, mr.to_version)
+            format!(
+                "model rolled back: {} v{} -> v{}",
+                mr.model_id, mr.from_version, mr.to_version
+            )
         }
         Some(Payload::ToolInvocationRecorded(ti)) => format!("tool invoked: {}", ti.tool_name),
         Some(Payload::DataSharedRecorded(ds)) => format!("data shared: {}", ds.share_id),
@@ -278,10 +296,7 @@ fn event_summary(event: &EventEnvelope) -> String {
 }
 
 fn update_cases_fts(conn: &Connection, case_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM cases_fts WHERE case_id = ?1",
-        params![case_id],
-    )?;
+    conn.execute("DELETE FROM cases_fts WHERE case_id = ?1", params![case_id])?;
     conn.execute(
         "INSERT INTO cases_fts (case_id, title, summary, tags)
          SELECT case_id, title, summary, tags FROM cases_view
@@ -359,11 +374,19 @@ mod tests {
         EventEnvelope {
             event_id: id.to_string(),
             r#type: 0,
-            ts: Some(Timestamp { unix_ms: 1700000000000 }),
-            node_id: Some(NodeId { value: "node-1".into() }),
-            tenant_id: Some(TenantId { value: "public".into() }),
+            ts: Some(Timestamp {
+                unix_ms: 1700000000000,
+            }),
+            node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
             sensitivity: Sensitivity::Public as i32,
-            event_hash: Some(HashRef { sha256: format!("hash-{id}") }),
+            event_hash: Some(HashRef {
+                sha256: format!("hash-{id}"),
+            }),
             payload: Some(payload),
             tags: vec!["test".into()],
             ..Default::default()
@@ -379,7 +402,9 @@ mod tests {
                 case_id: "case-1".into(),
                 title: "DNS failure".into(),
                 summary: "DNS resolution failed".into(),
-                content_ref: Some(HashRef { sha256: "content-h".into() }),
+                content_ref: Some(HashRef {
+                    sha256: "content-h".into(),
+                }),
                 shareable: false,
             }),
         );
@@ -448,7 +473,9 @@ mod tests {
                     artifact_type: ArtifactType::Runbook as i32,
                     version: 1,
                     title: "K8s runbook".into(),
-                    content_ref: Some(HashRef { sha256: "rb-hash".into() }),
+                    content_ref: Some(HashRef {
+                        sha256: "rb-hash".into(),
+                    }),
                     shareable: true,
                     expires_unix_ms: 0,
                 }),
@@ -492,7 +519,9 @@ mod tests {
                     summary: "Rust is a systems language".into(),
                     sources: vec![WebSource {
                         url: "https://rust-lang.org".into(),
-                        retrieved_at: Some(Timestamp { unix_ms: 1700000000000 }),
+                        retrieved_at: Some(Timestamp {
+                            unix_ms: 1700000000000,
+                        }),
                         publisher: "Rust Foundation".into(),
                         snippet: "A language empowering everyone".into(),
                     }],
@@ -533,7 +562,9 @@ mod tests {
             &make_event(
                 "e1",
                 Payload::PeerSeen(PeerSeen {
-                    peer_node_id: Some(NodeId { value: "peer-1".into() }),
+                    peer_node_id: Some(NodeId {
+                        value: "peer-1".into(),
+                    }),
                     rtt_ms: 15,
                     capabilities: vec!["inference".into()],
                 }),
@@ -546,7 +577,9 @@ mod tests {
             &make_event(
                 "e2",
                 Payload::PeerTrustUpdated(PeerTrustUpdated {
-                    peer_node_id: Some(NodeId { value: "peer-1".into() }),
+                    peer_node_id: Some(NodeId {
+                        value: "peer-1".into(),
+                    }),
                     trust_score: 0.8,
                     reason: "good responses".into(),
                 }),
@@ -574,7 +607,9 @@ mod tests {
                 Payload::ModelPromoted(ModelPromoted {
                     model_id: "router".into(),
                     version: 1,
-                    model_bundle_ref: Some(HashRef { sha256: "model-h".into() }),
+                    model_bundle_ref: Some(HashRef {
+                        sha256: "model-h".into(),
+                    }),
                 }),
             ),
         )

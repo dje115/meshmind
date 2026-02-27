@@ -374,8 +374,11 @@ mod tests {
         let mut log = EventLog::open_with_threshold(tmp.path(), 512).unwrap();
 
         for i in 0..100 {
-            log.append(make_case_event(&format!("e{i}"), &format!("Case number {i} with some extra text to inflate size")))
-                .unwrap();
+            log.append(make_case_event(
+                &format!("e{i}"),
+                &format!("Case number {i} with some extra text to inflate size"),
+            ))
+            .unwrap();
         }
 
         let segments: Vec<_> = fs::read_dir(tmp.path().join("events").join("segments"))

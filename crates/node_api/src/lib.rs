@@ -174,7 +174,8 @@ async fn handle_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<SearchResult>>, StatusCode> {
-    let conn = rusqlite::Connection::open(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let hits = search::search_cases(&conn, &params.q, params.limit)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -195,7 +196,8 @@ async fn handle_ask(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AskRequest>,
 ) -> Result<Json<AskResponse>, StatusCode> {
-    let conn = rusqlite::Connection::open(&state.db_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let context_hits = search::search_cases(&conn, &req.question, 5)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -230,11 +232,7 @@ async fn handle_ask(
 
     Ok(Json(AskResponse {
         answer: gen_resp.text,
-        confidence: if context_bullets.is_empty() {
-            0.3
-        } else {
-            0.7
-        },
+        confidence: if context_bullets.is_empty() { 0.3 } else { 0.7 },
         model: gen_resp.model,
         context_used: context_hits.iter().map(|h| h.case_id.clone()).collect(),
     }))
@@ -288,10 +286,7 @@ async fn handle_admin_event(
     node_storage::projector::apply_event(&conn, &stored)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let event_hash = stored
-        .event_hash
-        .map(|h| h.sha256)
-        .unwrap_or_default();
+    let event_hash = stored.event_hash.map(|h| h.sha256).unwrap_or_default();
 
     Ok(Json(AdminEventResponse {
         event_id: req.event_id,
@@ -408,11 +403,7 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(
-                Request::get("/search?q=test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/search?q=test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

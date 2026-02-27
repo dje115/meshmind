@@ -70,9 +70,7 @@ impl PolicyEngine {
             .unwrap_or("");
 
         if !self.is_tenant_allowed(tenant) {
-            return PolicyDecision::Deny(format!(
-                "tenant '{tenant}' not allowed for replication"
-            ));
+            return PolicyDecision::Deny(format!("tenant '{tenant}' not allowed for replication"));
         }
 
         if event.sensitivity == Sensitivity::Restricted as i32 {
@@ -90,7 +88,12 @@ impl PolicyEngine {
     }
 
     /// Can this CAS object be accepted from a remote node?
-    pub fn can_accept_object(&self, _hash: &str, tenant_id: &str, sensitivity: i32) -> PolicyDecision {
+    pub fn can_accept_object(
+        &self,
+        _hash: &str,
+        tenant_id: &str,
+        sensitivity: i32,
+    ) -> PolicyDecision {
         if !self.is_tenant_allowed(tenant_id) {
             return PolicyDecision::Deny(format!(
                 "tenant '{tenant_id}' not allowed for replication"
@@ -120,16 +123,18 @@ impl PolicyEngine {
         }
 
         if !self.is_tenant_allowed(tenant_id) {
-            return PolicyDecision::Deny(format!(
-                "tenant '{tenant_id}' not allowed for sharing"
-            ));
+            return PolicyDecision::Deny(format!("tenant '{tenant_id}' not allowed for sharing"));
         }
 
         PolicyDecision::Allow
     }
 
     /// Can web research be performed?
-    pub fn can_research_web(&self, allow_web_flag: bool, redaction_required: bool) -> PolicyDecision {
+    pub fn can_research_web(
+        &self,
+        allow_web_flag: bool,
+        redaction_required: bool,
+    ) -> PolicyDecision {
         if !allow_web_flag {
             return PolicyDecision::Deny("policy flag allow_web is false".into());
         }
@@ -166,7 +171,10 @@ impl PolicyEngine {
         if tenant_id == "public" {
             return true;
         }
-        self.config.allowed_tenant_ids.iter().any(|t| t == tenant_id)
+        self.config
+            .allowed_tenant_ids
+            .iter()
+            .any(|t| t == tenant_id)
     }
 }
 
@@ -178,7 +186,9 @@ mod tests {
     fn make_event(tenant: &str, sensitivity: Sensitivity) -> EventEnvelope {
         EventEnvelope {
             event_id: "e1".into(),
-            tenant_id: Some(TenantId { value: tenant.into() }),
+            tenant_id: Some(TenantId {
+                value: tenant.into(),
+            }),
             sensitivity: sensitivity as i32,
             ..Default::default()
         }
@@ -261,8 +271,7 @@ mod tests {
     #[test]
     fn share_artifact_not_shareable() {
         let engine = PolicyEngine::with_defaults();
-        let decision =
-            engine.can_share_artifact("public", Sensitivity::Public as i32, false);
+        let decision = engine.can_share_artifact("public", Sensitivity::Public as i32, false);
         assert!(!decision.is_allowed());
         if let PolicyDecision::Deny(reason) = decision {
             assert!(reason.contains("not shareable"));
