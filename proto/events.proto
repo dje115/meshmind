@@ -194,6 +194,8 @@ enum ConnectorType {
   POSTGRES = 4;
   MYSQL = 5;
   ODBC = 6;
+  IMAGE_FOLDER = 7;
+  DOCUMENT_FOLDER = 8;
 }
 
 message DataSourceDiscovered {

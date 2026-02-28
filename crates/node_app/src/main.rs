@@ -361,6 +361,27 @@ async fn main() -> Result<()> {
 
     let peer_dir = Arc::new(RwLock::new(PeerDirectory::new()));
 
+    let data_path = std::path::Path::new(&config.data_dir).to_path_buf();
+    let mut scan_dirs = vec![
+        data_path.clone(),
+        std::path::PathBuf::from("seed"),
+        std::path::PathBuf::from("seed/public"),
+        std::path::PathBuf::from("seed/public/cases"),
+        std::path::PathBuf::from("seed/public/runbooks"),
+    ];
+
+    if let Some(home) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+    {
+        let home = std::path::PathBuf::from(home);
+        for subdir in &["Documents", "Pictures", "Desktop", "Downloads"] {
+            let p = home.join(subdir);
+            if p.is_dir() {
+                scan_dirs.push(p);
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
         cas,
@@ -371,6 +392,7 @@ async fn main() -> Result<()> {
         consult_config: ConsultConfig::default(),
         node_id: node_id.clone(),
         admin_token: config.admin_token,
+        scan_dirs,
     });
 
     // Start TCP mesh server

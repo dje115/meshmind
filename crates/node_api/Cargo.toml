@@ -9,6 +9,9 @@ node_storage = { workspace = true }
 node_ai = { workspace = true }
 node_policy = { workspace = true }
 node_mesh = { workspace = true }
+node_discovery = { workspace = true }
+node_connectors = { path = "../node_connectors" }
+node_ingest = { path = "../node_ingest" }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -19,6 +22,7 @@ tracing = { workspace = true }
 rusqlite = { workspace = true }
 async-trait = "0.1"
 uuid = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

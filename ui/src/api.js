@@ -1,4 +1,4 @@
-const BASE = 'http://127.0.0.1:3000';
+const BASE = 'http://127.0.0.1:9900';
 
 async function request(method, path, body) {
   const opts = { method, headers: {} };
@@ -26,6 +26,8 @@ export const api = {
     request('POST', '/admin/models/rollback', { model_id: modelId, from_version: fromVersion, to_version: toVersion, reason }),
   getDatasets: () => request('GET', '/admin/datasets'),
   getLogs: (n = 50) => request('GET', `/admin/logs?n=${n}`),
+  scanSources: () => request('POST', '/admin/scan'),
+  ingestSource: (sourceId) => request('POST', '/admin/ingest', { source_id: sourceId }),
   submitEvent: (eventId, title, summary, tags = []) =>
     request('POST', '/admin/event', { event_id: eventId, event_type: 'case_created', title, summary, tags }),
 };

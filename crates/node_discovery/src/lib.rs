@@ -1,4 +1,5 @@
-//! Data source discovery: scan local directories for databases, CSV, JSON.
+//! Data source discovery: scan local directories for databases, CSV, JSON,
+//! images (with EXIF/GPS), and documents (PDF, DOCX, TXT, Markdown).
 //!
 //! Discovers potential data sources but does NOT ingest by default.
 //! Emits DATA_SOURCE_DISCOVERED events for each found source.
@@ -19,6 +20,8 @@ pub struct DiscoveryConfig {
     pub scan_sqlite: bool,
     pub scan_csv: bool,
     pub scan_json: bool,
+    pub scan_images: bool,
+    pub scan_documents: bool,
 }
 
 impl Default for DiscoveryConfig {
@@ -28,6 +31,8 @@ impl Default for DiscoveryConfig {
             scan_sqlite: true,
             scan_csv: true,
             scan_json: true,
+            scan_images: true,
+            scan_documents: true,
         }
     }
 }
@@ -50,11 +55,29 @@ impl DiscoveredSourceInfo {
     }
 }
 
-fn is_sqlite_file(path: &Path) -> bool {
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "webp",
+];
+
+const DOCUMENT_EXTENSIONS: &[&str] = &["pdf", "docx", "txt", "md", "rtf"];
+
+fn ext_matches(path: &Path, ext: &str) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("db") || e.eq_ignore_ascii_case("sqlite"))
+        .map(|e| e.eq_ignore_ascii_case(ext))
         .unwrap_or(false)
+}
+
+fn is_sqlite_file(path: &Path) -> bool {
+    ext_matches(path, "db") || ext_matches(path, "sqlite")
+}
+
+pub fn is_image_file(path: &Path) -> bool {
+    IMAGE_EXTENSIONS.iter().any(|ext| ext_matches(path, ext))
+}
+
+pub fn is_document_file(path: &Path) -> bool {
+    DOCUMENT_EXTENSIONS.iter().any(|ext| ext_matches(path, ext))
 }
 
 fn count_files_with_ext(dir: &Path, ext: &str) -> (u32, u64) {
@@ -63,16 +86,24 @@ fn count_files_with_ext(dir: &Path, ext: &str) -> (u32, u64) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() {
-                let matches = p
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case(ext))
-                    .unwrap_or(false);
-                if matches {
-                    count += 1;
-                    size += entry.metadata().map(|m| m.len()).unwrap_or(0);
-                }
+            if p.is_file() && ext_matches(&p, ext) {
+                count += 1;
+                size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    (count, size)
+}
+
+fn count_files_matching(dir: &Path, predicate: fn(&Path) -> bool) -> (u32, u64) {
+    let mut count = 0u32;
+    let mut size = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && predicate(&p) {
+                count += 1;
+                size += entry.metadata().map(|m| m.len()).unwrap_or(0);
             }
         }
     }
@@ -146,6 +177,34 @@ pub fn scan_directory(dir: &Path, config: &DiscoveryConfig) -> Vec<DiscoveredSou
                         display_name: display_name_from_path(&path),
                         estimated_size_bytes: json_size,
                         estimated_tables: json_count,
+                    });
+                }
+            }
+
+            if config.scan_images {
+                let (img_count, img_size) = count_files_matching(&path, is_image_file);
+                if img_count > 0 {
+                    results.push(DiscoveredSourceInfo {
+                        source_id: Uuid::new_v4().to_string(),
+                        connector_type: ConnectorType::ImageFolder as i32,
+                        path: path.clone(),
+                        display_name: display_name_from_path(&path),
+                        estimated_size_bytes: img_size,
+                        estimated_tables: img_count,
+                    });
+                }
+            }
+
+            if config.scan_documents {
+                let (doc_count, doc_size) = count_files_matching(&path, is_document_file);
+                if doc_count > 0 {
+                    results.push(DiscoveredSourceInfo {
+                        source_id: Uuid::new_v4().to_string(),
+                        connector_type: ConnectorType::DocumentFolder as i32,
+                        path: path.clone(),
+                        display_name: display_name_from_path(&path),
+                        estimated_size_bytes: doc_size,
+                        estimated_tables: doc_count,
                     });
                 }
             }
@@ -271,6 +330,98 @@ mod tests {
 
         assert_eq!(found.len(), 1, "only SQLite should be found");
         assert_eq!(found[0].connector_type, ConnectorType::SqliteDb as i32);
+    }
+
+    #[test]
+    fn test_is_image_file() {
+        assert!(is_image_file(Path::new("photo.jpg")));
+        assert!(is_image_file(Path::new("photo.JPEG")));
+        assert!(is_image_file(Path::new("photo.png")));
+        assert!(is_image_file(Path::new("photo.tiff")));
+        assert!(is_image_file(Path::new("photo.heic")));
+        assert!(is_image_file(Path::new("photo.webp")));
+        assert!(!is_image_file(Path::new("file.txt")));
+        assert!(!is_image_file(Path::new("file.pdf")));
+    }
+
+    #[test]
+    fn test_is_document_file() {
+        assert!(is_document_file(Path::new("readme.txt")));
+        assert!(is_document_file(Path::new("readme.md")));
+        assert!(is_document_file(Path::new("report.pdf")));
+        assert!(is_document_file(Path::new("report.DOCX")));
+        assert!(is_document_file(Path::new("notes.rtf")));
+        assert!(!is_document_file(Path::new("photo.jpg")));
+        assert!(!is_document_file(Path::new("data.db")));
+    }
+
+    #[test]
+    fn test_scan_finds_image_folder() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("photos");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("vacation.jpg"), b"fake-jpeg-data").unwrap();
+        fs::write(sub.join("sunset.png"), b"fake-png-data").unwrap();
+        fs::write(sub.join("notes.txt"), b"not an image").unwrap();
+
+        let config = DiscoveryConfig {
+            scan_images: true,
+            ..Default::default()
+        };
+        let found = scan_directory(tmp.path(), &config);
+
+        let img_sources: Vec<_> = found
+            .iter()
+            .filter(|s| s.connector_type == ConnectorType::ImageFolder as i32)
+            .collect();
+        assert_eq!(img_sources.len(), 1);
+        assert_eq!(img_sources[0].display_name, "photos");
+        assert_eq!(img_sources[0].estimated_tables, 2);
+        assert!(img_sources[0].estimated_size_bytes > 0);
+    }
+
+    #[test]
+    fn test_scan_finds_document_folder() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("reports");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("summary.txt"), b"some text").unwrap();
+        fs::write(sub.join("readme.md"), b"# Title").unwrap();
+
+        let config = DiscoveryConfig {
+            scan_documents: true,
+            ..Default::default()
+        };
+        let found = scan_directory(tmp.path(), &config);
+
+        let doc_sources: Vec<_> = found
+            .iter()
+            .filter(|s| s.connector_type == ConnectorType::DocumentFolder as i32)
+            .collect();
+        assert_eq!(doc_sources.len(), 1);
+        assert_eq!(doc_sources[0].display_name, "reports");
+        assert_eq!(doc_sources[0].estimated_tables, 2);
+    }
+
+    #[test]
+    fn test_scan_ignores_images_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("photos");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("photo.jpg"), b"fake").unwrap();
+
+        let config = DiscoveryConfig {
+            scan_images: false,
+            scan_documents: false,
+            ..Default::default()
+        };
+        let found = scan_directory(tmp.path(), &config);
+
+        let img_sources: Vec<_> = found
+            .iter()
+            .filter(|s| s.connector_type == ConnectorType::ImageFolder as i32)
+            .collect();
+        assert_eq!(img_sources.len(), 0);
     }
 
     #[test]

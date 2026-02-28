@@ -6,6 +6,8 @@
 //! - GET  /search?q=
 //! - POST /ask
 //! - POST /admin/event
+//! - POST /admin/scan
+//! - POST /admin/ingest
 //! - POST /admin/train
 //! - GET  /admin/logs
 //! - GET  /admin/sources
@@ -23,8 +25,15 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
 
 use node_ai::InferenceBackend;
+use node_connectors::{
+    Connector, CsvFolderConnector, DocumentConnector, ImageConnector, JsonFolderConnector,
+    SQLiteConnector,
+};
+use node_discovery::{DiscoveryConfig, scan_directory, build_discovered_event};
+use node_ingest::{IngestConfig, IngestJob};
 use node_mesh::transport::Transport;
 use node_mesh::{ConsultConfig, PeerDirectory};
 use node_storage::cas::CasStore;
@@ -42,9 +51,15 @@ pub struct AppState {
     pub consult_config: ConsultConfig,
     pub node_id: String,
     pub admin_token: String,
+    pub scan_dirs: Vec<std::path::PathBuf>,
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/status", get(handle_status))
         .route("/peers", get(handle_peers))
@@ -58,6 +73,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/models", get(handle_admin_models))
         .route("/admin/models/rollback", post(handle_admin_rollback_model))
         .route("/admin/datasets", get(handle_admin_datasets))
+        .route("/admin/scan", post(handle_admin_scan))
+        .route("/admin/ingest", post(handle_admin_ingest))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -529,6 +547,187 @@ async fn handle_admin_approve_source(
     Ok(Json(ApproveSourceResponse { event_id }))
 }
 
+#[derive(Serialize)]
+struct ScanResponse {
+    sources_found: usize,
+    sources: Vec<ScanSourceInfo>,
+}
+
+#[derive(Serialize)]
+struct ScanSourceInfo {
+    source_id: String,
+    display_name: String,
+    connector_type: i32,
+    path: String,
+    estimated_size_bytes: u64,
+}
+
+async fn handle_admin_scan(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ScanResponse>, StatusCode> {
+    let config = DiscoveryConfig {
+        scan_dirs: state.scan_dirs.clone(),
+        scan_sqlite: true,
+        scan_csv: true,
+        scan_json: true,
+        scan_images: true,
+        scan_documents: true,
+    };
+
+    let mut all_sources = Vec::new();
+    for dir in &config.scan_dirs {
+        let found = scan_directory(dir, &config);
+        all_sources.extend(found);
+    }
+
+    let mut log = state.event_log.write().await;
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut result_sources = Vec::new();
+    for source in &all_sources {
+        let event = build_discovered_event(source, &state.node_id);
+        if let Ok(stored) = log.append(event) {
+            let _ = node_storage::projector::apply_event(&conn, &stored);
+        }
+        result_sources.push(ScanSourceInfo {
+            source_id: source.source_id.clone(),
+            display_name: source.display_name.clone(),
+            connector_type: source.connector_type,
+            path: source.path.to_string_lossy().into_owned(),
+            estimated_size_bytes: source.estimated_size_bytes,
+        });
+    }
+
+    tracing::info!(dirs = ?state.scan_dirs, found = all_sources.len(), "source scan completed");
+
+    Ok(Json(ScanResponse {
+        sources_found: all_sources.len(),
+        sources: result_sources,
+    }))
+}
+
+#[derive(Deserialize)]
+struct IngestRequest {
+    source_id: String,
+}
+
+#[derive(Serialize)]
+struct IngestResponse {
+    ingest_id: String,
+    source_id: String,
+    success: bool,
+    rows_ingested: u64,
+    documents_created: u64,
+    bytes_stored: u64,
+    duration_ms: u32,
+}
+
+async fn handle_admin_ingest(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+
+    let (connector_type, path_or_uri, status): (i32, String, String) = conn
+        .query_row(
+            "SELECT connector_type, path_or_uri, status FROM sources_view WHERE source_id = ?1",
+            [&req.source_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("source not found: {}", req.source_id),
+            )
+        })?;
+
+    if status != "approved" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("source {} is not approved (status: {})", req.source_id, status),
+        ));
+    }
+
+    let connector: Box<dyn Connector> = match connector_type {
+        1 => Box::new(SQLiteConnector::new("sqlite")),
+        2 => Box::new(CsvFolderConnector::new("csv")),
+        3 => Box::new(JsonFolderConnector::new("json")),
+        7 => Box::new(ImageConnector::new("image")),
+        8 => Box::new(DocumentConnector::new("document")),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unsupported connector type: {other}"),
+            ))
+        }
+    };
+
+    let connector_str = match connector_type {
+        1 => "sqlite",
+        2 => "csv",
+        3 => "json",
+        7 => "image",
+        8 => "document",
+        _ => "unknown",
+    };
+
+    let source_path = std::path::PathBuf::from(&path_or_uri);
+
+    let tables = connector
+        .inspect_schema(&source_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("schema inspect failed: {e}")))?;
+
+    let table_names: Vec<String> = tables.iter().map(|t| t.table_name.clone()).collect();
+
+    let ingest_id = format!("ing-{}", uuid::Uuid::new_v4());
+    let job = IngestJob {
+        ingest_id: ingest_id.clone(),
+        source_id: req.source_id.clone(),
+        connector_type: connector_str.to_string(),
+    };
+
+    let config = IngestConfig::default();
+    let node_id = state.node_id.clone();
+    let db_path = state.db_path.clone();
+    let cas = &state.cas;
+
+    let mut log = state.event_log.write().await;
+    let result = node_ingest::run_ingest(
+        &job,
+        connector.as_ref(),
+        &source_path,
+        &table_names,
+        &config,
+        cas,
+        &mut log,
+        &db_path,
+        &node_id,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ingest failed: {e}")))?;
+
+    tracing::info!(
+        source_id = %req.source_id,
+        ingest_id = %ingest_id,
+        rows = result.rows_ingested,
+        docs = result.documents_created,
+        bytes = result.bytes_stored,
+        duration_ms = result.duration_ms,
+        "ingestion completed"
+    );
+
+    Ok(Json(IngestResponse {
+        ingest_id: result.ingest_id,
+        source_id: result.source_id,
+        success: result.success,
+        rows_ingested: result.rows_ingested,
+        documents_created: result.documents_created,
+        bytes_stored: result.bytes_stored,
+        duration_ms: result.duration_ms,
+    }))
+}
+
 async fn handle_admin_train(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrainRequest>,
@@ -706,6 +905,7 @@ mod tests {
             consult_config: ConsultConfig::default(),
             node_id: "test-node-001".into(),
             admin_token: "test-token".into(),
+            scan_dirs: vec![],
         })
     }
 

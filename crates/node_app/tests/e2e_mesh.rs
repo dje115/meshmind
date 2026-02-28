@@ -49,6 +49,7 @@ fn create_node_state(
         consult_config: ConsultConfig::default(),
         node_id: name.into(),
         admin_token: "test-token".into(),
+        scan_dirs: vec![],
     });
 
     (state, tmp)

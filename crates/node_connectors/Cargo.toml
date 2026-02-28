@@ -11,6 +11,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+kamadak-exif = "0.6"
+pdf-extract = "0.10"
+docx-rust = "0.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

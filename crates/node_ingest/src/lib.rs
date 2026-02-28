@@ -64,6 +64,8 @@ fn connector_type_from_str(s: &str) -> i32 {
         "postgres" => ConnectorType::Postgres as i32,
         "mysql" => ConnectorType::Mysql as i32,
         "odbc" => ConnectorType::Odbc as i32,
+        "image" => ConnectorType::ImageFolder as i32,
+        "document" => ConnectorType::DocumentFolder as i32,
         _ => ConnectorType::Unspecified as i32,
     }
 }

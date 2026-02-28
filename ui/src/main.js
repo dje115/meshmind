@@ -73,8 +73,20 @@ async function renderDashboard(el) {
   window._nav = navigateTo;
 
   document.getElementById('btn-train-quick')?.addEventListener('click', () => showTrainModal());
-  document.getElementById('btn-scan-sources')?.addEventListener('click', () => {
+  document.getElementById('btn-scan-sources')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-scan-sources');
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
     toast('Source scan initiated', 'info');
+    try {
+      const result = await api.scanSources();
+      toast(`Scan complete: ${result.sources_found} source(s) found`, 'success');
+      renderDashboard(document.getElementById('content'));
+    } catch (e) {
+      toast(`Scan failed: ${e.message}`, 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Scan Sources';
   });
 
   try {
@@ -230,7 +242,9 @@ async function renderSources(el) {
             <td>${statusBadge(s.status)}</td>
             <td>${s.pii_detected ? '<span class="badge badge-red">PII</span>' : '<span class="badge badge-green">Clean</span>'}</td>
             <td>${formatBytes(s.estimated_size_bytes)}</td>
-            <td>${s.status !== 'approved' ? `<button class="btn btn-sm btn-primary" onclick="window._approveSource('${escapeHtml(s.source_id)}')">Approve</button>` : '<span class="badge badge-green">Approved</span>'}</td>
+            <td>${s.status !== 'approved'
+              ? `<button class="btn btn-sm btn-primary" onclick="window._approveSource('${escapeHtml(s.source_id)}')">Approve</button>`
+              : `<button class="btn btn-sm btn-primary" onclick="window._ingestSource('${escapeHtml(s.source_id)}')">Ingest</button>`}</td>
           </tr>
         `).join('')}</tbody>
       </table></div></div>
@@ -243,6 +257,20 @@ async function renderSources(el) {
         renderSources(el);
       } catch (e) {
         toast(`Error: ${e.message}`, 'error');
+      }
+    };
+
+    window._ingestSource = async (id) => {
+      const btn = document.querySelector(`button[onclick*="${id}"]`);
+      if (btn) { btn.disabled = true; btn.textContent = 'Ingesting...'; }
+      toast('Ingestion started...', 'info');
+      try {
+        const result = await api.ingestSource(id);
+        toast(`Ingested: ${result.rows_ingested} rows, ${result.documents_created} docs, ${formatBytes(result.bytes_stored)} in ${result.duration_ms}ms`, 'success');
+        renderSources(el);
+      } catch (e) {
+        toast(`Ingest error: ${e.message}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = 'Ingest'; }
       }
     };
   } catch (e) {
@@ -485,7 +513,7 @@ function formatBytes(bytes) {
 }
 
 function connectorLabel(type) {
-  const labels = { 1: 'SQLite', 2: 'CSV', 3: 'JSON' };
+  const labels = { 1: 'SQLite', 2: 'CSV', 3: 'JSON', 7: 'Images', 8: 'Documents' };
   return labels[type] || `Type ${type}`;
 }
 
