@@ -1,7 +1,11 @@
 const BASE = 'http://127.0.0.1:9900';
+let adminToken = null;
 
 async function request(method, path, body) {
   const opts = { method, headers: {} };
+  if (adminToken && path.startsWith('/admin')) {
+    opts.headers['Authorization'] = `Bearer ${adminToken}`;
+  }
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -11,6 +15,8 @@ async function request(method, path, body) {
   if (res.status === 204) return null;
   return res.json();
 }
+
+export function setAdminToken(token) { adminToken = token; }
 
 export const api = {
   getStatus: () => request('GET', '/status'),
@@ -29,6 +35,8 @@ export const api = {
   getLogs: (n = 50) => request('GET', `/admin/logs?n=${n}`),
   scanSources: () => request('POST', '/admin/scan'),
   ingestSource: (sourceId) => request('POST', '/admin/ingest', { source_id: sourceId }),
+  approveAll: () => request('POST', '/admin/sources/approve-all'),
+  ingestAll: () => request('POST', '/admin/ingest-all'),
   submitEvent: (eventId, title, summary, tags = []) =>
     request('POST', '/admin/event', { event_id: eventId, event_type: 'case_created', title, summary, tags }),
   listConversations: () => request('GET', '/conversations'),

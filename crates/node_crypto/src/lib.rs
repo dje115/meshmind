@@ -105,6 +105,38 @@ pub fn write_identity(identity: &NodeIdentity, dir: &Path) -> Result<(PathBuf, P
     Ok((cert_path, key_path))
 }
 
+/// Read a NodeIdentity from a directory containing cert.pem and key.pem.
+pub fn read_identity(dir: &Path) -> Result<NodeIdentity> {
+    let cert_pem = std::fs::read_to_string(dir.join("cert.pem")).context("read cert.pem")?;
+    let key_pem = std::fs::read_to_string(dir.join("key.pem")).context("read key.pem")?;
+    let node_id = node_id_from_cert(&cert_pem);
+    Ok(NodeIdentity { node_id, cert_pem, key_pem })
+}
+
+/// Save a full identity bundle (CA + node identity) to a directory.
+pub fn save_identity_bundle(ca: &DevCa, identity: &NodeIdentity, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("ca.pem"), &ca.cert_pem)?;
+    std::fs::write(dir.join("ca-key.pem"), &ca.key_pem)?;
+    std::fs::write(dir.join("cert.pem"), &identity.cert_pem)?;
+    std::fs::write(dir.join("key.pem"), &identity.key_pem)?;
+    Ok(())
+}
+
+/// Load a full identity bundle from a directory. Returns (ca_cert_pem, NodeIdentity).
+pub fn load_identity_bundle(dir: &Path) -> Result<(String, NodeIdentity)> {
+    let ca_pem = std::fs::read_to_string(dir.join("ca.pem")).context("read ca.pem")?;
+    let identity = read_identity(dir)?;
+    Ok((ca_pem, identity))
+}
+
+/// Check if an identity bundle exists in the directory.
+pub fn identity_bundle_exists(dir: &Path) -> bool {
+    dir.join("ca.pem").exists()
+        && dir.join("cert.pem").exists()
+        && dir.join("key.pem").exists()
+}
+
 fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

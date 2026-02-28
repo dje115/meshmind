@@ -1,5 +1,6 @@
 //! Node wiring: configuration, startup sequences, seed loader.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -40,18 +41,20 @@ pub fn load_seed_data(
     let conn = rusqlite::Connection::open(db_path).context("open db for seeding")?;
     let mut loaded = 0u32;
 
+    let mut existing_ids: HashSet<String> = event_log
+        .replay()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.event_id)
+        .collect();
+
     let cases_path = seed_dir.join("cases").join("seed_cases.json");
     if cases_path.exists() {
         let text = std::fs::read_to_string(&cases_path).context("read seed cases")?;
         let cases: Vec<SeedCase> = serde_json::from_str(&text).context("parse seed cases")?;
 
         for case in cases {
-            if event_log
-                .replay()
-                .ok()
-                .map(|events| events.iter().any(|e| e.event_id == case.event_id))
-                .unwrap_or(false)
-            {
+            if existing_ids.contains(&case.event_id) {
                 continue;
             }
 
@@ -82,6 +85,7 @@ pub fn load_seed_data(
 
             let stored = event_log.append(event).context("append seed case")?;
             projector::apply_event(&conn, &stored).context("project seed case")?;
+            existing_ids.insert(stored.event_id.clone());
             loaded += 1;
         }
     }
@@ -93,12 +97,7 @@ pub fn load_seed_data(
             serde_json::from_str(&text).context("parse seed runbooks")?;
 
         for runbook in runbooks {
-            if event_log
-                .replay()
-                .ok()
-                .map(|events| events.iter().any(|e| e.event_id == runbook.artifact_id))
-                .unwrap_or(false)
-            {
+            if existing_ids.contains(&runbook.artifact_id) {
                 continue;
             }
 
@@ -134,6 +133,7 @@ pub fn load_seed_data(
 
             let stored = event_log.append(event).context("append seed runbook")?;
             projector::apply_event(&conn, &stored).context("project seed runbook")?;
+            existing_ids.insert(stored.event_id.clone());
             loaded += 1;
         }
     }

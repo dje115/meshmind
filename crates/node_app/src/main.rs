@@ -117,7 +117,15 @@ fn create_backend(config: &NodeConfig) -> Arc<dyn InferenceBackend> {
                 .unwrap_or_else(|| "llama3.2:3b".into());
             Arc::new(OllamaBackend::new(&endpoint, &model, 30000).expect("create ollama backend"))
         }
-        _ => Arc::new(MockBackend::new()),
+        other => {
+            if other != "mock" {
+                tracing::warn!(
+                    "Unknown backend '{}', falling back to mock. Set backend = \"ollama\" for real AI.",
+                    other
+                );
+            }
+            Arc::new(MockBackend::new())
+        }
     }
 }
 
@@ -269,7 +277,7 @@ async fn replication_loop(state: Arc<AppState>, policy: Arc<PolicyEngine>, inter
             }
         }
 
-        // Pull-based replication with first alive peer
+        // Pull-based replication via HTTP /repl/gossip + /repl/pull
         let event_log = state.event_log.read().await;
         let local_gossip =
             node_repl::build_gossip_meta(&state.node_id, "public", &event_log, &state.cas, &[]);
@@ -283,28 +291,49 @@ async fn replication_loop(state: Arc<AppState>, policy: Arc<PolicyEngine>, inter
             }
         };
 
+        let gossip_bytes = prost::Message::encode_to_vec(&local_gossip);
+
         for (peer_id, address, port) in &peers {
-            let gossip_ask = Envelope {
-                msg_id: uuid::Uuid::new_v4().to_string(),
-                r#type: MsgType::Hello as i32,
-                from_node_id: Some(NodeId {
-                    value: state.node_id.clone(),
-                }),
-                body: Some(envelope::Body::Hello(Hello {
-                    capabilities: vec!["replication".into()],
-                    version: format!("events:{}", local_gossip.segments.len()),
-                })),
-                ..Default::default()
+            let api_port = port.saturating_sub(1);
+            let peer_url = format!("http://{}:{}", address, api_port);
+
+            let client = reqwest::Client::new();
+            let gossip_resp = client
+                .post(format!("{}/repl/gossip", peer_url))
+                .json(&serde_json::json!({ "gossip_bytes": gossip_bytes }))
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await;
+
+            let resp = match gossip_resp {
+                Ok(r) if r.status().is_success() => {
+                    match r.json::<serde_json::Value>().await {
+                        Ok(v) => v,
+                        Err(e) => { tracing::debug!("repl gossip parse {peer_id}: {e}"); continue; }
+                    }
+                }
+                Ok(r) => { tracing::debug!("repl gossip {peer_id}: {}", r.status()); continue; }
+                Err(e) => { tracing::debug!("repl gossip {peer_id}: {e}"); continue; }
             };
 
-            match transport.request(address, *port, &gossip_ask).await {
-                Ok(_resp) => {
-                    tracing::debug!("replication handshake with {peer_id} complete");
-                }
-                Err(e) => {
-                    tracing::debug!("replication handshake with {peer_id} failed: {e}");
-                }
+            let missing_segs: Vec<String> = resp["missing_segment_ids"]
+                .as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let missing_cas: Vec<String> = resp["missing_cas_hashes"]
+                .as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            if missing_segs.is_empty() && missing_cas.is_empty() {
+                tracing::debug!("peer {peer_id}: fully synced");
+                continue;
             }
+
+            tracing::info!(
+                peer = %peer_id,
+                missing_segs = missing_segs.len(),
+                missing_cas = missing_cas.len(),
+                "peer wants our data, skipping push for now"
+            );
         }
 
         let _ = &policy;
@@ -336,11 +365,19 @@ async fn main() -> Result<()> {
 
     let backend = create_backend(&config);
 
-    // Generate node identity (dev CA for now)
-    let ca = DevCa::generate().context("generate dev CA")?;
-    let identity = ca
-        .generate_node_cert("meshmind-node")
-        .context("generate node cert")?;
+    // Load or generate persistent node identity
+    let identity_dir = PathBuf::from(&config.data_dir).join("identity");
+    let (ca_cert_pem, identity) = if node_crypto::identity_bundle_exists(&identity_dir) {
+        tracing::info!("loading identity from {}", identity_dir.display());
+        node_crypto::load_identity_bundle(&identity_dir).context("load identity bundle")?
+    } else {
+        tracing::info!("generating new identity in {}", identity_dir.display());
+        let ca = DevCa::generate().context("generate dev CA")?;
+        let id = ca.generate_node_cert("meshmind-node").context("generate node cert")?;
+        node_crypto::save_identity_bundle(&ca, &id, &identity_dir)
+            .context("save identity bundle")?;
+        (ca.cert_pem, id)
+    };
     let node_id = identity.node_id.clone();
 
     // Load seed data
@@ -354,11 +391,32 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("node_id    = {}", node_id);
-    tracing::info!("admin_token= {}", config.admin_token);
+    tracing::debug!("admin_token= {}", config.admin_token);
 
-    // Build TCP+mTLS transport for peer communication
+    // Build TCP+mTLS transport for direct peer communication
+    let direct_transport: Arc<dyn node_mesh::transport::Transport> =
+        Arc::new(TcpTransport::new(&identity, &ca_cert_pem).context("create TCP transport")?);
+
+    // If relay is configured, compose HybridTransport (direct-first, relay-fallback)
     let transport: Arc<dyn node_mesh::transport::Transport> =
-        Arc::new(TcpTransport::new(&identity, &ca.cert_pem).context("create TCP transport")?);
+        if let (Some(relay_addr), Some(relay_port)) = (&config.relay_addr, config.relay_port) {
+            match node_mesh::RelayTransport::new(&identity, &ca_cert_pem, relay_addr, relay_port) {
+                Ok(relay) => {
+                    let hybrid = node_mesh::relay_transport::HybridTransport::new(
+                        direct_transport.clone(),
+                        Arc::new(relay),
+                    );
+                    tracing::info!("using HybridTransport (direct + relay fallback)");
+                    Arc::new(hybrid)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to create relay transport, using direct only: {e}");
+                    direct_transport.clone()
+                }
+            }
+        } else {
+            direct_transport.clone()
+        };
 
     let peer_dir = Arc::new(RwLock::new(PeerDirectory::new()));
 
@@ -395,7 +453,7 @@ async fn main() -> Result<()> {
         event_log: RwLock::new(event_log),
         cas,
         db_path,
-        peer_dir: RwLock::new(PeerDirectory::new()),
+        peer_dir: peer_dir.clone(),
         backend: backend.clone(),
         transport: Some(transport),
         consult_config: ConsultConfig::default(),
@@ -407,7 +465,7 @@ async fn main() -> Result<()> {
     });
 
     // Start TCP mesh server
-    let mesh_server = TcpServer::bind(&identity, &ca.cert_pem, "0.0.0.0", config.mesh_port)
+    let mesh_server = TcpServer::bind(&identity, &ca_cert_pem, "0.0.0.0", config.mesh_port)
         .await
         .context("bind mesh server")?;
     let actual_mesh_port = mesh_server.local_port().unwrap_or(config.mesh_port);
@@ -442,60 +500,42 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Start relay transport (Internet Mode) if configured
+    // Start relay registration, heartbeat, and WAN discovery if configured
     if let (Some(relay_addr), Some(relay_port)) = (&config.relay_addr, config.relay_port) {
         tracing::info!("relay mode enabled: {}:{}", relay_addr, relay_port);
-        match node_mesh::RelayTransport::new(&identity, &ca.cert_pem, relay_addr, relay_port) {
+        match node_mesh::RelayTransport::new(&identity, &ca_cert_pem, relay_addr, relay_port) {
             Ok(relay_transport) => {
                 let relay = Arc::new(relay_transport);
-                let public_addr = config
-                    .public_addr
-                    .clone()
-                    .unwrap_or_default();
+                let public_addr = config.public_addr.clone().unwrap_or_default();
 
                 let relay_reg = relay.clone();
                 tokio::spawn(async move {
                     match relay_reg
-                        .register(
-                            vec!["inference".into(), "storage".into()],
-                            &public_addr,
-                            config.relay_only,
-                        )
+                        .register(vec!["inference".into(), "storage".into()], &public_addr, config.relay_only)
                         .await
                     {
                         Ok(resp) if resp.success => {
-                            tracing::info!("registered with relay server (token={})", resp.relay_token);
+                            tracing::info!("registered with relay server");
+                            tracing::debug!("relay_token={}", resp.relay_token);
                         }
-                        Ok(resp) => {
-                            tracing::warn!("relay registration failed: {}", resp.error);
-                        }
-                        Err(e) => {
-                            tracing::warn!("relay registration error: {e}");
-                        }
+                        Ok(resp) => tracing::warn!("relay registration failed: {}", resp.error),
+                        Err(e) => tracing::warn!("relay registration error: {e}"),
                     }
                 });
 
-                // Start relay heartbeat loop
                 let relay_hb = relay.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_secs(60));
                     loop {
                         interval.tick().await;
                         match relay_hb.heartbeat().await {
-                            Ok(resp) if resp.alive => {
-                                tracing::debug!("relay heartbeat ok ({} peers)", resp.connected_peers);
-                            }
-                            Ok(_) => {
-                                tracing::warn!("relay heartbeat: not alive");
-                            }
-                            Err(e) => {
-                                tracing::debug!("relay heartbeat failed: {e}");
-                            }
+                            Ok(resp) if resp.alive => tracing::debug!("relay heartbeat ok ({} peers)", resp.connected_peers),
+                            Ok(_) => tracing::warn!("relay heartbeat: not alive"),
+                            Err(e) => tracing::debug!("relay heartbeat failed: {e}"),
                         }
                     }
                 });
 
-                // Start WAN discovery loop
                 let relay_disc = relay.clone();
                 let wan_peer_dir = peer_dir.clone();
                 let wan_node_id = node_id.clone();
@@ -508,30 +548,18 @@ async fn main() -> Result<()> {
                                 let mut dir = wan_peer_dir.write().await;
                                 for peer in &resp.peers {
                                     let pid = peer.node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
-                                    if pid.is_empty() || pid == wan_node_id {
-                                        continue;
-                                    }
-                                    let addr = if peer.public_addr.is_empty() {
-                                        "relay".to_string()
-                                    } else {
-                                        peer.public_addr.clone()
-                                    };
+                                    if pid.is_empty() || pid == wan_node_id { continue; }
+                                    let addr = if peer.public_addr.is_empty() { "relay".to_string() } else { peer.public_addr.clone() };
                                     let is_new = dir.upsert(pid, &addr, peer.mesh_port as u16);
-                                    if is_new {
-                                        tracing::info!("WAN: discovered peer {pid} at {addr}");
-                                    }
+                                    if is_new { tracing::info!("WAN: discovered peer {pid} at {addr}"); }
                                 }
                             }
-                            Err(e) => {
-                                tracing::debug!("WAN discovery failed: {e}");
-                            }
+                            Err(e) => tracing::debug!("WAN discovery failed: {e}"),
                         }
                     }
                 });
             }
-            Err(e) => {
-                tracing::warn!("failed to create relay transport: {e}");
-            }
+            Err(e) => tracing::warn!("relay transport setup failed: {e}"),
         }
     }
 

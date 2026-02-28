@@ -14,6 +14,8 @@ node_connectors = { path = "../node_connectors" }
 node_ingest = { path = "../node_ingest" }
 node_trainer = { workspace = true }
 node_datasets = { workspace = true }
+node_repl = { workspace = true }
+hex = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -23,6 +25,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 rusqlite = { workspace = true }
 async-trait = "0.1"
+prost = { workspace = true }
 uuid = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 

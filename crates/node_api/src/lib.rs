@@ -14,6 +14,8 @@
 //! - POST /admin/scan
 //! - POST /admin/ingest
 //! - POST /admin/train
+//! - POST /admin/train/export
+//! - POST /admin/train/modelfile
 //! - GET  /admin/logs
 //! - GET  /admin/sources
 //! - POST /admin/sources/approve
@@ -23,14 +25,15 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::Json;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Json, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use node_ai::InferenceBackend;
 use node_connectors::{
@@ -79,7 +82,7 @@ pub struct AppState {
     pub event_log: RwLock<EventLog>,
     pub cas: CasStore,
     pub db_path: std::path::PathBuf,
-    pub peer_dir: RwLock<PeerDirectory>,
+    pub peer_dir: Arc<RwLock<PeerDirectory>>,
     pub backend: Arc<dyn InferenceBackend>,
     pub transport: Option<Arc<dyn Transport>>,
     pub consult_config: ConsultConfig,
@@ -90,32 +93,101 @@ pub struct AppState {
     pub model_registry: Arc<tokio::sync::Mutex<ModelRegistry>>,
 }
 
+async fn admin_auth(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match token {
+        Some(t) if t == state.admin_token => Ok(next.run(request).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let localhost_origins = [
+        "http://127.0.0.1:9900".parse().unwrap(),
+        "http://localhost:9900".parse().unwrap(),
+        "http://127.0.0.1:1420".parse().unwrap(),
+        "http://localhost:1420".parse().unwrap(),
+        "http://127.0.0.1:5173".parse().unwrap(),
+        "http://localhost:5173".parse().unwrap(),
+    ];
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(localhost_origins)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
+    let admin_routes = Router::new()
+        .route("/admin/event", post(handle_admin_event))
+        .route("/admin/logs", get(handle_admin_logs))
+        .route("/admin/sources", get(handle_admin_sources))
+        .route("/admin/sources/approve", post(handle_admin_approve_source))
+        .route("/admin/train", post(handle_admin_train))
+        .route("/admin/train/export", post(handle_admin_train_export))
+        .route("/admin/train/modelfile", post(handle_admin_train_modelfile))
+        .route("/admin/models", get(handle_admin_models))
+        .route("/admin/models/rollback", post(handle_admin_rollback_model))
+        .route("/admin/datasets", get(handle_admin_datasets))
+        .route("/admin/scan", post(handle_admin_scan))
+        .route("/admin/ingest", post(handle_admin_ingest))
+        .route("/admin/sources/approve-all", post(handle_admin_approve_all))
+        .route("/admin/ingest-all", post(handle_admin_ingest_all))
+        .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     Router::new()
         .route("/status", get(handle_status))
         .route("/peers", get(handle_peers))
         .route("/search", get(handle_search))
         .route("/ask", post(handle_ask))
-        .route("/admin/event", post(handle_admin_event))
-        .route("/admin/logs", get(handle_admin_logs))
-        .route("/admin/sources", get(handle_admin_sources))
-        .route("/admin/sources/approve", post(handle_admin_approve_source))
-        .route("/admin/train", post(handle_admin_train))
-        .route("/admin/models", get(handle_admin_models))
-        .route("/admin/models/rollback", post(handle_admin_rollback_model))
-        .route("/admin/datasets", get(handle_admin_datasets))
-        .route("/admin/scan", post(handle_admin_scan))
-        .route("/admin/ingest", post(handle_admin_ingest))
         .route("/conversations", get(handle_list_conversations).post(handle_create_conversation))
         .route("/conversations/:id/messages", get(handle_get_messages).post(handle_send_message))
         .route("/conversations/:id", delete(handle_delete_conversation))
+        .route("/repl/gossip", post(handle_repl_gossip))
+        .route("/repl/pull", post(handle_repl_pull))
+        .merge(admin_routes)
         .layer(cors)
         .with_state(state)
+}
+
+// ---------- Error type ----------
+
+#[derive(Debug, Serialize)]
+struct ApiError {
+    error: String,
+    code: u16,
+}
+
+#[allow(dead_code)]
+impl ApiError {
+    fn bad_request(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), code: 400 }
+    }
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), code: 404 }
+    }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), code: 500 }
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self)).into_response()
+    }
+}
+
+impl From<(StatusCode, String)> for ApiError {
+    fn from((status, msg): (StatusCode, String)) -> Self {
+        Self { error: msg, code: status.as_u16() }
+    }
 }
 
 // ---------- Data types ----------
@@ -127,6 +199,7 @@ struct StatusResponse {
     event_count: u64,
     peer_count: usize,
     backend: String,
+    admin_token: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -295,6 +368,7 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRespons
         event_count,
         peer_count,
         backend: state.backend.name().to_string(),
+        admin_token: state.admin_token.clone(),
     })
 }
 
@@ -1072,7 +1146,7 @@ struct IngestResponse {
 async fn handle_admin_ingest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
-) -> Result<Json<IngestResponse>, (StatusCode, String)> {
+) -> Result<Json<IngestResponse>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
 
@@ -1090,10 +1164,9 @@ async fn handle_admin_ingest(
         })?;
 
     if status != "approved" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("source {} is not approved (status: {})", req.source_id, status),
-        ));
+        return Err(ApiError::bad_request(format!(
+            "source {} is not approved (status: {})", req.source_id, status
+        )));
     }
 
     let connector: Box<dyn Connector> = match connector_type {
@@ -1103,10 +1176,7 @@ async fn handle_admin_ingest(
         7 => Box::new(ImageConnector::new("image")),
         8 => Box::new(DocumentConnector::new("document")),
         other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("unsupported connector type: {other}"),
-            ))
+            return Err(ApiError::bad_request(format!("unsupported connector type: {other}")))
         }
     };
 
@@ -1174,10 +1244,137 @@ async fn handle_admin_ingest(
     }))
 }
 
+#[derive(Serialize)]
+struct BulkApproveResponse {
+    approved: usize,
+    skipped: usize,
+}
+
+async fn handle_admin_approve_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BulkApproveResponse>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+
+    let source_ids: Vec<String> = conn
+        .prepare("SELECT source_id FROM sources_view WHERE status != 'approved' AND display_name NOT LIKE '%keys%'")
+        .and_then(|mut s| {
+            let ids = s
+                .query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(ids)
+        })
+        .unwrap_or_default();
+
+    let total = source_ids.len();
+    let mut approved = 0;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    for sid in &source_ids {
+        let ok = conn
+            .execute(
+                "UPDATE sources_view SET status = 'approved', approved_at_ms = ?1 WHERE source_id = ?2",
+                rusqlite::params![ts, sid],
+            )
+            .is_ok();
+        if ok { approved += 1; }
+    }
+
+    Ok(Json(BulkApproveResponse {
+        approved,
+        skipped: total - approved,
+    }))
+}
+
+#[derive(Serialize)]
+struct BulkIngestResponse {
+    ingested: u64,
+    failed: u64,
+    total_rows: u64,
+    total_docs: u64,
+}
+
+async fn handle_admin_ingest_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BulkIngestResponse>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+
+    let sources: Vec<(String, i32, String)> = conn
+        .prepare("SELECT source_id, connector_type, path_or_uri FROM sources_view WHERE status = 'approved'")
+        .and_then(|mut s| {
+            let rows = s
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .unwrap_or_default();
+
+    drop(conn);
+
+    let mut ingested = 0u64;
+    let mut failed = 0u64;
+    let mut total_rows = 0u64;
+    let mut total_docs = 0u64;
+
+    for (source_id, connector_type, path_or_uri) in &sources {
+        let connector: Box<dyn Connector> = match *connector_type {
+            1 => Box::new(SQLiteConnector::new("sqlite")),
+            2 => Box::new(CsvFolderConnector::new("csv")),
+            3 => Box::new(JsonFolderConnector::new("json")),
+            7 => Box::new(ImageConnector::new("image")),
+            8 => Box::new(DocumentConnector::new("document")),
+            _ => { failed += 1; continue; }
+        };
+
+        let connector_str = match *connector_type {
+            1 => "sqlite", 2 => "csv", 3 => "json", 7 => "image", 8 => "document", _ => "unknown",
+        };
+
+        let source_path = std::path::PathBuf::from(path_or_uri);
+        let tables = match connector.inspect_schema(&source_path) {
+            Ok(t) => t,
+            Err(_) => { failed += 1; continue; }
+        };
+        let table_names: Vec<String> = tables.iter().map(|t| t.table_name.clone()).collect();
+
+        let ingest_id = format!("ing-{}", uuid::Uuid::new_v4());
+        let job = IngestJob {
+            ingest_id,
+            source_id: source_id.clone(),
+            connector_type: connector_str.to_string(),
+        };
+
+        let config = IngestConfig::default();
+        let node_id = state.node_id.clone();
+        let db_path = state.db_path.clone();
+
+        let mut log = state.event_log.write().await;
+        match node_ingest::run_ingest(
+            &job, connector.as_ref(), &source_path, &table_names,
+            &config, &state.cas, &mut log, &db_path, &node_id,
+        ) {
+            Ok(result) => {
+                total_rows += result.rows_ingested;
+                total_docs += result.documents_created;
+                ingested += 1;
+            }
+            Err(_) => { failed += 1; }
+        }
+    }
+
+    Ok(Json(BulkIngestResponse { ingested, failed, total_rows, total_docs }))
+}
+
 async fn handle_admin_train(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrainRequest>,
-) -> Result<Json<TrainResponse>, (StatusCode, String)> {
+) -> Result<Json<TrainResponse>, ApiError> {
     use node_proto::common::*;
     use node_proto::events::*;
 
@@ -1369,6 +1566,131 @@ async fn handle_admin_train(
     }))
 }
 
+const MESHMIND_TRAINING_SYSTEM: &str = "\
+You are MeshMind, a helpful local-first AI assistant running on the user's own machine. \
+You have access to a local knowledge base of ingested documents, databases, images, \
+and other data sources. Answer questions accurately based on this knowledge. \
+Be concise, specific, and helpful.";
+
+async fn handle_admin_train_export(
+    State(state): State<Arc<AppState>>,
+) -> Result<(HeaderMap, String), ApiError> {
+    use node_proto::events::event_envelope::Payload;
+
+    let event_log = state.event_log.read().await;
+    let events = event_log
+        .replay()
+        .map_err(|e| ApiError::internal(format!("replay failed: {e}")))?;
+    drop(event_log);
+
+    let mut lines = Vec::new();
+    for event in &events {
+        let (user_msg, asst_msg) = match &event.payload {
+            Some(Payload::CaseCreated(cc)) if !cc.title.is_empty() && !cc.summary.is_empty() => {
+                (cc.title.clone(), cc.summary.clone())
+            }
+            Some(Payload::ArtifactPublished(ap))
+                if !ap.title.is_empty() && !ap.summary.is_empty() =>
+            {
+                (ap.title.clone(), ap.summary.clone())
+            }
+            _ => continue,
+        };
+
+        let example = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": MESHMIND_TRAINING_SYSTEM},
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": asst_msg},
+            ]
+        });
+        lines.push(serde_json::to_string(&example).unwrap());
+    }
+
+    let content = if lines.is_empty() {
+        String::new()
+    } else {
+        let mut s = lines.join("\n");
+        s.push('\n');
+        s
+    };
+
+    let data_dir = state
+        .db_path
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| ApiError::internal("cannot determine data_dir from db_path"))?;
+    let training_dir = data_dir.join("training");
+    std::fs::create_dir_all(&training_dir)
+        .map_err(|e| ApiError::internal(format!("create training dir: {e}")))?;
+    std::fs::write(training_dir.join("dataset.jsonl"), &content)
+        .map_err(|e| ApiError::internal(format!("write dataset: {e}")))?;
+
+    tracing::info!(
+        lines = lines.len(),
+        path = %training_dir.join("dataset.jsonl").display(),
+        "training dataset exported"
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
+    Ok((headers, content))
+}
+
+async fn handle_admin_train_modelfile(
+    State(state): State<Arc<AppState>>,
+) -> Result<(HeaderMap, String), ApiError> {
+    let content = format!(
+        "\
+FROM llama3.2:3b
+
+SYSTEM \"\"\"
+{system}
+\"\"\"
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER stop \"<|eot_id|>\"
+
+TEMPLATE \"\"\"
+{{{{- if .System }}}}
+<|start_header_id|>system<|end_header_id|>
+
+{{{{ .System }}}}<|eot_id|>
+{{{{- end }}}}
+{{{{- range .Messages }}}}
+<|start_header_id|>{{{{ .Role }}}}<|end_header_id|>
+
+{{{{ .Content }}}}<|eot_id|>
+{{{{- end }}}}
+<|start_header_id|>assistant<|end_header_id|>
+
+\"\"\"
+",
+        system = MESHMIND_TRAINING_SYSTEM,
+    );
+
+    let data_dir = state
+        .db_path
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| ApiError::internal("cannot determine data_dir from db_path"))?;
+    let training_dir = data_dir.join("training");
+    std::fs::create_dir_all(&training_dir)
+        .map_err(|e| ApiError::internal(format!("create training dir: {e}")))?;
+    std::fs::write(training_dir.join("Modelfile"), &content)
+        .map_err(|e| ApiError::internal(format!("write Modelfile: {e}")))?;
+
+    tracing::info!(
+        path = %training_dir.join("Modelfile").display(),
+        "Ollama Modelfile generated"
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
+    Ok((headers, content))
+}
+
 async fn handle_admin_models(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ModelRow>>, StatusCode> {
@@ -1471,6 +1793,102 @@ async fn handle_admin_datasets(
     Ok(Json(rows))
 }
 
+// ---------- Replication endpoints ----------
+
+use node_proto::repl::{
+    GossipMeta as ProtoGossipMeta, SegmentId as ProtoSegmentId, PullSegmentsRequest,
+    PullCasObjectsRequest,
+};
+
+#[derive(Serialize, Deserialize)]
+struct GossipExchangeRequest {
+    gossip_bytes: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct GossipExchangeResponse {
+    gossip_bytes: Vec<u8>,
+    missing_segment_ids: Vec<String>,
+    missing_cas_hashes: Vec<String>,
+}
+
+async fn handle_repl_gossip(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GossipExchangeRequest>,
+) -> Result<Json<GossipExchangeResponse>, ApiError> {
+    use prost::Message;
+    let remote_gossip = ProtoGossipMeta::decode(req.gossip_bytes.as_slice())
+        .map_err(|e| ApiError::bad_request(format!("invalid gossip: {e}")))?;
+
+    let event_log = state.event_log.read().await;
+    let local_gossip = node_repl::build_gossip_meta(
+        &state.node_id, "public", &event_log, &state.cas, &[],
+    )
+    .map_err(|e| ApiError::internal(format!("gossip build failed: {e}")))?;
+
+    let missing_segs = node_repl::find_missing_segments(&local_gossip, &remote_gossip);
+    let missing_cas = node_repl::find_missing_objects(&state.cas, &remote_gossip);
+    drop(event_log);
+
+    let mut local_bytes = Vec::new();
+    local_gossip.encode(&mut local_bytes)
+        .map_err(|e| ApiError::internal(format!("encode gossip: {e}")))?;
+
+    Ok(Json(GossipExchangeResponse {
+        gossip_bytes: local_bytes,
+        missing_segment_ids: missing_segs.iter().map(|s| s.value.clone()).collect(),
+        missing_cas_hashes: missing_cas.iter().map(|h| h.sha256.clone()).collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct PullRequest {
+    segment_ids: Vec<String>,
+    cas_hashes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PullResponse {
+    segments_sent: usize,
+    cas_sent: usize,
+    segment_chunks: Vec<Vec<u8>>,
+    cas_chunks: Vec<Vec<u8>>,
+}
+
+async fn handle_repl_pull(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PullRequest>,
+) -> Result<Json<PullResponse>, ApiError> {
+    let event_log = state.event_log.read().await;
+
+    let seg_req = PullSegmentsRequest {
+        requester: None,
+        tenant_id: None,
+        want_segments: req.segment_ids.iter().map(|s| ProtoSegmentId { value: s.clone() }).collect(),
+        budget: None,
+    };
+    let seg_resp = node_repl::serve_pull_segments(&seg_req, &event_log, &state.node_id)
+        .map_err(|e| ApiError::internal(format!("serve segments: {e}")))?;
+    let segments_sent = seg_resp.chunks.len();
+
+    let cas_req = PullCasObjectsRequest {
+        requester: None,
+        want_hashes: req.cas_hashes.iter().map(|h| node_proto::common::HashRef { sha256: h.clone() }).collect(),
+        budget: None,
+    };
+    let cas_resp = node_repl::serve_pull_cas_objects(&cas_req, &state.cas, &state.node_id)
+        .map_err(|e| ApiError::internal(format!("serve cas objects: {e}")))?;
+    let cas_sent = cas_resp.chunks.len();
+
+    drop(event_log);
+
+    use prost::Message;
+    let segment_chunks: Vec<Vec<u8>> = seg_resp.chunks.iter().map(|c| c.encode_to_vec()).collect();
+    let cas_chunks: Vec<Vec<u8>> = cas_resp.chunks.iter().map(|c| c.encode_to_vec()).collect();
+
+    Ok(Json(PullResponse { segments_sent, cas_sent, segment_chunks, cas_chunks }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1503,7 +1921,7 @@ mod tests {
             event_log: RwLock::new(event_log),
             cas,
             db_path,
-            peer_dir: RwLock::new(PeerDirectory::new()),
+            peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
             backend: Arc::new(MockBackend::new()),
             transport: None,
             consult_config: ConsultConfig::default(),
@@ -1598,6 +2016,21 @@ mod tests {
         assert_eq!(answer.model, "mock-v1");
     }
 
+    const TEST_AUTH: &str = "Bearer test-token";
+
+    #[tokio::test]
+    async fn admin_requires_auth() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::get("/admin/sources").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn admin_event_endpoint() {
         let state = create_test_state();
@@ -1607,6 +2040,7 @@ mod tests {
             .oneshot(
                 Request::post("/admin/event")
                     .header("content-type", "application/json")
+                    .header("authorization", TEST_AUTH)
                     .body(Body::from(
                         serde_json::to_string(&AdminEventRequest {
                             event_id: "evt-test-1".into(),
@@ -1638,6 +2072,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/admin/logs?n=10")
+                    .header("authorization", TEST_AUTH)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1653,7 +2088,12 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/admin/sources").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/admin/sources")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1669,7 +2109,12 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/admin/models").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/admin/models")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1685,7 +2130,12 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/admin/datasets").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/admin/datasets")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1704,6 +2154,7 @@ mod tests {
             .oneshot(
                 Request::post("/admin/train")
                     .header("content-type", "application/json")
+                    .header("authorization", TEST_AUTH)
                     .body(Body::from(
                         serde_json::to_string(&TrainRequest {
                             target: "router".into(),

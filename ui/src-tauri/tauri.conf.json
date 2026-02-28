@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:3000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:9900 http://localhost:9900; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {

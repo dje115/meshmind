@@ -50,7 +50,7 @@ fn create_node_state(
         event_log: RwLock::new(event_log),
         cas,
         db_path,
-        peer_dir: RwLock::new(PeerDirectory::new()),
+        peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
         backend: Arc::new(MockBackend::new()),
         transport,
         consult_config: ConsultConfig::default(),

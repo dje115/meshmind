@@ -59,7 +59,7 @@ impl RegisteredPeer {
 /// The in-memory peer directory used by the rendezvous server.
 #[derive(Default)]
 pub struct RelayDirectory {
-    peers: HashMap<String, RegisteredPeer>,
+    pub(crate) peers: HashMap<String, RegisteredPeer>,
 }
 
 impl RelayDirectory {
@@ -298,18 +298,52 @@ pub async fn run_relay_server(
 
         tokio::spawn(async move {
             match acceptor.accept(tcp_stream).await {
-                Ok(mut tls_stream) => {
+                Ok(tls_stream) => {
                     debug!("relay connection from {peer_addr}");
+                    let (read_half, write_half) = tokio::io::split(tls_stream);
+                    let mut reader = read_half;
+                    let write_half = Arc::new(tokio::sync::Mutex::new(write_half));
+
+                    let (fwd_tx, mut fwd_rx) = mpsc::channel::<Vec<u8>>(64);
+                    let writer_for_fwd = write_half.clone();
+                    tokio::spawn(async move {
+                        while let Some(payload) = fwd_rx.recv().await {
+                            let frame = RelayWireFrame {
+                                msg_type: RelayMsgType::Relay as i32,
+                                payload,
+                            };
+                            let mut w = writer_for_fwd.lock().await;
+                            if write_wire_frame(&mut *w, &frame).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    let mut registered_node_id: Option<String> = None;
+
                     loop {
-                        match read_wire_frame(&mut tls_stream).await {
+                        match read_wire_frame(&mut reader).await {
                             Ok(wire) => {
+                                let is_register = wire.msg_type == RelayMsgType::Register as i32;
                                 let response = {
                                     let mut dir = directory.write().await;
-                                    handle_frame(&mut dir, &wire)
+                                    let resp = handle_frame(&mut dir, &wire);
+                                    if is_register {
+                                        if let Ok(reg_req) = RegisterRequest::decode(wire.payload.as_slice()) {
+                                            let nid = reg_req.node_id.map(|n| n.value).unwrap_or_default();
+                                            if !nid.is_empty() {
+                                                dir.set_relay_tx(&nid, fwd_tx.clone());
+                                                registered_node_id = Some(nid.clone());
+                                                debug!("set relay_tx for {nid}");
+                                            }
+                                        }
+                                    }
+                                    resp
                                 };
                                 match response {
                                     Ok(resp) => {
-                                        if let Err(e) = write_wire_frame(&mut tls_stream, &resp).await {
+                                        let mut w = write_half.lock().await;
+                                        if let Err(e) = write_wire_frame(&mut *w, &resp).await {
                                             warn!("failed to write response to {peer_addr}: {e}");
                                             break;
                                         }
@@ -325,6 +359,14 @@ pub async fn run_relay_server(
                                 break;
                             }
                         }
+                    }
+
+                    if let Some(nid) = registered_node_id {
+                        let mut dir = directory.write().await;
+                        if let Some(peer) = dir.peers.get_mut(&nid) {
+                            peer.relay_tx = None;
+                        }
+                        debug!("cleared relay_tx for {nid}");
                     }
                 }
                 Err(e) => {

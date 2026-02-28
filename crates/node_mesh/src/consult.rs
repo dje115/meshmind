@@ -177,24 +177,40 @@ pub async fn consult_peers(
         config.default_max_context_bytes,
     );
 
+    let deadline = std::time::Duration::from_millis(config.default_deadline_ms as u64);
+
+    let handles: Vec<_> = peers
+        .into_iter()
+        .map(|(peer_id, address, port)| {
+            let transport = Arc::clone(transport);
+            let ask = ask.clone();
+            tokio::spawn(async move {
+                let start = Instant::now();
+                let result = tokio::time::timeout(
+                    deadline,
+                    transport.request(&address, port, &ask),
+                )
+                .await;
+                (peer_id, start, result)
+            })
+        })
+        .collect();
+
     let mut answers = Vec::new();
     let mut refused = Vec::new();
     let mut timed_out = Vec::new();
 
-    for (peer_id, address, port) in &peers {
-        let start = Instant::now();
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(config.default_deadline_ms as u64),
-            transport.request(address, *port, &ask),
-        )
-        .await
-        {
+    for handle in handles {
+        let Ok((peer_id, start, result)) = handle.await else {
+            continue;
+        };
+        match result {
             Ok(Ok(response)) => {
                 let rtt_ms = start.elapsed().as_millis() as u32;
                 match response.body {
                     Some(envelope::Body::Answer(ans)) => {
                         answers.push(PeerAnswer {
-                            peer_id: peer_id.clone(),
+                            peer_id,
                             answer: ans.answer,
                             confidence: ans.confidence,
                             evidence_refs: ans.evidence_refs,
@@ -204,7 +220,7 @@ pub async fn consult_peers(
                     }
                     Some(envelope::Body::Refuse(ref_msg)) => {
                         refused.push(PeerRefusal {
-                            peer_id: peer_id.clone(),
+                            peer_id,
                             code: ref_msg.code,
                             message: ref_msg.message,
                         });
@@ -213,10 +229,10 @@ pub async fn consult_peers(
                 }
             }
             Ok(Err(_)) => {
-                timed_out.push(peer_id.clone());
+                timed_out.push(peer_id);
             }
             Err(_) => {
-                timed_out.push(peer_id.clone());
+                timed_out.push(peer_id);
             }
         }
     }
@@ -224,7 +240,7 @@ pub async fn consult_peers(
     let best_answer = answers
         .iter()
         .filter(|a| a.confidence >= config.min_confidence)
-        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal))
         .cloned();
 
     ConsultResult {

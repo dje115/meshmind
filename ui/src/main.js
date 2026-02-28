@@ -1,4 +1,13 @@
-import { api } from './api.js';
+import { api, setAdminToken } from './api.js';
+import { marked } from 'marked';
+
+marked.use({
+  breaks: true,
+  gfm: true,
+  renderer: {
+    html: () => '',
+  },
+});
 
 let currentPage = 'dashboard';
 let statusData = null;
@@ -98,6 +107,7 @@ async function renderDashboard(el) {
       api.getLogs(10).catch(() => []),
     ]);
     statusData = status;
+    if (status.admin_token) setAdminToken(status.admin_token);
     updateNodeStatus(true, status);
 
     document.getElementById('dash-stats').innerHTML = `
@@ -165,13 +175,16 @@ async function renderDashboard(el) {
 }
 
 // --- Ask / Chat ---
-let chatState = { conversationId: null, conversations: [], sending: false };
+let chatState = { conversationId: null, conversations: [], sending: false, searchQuery: '' };
 
 async function renderAsk(el) {
   el.innerHTML = `
     <div class="chat-layout">
       <div class="chat-sidebar">
         <button class="btn btn-primary chat-new-btn" id="chat-new">+ New Chat</button>
+        <div class="chat-search-wrap">
+          <input type="search" id="chat-search" class="chat-search-input" placeholder="Search conversations..." />
+        </div>
         <div class="chat-conv-list" id="chat-conv-list"></div>
       </div>
       <div class="chat-main">
@@ -219,22 +232,41 @@ async function renderAsk(el) {
   });
 
   document.getElementById('chat-send').addEventListener('click', sendChatMessage);
+
+  const searchInput = document.getElementById('chat-search');
+  searchInput.addEventListener('input', () => {
+    chatState.searchQuery = searchInput.value;
+    renderConversationList();
+  });
 }
 
 async function loadConversationList() {
   try {
     chatState.conversations = await api.listConversations();
   } catch { chatState.conversations = []; }
+  renderConversationList();
+}
 
+function renderConversationList() {
   const list = document.getElementById('chat-conv-list');
   if (!list) return;
+
+  const query = (chatState.searchQuery || '').toLowerCase();
+  const filtered = query
+    ? chatState.conversations.filter(c => (c.title || '').toLowerCase().includes(query))
+    : chatState.conversations;
 
   if (chatState.conversations.length === 0) {
     list.innerHTML = '<div class="chat-conv-empty">No conversations yet</div>';
     return;
   }
 
-  list.innerHTML = chatState.conversations.map(c => `
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="chat-conv-empty">No matching conversations</div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(c => `
     <div class="chat-conv-item ${c.conversation_id === chatState.conversationId ? 'active' : ''}" data-id="${escapeHtml(c.conversation_id)}">
       <span class="chat-conv-title">${escapeHtml(c.title)}</span>
       <span class="chat-conv-time">${formatTimeShort(c.updated_at_ms)}</span>
@@ -373,7 +405,11 @@ function appendMessageBubble(role, content, meta) {
 
   const textDiv = document.createElement('div');
   textDiv.className = 'chat-bubble-text';
-  textDiv.textContent = content;
+  if (role === 'assistant') {
+    textDiv.innerHTML = marked.parse(content);
+  } else {
+    textDiv.textContent = content;
+  }
   bubble.appendChild(textDiv);
 
   if (role === 'assistant' && meta) {
@@ -406,9 +442,40 @@ async function renderSources(el) {
     <div class="page-header">
       <h1>Data Sources</h1>
       <p>Discovered data sources and their approval status</p>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm btn-primary" id="btn-approve-all">Approve All</button>
+        <button class="btn btn-sm btn-primary" id="btn-ingest-all">Ingest All</button>
+      </div>
     </div>
     <div id="sources-content"><div class="empty-state"><div class="spinner"></div></div></div>
   `;
+
+  document.getElementById('btn-approve-all').onclick = async () => {
+    const btn = document.getElementById('btn-approve-all');
+    btn.disabled = true; btn.textContent = 'Approving...';
+    try {
+      const r = await api.approveAll();
+      toast(`Approved ${r.approved} sources (${r.skipped} skipped)`, 'success');
+      renderSources(el);
+    } catch (e) {
+      toast(`Error: ${e.message}`, 'error');
+      btn.disabled = false; btn.textContent = 'Approve All';
+    }
+  };
+
+  document.getElementById('btn-ingest-all').onclick = async () => {
+    const btn = document.getElementById('btn-ingest-all');
+    btn.disabled = true; btn.textContent = 'Ingesting...';
+    toast('Bulk ingestion started...', 'info');
+    try {
+      const r = await api.ingestAll();
+      toast(`Ingested ${r.ingested} sources: ${r.total_rows} rows, ${r.total_docs} docs (${r.failed} failed)`, 'success');
+      renderSources(el);
+    } catch (e) {
+      toast(`Error: ${e.message}`, 'error');
+      btn.disabled = false; btn.textContent = 'Ingest All';
+    }
+  };
 
   try {
     const sources = await api.getSources();
@@ -728,6 +795,7 @@ async function pollStatus() {
   try {
     const s = await api.getStatus();
     statusData = s;
+    if (s.admin_token) setAdminToken(s.admin_token);
     updateNodeStatus(true, s);
   } catch {
     updateNodeStatus(false);
