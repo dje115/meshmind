@@ -12,6 +12,8 @@ node_mesh = { workspace = true }
 node_discovery = { workspace = true }
 node_connectors = { path = "../node_connectors" }
 node_ingest = { path = "../node_ingest" }
+node_trainer = { workspace = true }
+node_datasets = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

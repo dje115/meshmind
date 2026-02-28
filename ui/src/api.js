@@ -8,6 +8,7 @@ async function request(method, path, body) {
   }
   const res = await fetch(`${BASE}${path}`, opts);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -30,4 +31,10 @@ export const api = {
   ingestSource: (sourceId) => request('POST', '/admin/ingest', { source_id: sourceId }),
   submitEvent: (eventId, title, summary, tags = []) =>
     request('POST', '/admin/event', { event_id: eventId, event_type: 'case_created', title, summary, tags }),
+  listConversations: () => request('GET', '/conversations'),
+  createConversation: () => request('POST', '/conversations'),
+  getMessages: (conversationId) => request('GET', `/conversations/${encodeURIComponent(conversationId)}/messages`),
+  sendMessage: (conversationId, content, maxTokens = 1024) =>
+    request('POST', `/conversations/${encodeURIComponent(conversationId)}/messages`, { content, max_tokens: maxTokens }),
+  deleteConversation: (conversationId) => request('DELETE', `/conversations/${encodeURIComponent(conversationId)}`),
 };

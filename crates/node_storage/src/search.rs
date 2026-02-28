@@ -23,6 +23,16 @@ pub struct CaseHit {
 pub struct ArtifactHit {
     pub artifact_id: String,
     pub title: String,
+    pub summary: String,
+    pub rank: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub hit_type: String,
+    pub id: String,
+    pub title: String,
+    pub summary: String,
     pub rank: f64,
 }
 
@@ -54,7 +64,7 @@ pub fn search_cases(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
 /// Search artifacts by FTS5 query.
 pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<ArtifactHit>> {
     let mut stmt = conn.prepare(
-        "SELECT artifact_id, title, rank
+        "SELECT artifact_id, title, summary, rank
          FROM artifacts_fts
          WHERE artifacts_fts MATCH ?1
          ORDER BY rank
@@ -66,13 +76,45 @@ pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<
             Ok(ArtifactHit {
                 artifact_id: row.get(0)?,
                 title: row.get(1)?,
-                rank: row.get(2)?,
+                summary: row.get(2)?,
+                rank: row.get(3)?,
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
     Ok(hits)
+}
+
+/// Unified search across both cases and artifacts, merged by rank.
+pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let cases = search_cases(conn, query, limit)?;
+    let artifacts = search_artifacts(conn, query, limit)?;
+
+    let mut all: Vec<SearchHit> = Vec::with_capacity(cases.len() + artifacts.len());
+
+    for c in cases {
+        all.push(SearchHit {
+            hit_type: "case".into(),
+            id: c.case_id,
+            title: c.title,
+            summary: c.summary,
+            rank: c.rank,
+        });
+    }
+    for a in artifacts {
+        all.push(SearchHit {
+            hit_type: "artifact".into(),
+            id: a.artifact_id,
+            title: a.title,
+            summary: a.summary,
+            rank: a.rank,
+        });
+    }
+
+    all.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+    all.truncate(limit);
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -146,12 +188,12 @@ mod tests {
         }
 
         let artifacts = vec![
-            ("a1", "K8s rollback playbook", ArtifactType::Runbook),
-            ("a2", "SSL renewal template", ArtifactType::Template),
-            ("a3", "Database failover recipe", ArtifactType::Recipe),
+            ("a1", "K8s rollback playbook", "Step-by-step guide to rolling back Kubernetes deployments safely", ArtifactType::Runbook),
+            ("a2", "SSL renewal template", "Template for renewing SSL/TLS certificates using certbot and ACME", ArtifactType::Template),
+            ("a3", "Database failover recipe", "Automated PostgreSQL failover with pgbouncer connection pooling", ArtifactType::Recipe),
         ];
 
-        for (id, title, atype) in artifacts {
+        for (id, title, summary, atype) in artifacts {
             let event = EventEnvelope {
                 event_id: format!("e-{id}"),
                 r#type: EventType::ArtifactPublished as i32,
@@ -174,6 +216,7 @@ mod tests {
                         artifact_type: atype as i32,
                         version: 1,
                         title: title.to_string(),
+                        summary: summary.to_string(),
                         content_ref: Some(HashRef {
                             sha256: format!("content-{id}"),
                         }),

@@ -164,54 +164,240 @@ async function renderDashboard(el) {
   }
 }
 
-// --- Ask ---
-function renderAsk(el) {
+// --- Ask / Chat ---
+let chatState = { conversationId: null, conversations: [], sending: false };
+
+async function renderAsk(el) {
   el.innerHTML = `
-    <div class="ask-container">
-      <div class="page-header">
-        <h1>Ask MeshMind</h1>
-        <p>Query your local knowledge base, peers, and optionally the web</p>
+    <div class="chat-layout">
+      <div class="chat-sidebar">
+        <button class="btn btn-primary chat-new-btn" id="chat-new">+ New Chat</button>
+        <div class="chat-conv-list" id="chat-conv-list"></div>
       </div>
-      <div class="ask-input-wrapper">
-        <input type="text" id="ask-input" placeholder="Ask anything..." autofocus />
-        <button class="btn btn-primary" id="ask-btn">Ask</button>
+      <div class="chat-main">
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">&#9670;</div>
+            <h2>Ask MeshMind</h2>
+            <p>Your local-first AI assistant. Ask about your documents, invoices, photos, or any ingested data.</p>
+            <div class="chat-suggestions">
+              <button class="chat-suggestion" data-q="What invoices do I have?">What invoices do I have?</button>
+              <button class="chat-suggestion" data-q="Summarize my documents">Summarize my documents</button>
+              <button class="chat-suggestion" data-q="What photos have GPS data?">What photos have GPS data?</button>
+            </div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea id="chat-input" placeholder="Message MeshMind..." rows="1"></textarea>
+          <button class="btn btn-primary chat-send-btn" id="chat-send">&#9654;</button>
+        </div>
       </div>
-      <div id="ask-results"></div>
     </div>
   `;
 
-  const input = document.getElementById('ask-input');
-  const btn = document.getElementById('ask-btn');
-  const results = document.getElementById('ask-results');
+  await loadConversationList();
 
-  async function doAsk() {
-    const q = input.value.trim();
-    if (!q) return;
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>';
-    results.innerHTML = `<div class="card"><div class="empty-state"><div class="spinner"></div><div class="empty-state-text" style="margin-top:12px">Thinking...</div></div></div>`;
+  document.getElementById('chat-new').addEventListener('click', startNewChat);
 
-    try {
-      const ans = await api.ask(q);
-      results.innerHTML = `
-        <div class="card answer-card">
-          <div class="answer-text">${escapeHtml(ans.answer)}</div>
-          <div class="answer-meta">
-            <span>Confidence: <strong>${(ans.confidence * 100).toFixed(0)}%</strong></span>
-            <span>Model: <strong>${escapeHtml(ans.model)}</strong></span>
-            ${ans.context_used.length ? `<span>Context: ${ans.context_used.length} items</span>` : ''}
-          </div>
-        </div>
-      `;
-    } catch (e) {
-      results.innerHTML = `<div class="card"><div style="color:var(--red)">Error: ${escapeHtml(e.message)}</div></div>`;
+  document.querySelectorAll('.chat-suggestion').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('chat-input').value = btn.dataset.q;
+      sendChatMessage();
+    });
+  });
+
+  const textarea = document.getElementById('chat-input');
+  textarea.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
     }
-    btn.disabled = false;
-    btn.textContent = 'Ask';
+  });
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+  });
+
+  document.getElementById('chat-send').addEventListener('click', sendChatMessage);
+}
+
+async function loadConversationList() {
+  try {
+    chatState.conversations = await api.listConversations();
+  } catch { chatState.conversations = []; }
+
+  const list = document.getElementById('chat-conv-list');
+  if (!list) return;
+
+  if (chatState.conversations.length === 0) {
+    list.innerHTML = '<div class="chat-conv-empty">No conversations yet</div>';
+    return;
   }
 
-  btn.addEventListener('click', doAsk);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') doAsk(); });
+  list.innerHTML = chatState.conversations.map(c => `
+    <div class="chat-conv-item ${c.conversation_id === chatState.conversationId ? 'active' : ''}" data-id="${escapeHtml(c.conversation_id)}">
+      <span class="chat-conv-title">${escapeHtml(c.title)}</span>
+      <span class="chat-conv-time">${formatTimeShort(c.updated_at_ms)}</span>
+      <button class="chat-conv-delete" data-id="${escapeHtml(c.conversation_id)}" title="Delete">&times;</button>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.chat-conv-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('chat-conv-delete')) return;
+      loadConversation(item.dataset.id);
+    });
+  });
+
+  list.querySelectorAll('.chat-conv-delete').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      try {
+        await api.deleteConversation(id);
+        if (chatState.conversationId === id) {
+          chatState.conversationId = null;
+          showWelcome();
+        }
+        await loadConversationList();
+      } catch (err) { toast(`Delete failed: ${err.message}`, 'error'); }
+    });
+  });
+}
+
+function showWelcome() {
+  const area = document.getElementById('chat-messages');
+  if (!area) return;
+  area.innerHTML = `
+    <div class="chat-welcome">
+      <div class="chat-welcome-icon">&#9670;</div>
+      <h2>Ask MeshMind</h2>
+      <p>Your local-first AI assistant. Ask about your documents, invoices, photos, or any ingested data.</p>
+      <div class="chat-suggestions">
+        <button class="chat-suggestion" data-q="What invoices do I have?">What invoices do I have?</button>
+        <button class="chat-suggestion" data-q="Summarize my documents">Summarize my documents</button>
+        <button class="chat-suggestion" data-q="What photos have GPS data?">What photos have GPS data?</button>
+      </div>
+    </div>
+  `;
+  area.querySelectorAll('.chat-suggestion').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('chat-input').value = btn.dataset.q;
+      sendChatMessage();
+    });
+  });
+}
+
+async function loadConversation(convId) {
+  chatState.conversationId = convId;
+  await loadConversationList();
+
+  const area = document.getElementById('chat-messages');
+  if (!area) return;
+
+  try {
+    const msgs = await api.getMessages(convId);
+    area.innerHTML = '';
+    for (const m of msgs) {
+      appendMessageBubble(m.role, m.content, m);
+    }
+    area.scrollTop = area.scrollHeight;
+  } catch (e) {
+    area.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">Failed to load messages</div></div>`;
+  }
+}
+
+async function startNewChat() {
+  try {
+    const conv = await api.createConversation();
+    chatState.conversationId = conv.conversation_id;
+    showWelcome();
+    await loadConversationList();
+    document.getElementById('chat-input')?.focus();
+  } catch (e) { toast(`Error: ${e.message}`, 'error'); }
+}
+
+async function sendChatMessage() {
+  if (chatState.sending) return;
+  const textarea = document.getElementById('chat-input');
+  const content = textarea.value.trim();
+  if (!content) return;
+
+  if (!chatState.conversationId) {
+    try {
+      const conv = await api.createConversation();
+      chatState.conversationId = conv.conversation_id;
+    } catch (e) { toast(`Error: ${e.message}`, 'error'); return; }
+  }
+
+  const area = document.getElementById('chat-messages');
+  const welcome = area.querySelector('.chat-welcome');
+  if (welcome) welcome.remove();
+
+  appendMessageBubble('user', content);
+  textarea.value = '';
+  textarea.style.height = 'auto';
+
+  const typingEl = document.createElement('div');
+  typingEl.className = 'chat-bubble chat-bubble-assistant chat-typing';
+  typingEl.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  area.appendChild(typingEl);
+  area.scrollTop = area.scrollHeight;
+
+  chatState.sending = true;
+  const sendBtn = document.getElementById('chat-send');
+  if (sendBtn) sendBtn.disabled = true;
+
+  try {
+    const resp = await api.sendMessage(chatState.conversationId, content);
+    typingEl.remove();
+    appendMessageBubble('assistant', resp.content, resp);
+    area.scrollTop = area.scrollHeight;
+    await loadConversationList();
+  } catch (e) {
+    typingEl.remove();
+    appendMessageBubble('assistant', `Error: ${e.message}`, { confidence: 0, model: '', context_used: [] });
+  }
+
+  chatState.sending = false;
+  if (sendBtn) sendBtn.disabled = false;
+  textarea.focus();
+}
+
+function appendMessageBubble(role, content, meta) {
+  const area = document.getElementById('chat-messages');
+  if (!area) return;
+
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble chat-bubble-${role}`;
+
+  const textDiv = document.createElement('div');
+  textDiv.className = 'chat-bubble-text';
+  textDiv.textContent = content;
+  bubble.appendChild(textDiv);
+
+  if (role === 'assistant' && meta) {
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'chat-bubble-meta';
+    const parts = [];
+    if (meta.model) parts.push(meta.model);
+    if (meta.confidence) parts.push(`${(meta.confidence * 100).toFixed(0)}%`);
+    if (meta.context_used && meta.context_used.length) parts.push(`${meta.context_used.length} sources`);
+    metaDiv.textContent = parts.join(' · ');
+    bubble.appendChild(metaDiv);
+  }
+
+  area.appendChild(bubble);
+}
+
+function formatTimeShort(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 // --- Sources ---
@@ -471,8 +657,13 @@ function showTrainModal() {
     const preset = document.getElementById('train-preset').value;
     try {
       const res = await api.train(target, preset);
-      toast(`Training started: ${res.job_id}`, 'success');
+      if (res.status === 'completed') {
+        toast(`Training complete! Score: ${(res.score * 100).toFixed(1)}% | Model: ${res.model_version} | Dataset: ${res.dataset_items} items`, 'success');
+      } else {
+        toast(`Training ${res.status} (${res.dataset_items} dataset items)`, res.status.startsWith('rejected') || res.status.startsWith('failed') ? 'error' : 'info');
+      }
       overlay.remove();
+      renderPage(currentPage);
     } catch (e) {
       toast(`Error: ${e.message}`, 'error');
     }

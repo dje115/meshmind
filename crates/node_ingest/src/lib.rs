@@ -3,6 +3,7 @@
 //! Runs incremental, resumable ingestion jobs per approved SourceProfile.
 //! Stores content in CAS, emits events, projects into SQLite views.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -75,6 +76,49 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+const TITLE_KEYS: &[&str] = &["filename", "file_name", "name", "title", "file_path"];
+
+fn build_artifact_title(table: &str, entity_id: &str, columns: &BTreeMap<String, String>) -> String {
+    for key in TITLE_KEYS {
+        if let Some(val) = columns.get(*key) {
+            if !val.is_empty() {
+                let name: String = val.chars().take(120).collect();
+                return name;
+            }
+        }
+    }
+    format!("{}/{}", table, entity_id)
+}
+
+fn build_artifact_summary(columns: &BTreeMap<String, String>, max_len: usize) -> String {
+    if let Some(text) = columns.get("content_text") {
+        if !text.is_empty() {
+            return truncate_str(text, max_len);
+        }
+    }
+
+    let mut parts = Vec::new();
+    for (k, v) in columns {
+        if k == "content_text" || v.is_empty() {
+            continue;
+        }
+        parts.push(format!("{}: {}", k, truncate_str(v, 200)));
+    }
+    truncate_str(&parts.join(" | "), max_len)
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
 }
 
 // ── Event builders ─────────────────────────────────────────────────────────
@@ -184,6 +228,9 @@ pub fn run_ingest(
                 let json_len = json.len() as u64;
                 let hash_ref = cas.put_bytes("application/json", &json)?;
 
+                let title = build_artifact_title(table, &row.entity_id, &row.columns);
+                let summary = build_artifact_summary(&row.columns, 500);
+
                 let artifact_id = format!("{}-{}-{}", job.ingest_id, table, row.entity_id);
                 let artifact_event = EventEnvelope {
                     event_id: Uuid::new_v4().to_string(),
@@ -200,10 +247,11 @@ pub fn run_ingest(
                             artifact_id,
                             artifact_type: ArtifactType::Document as i32,
                             version: 1,
-                            title: format!("{}/{}", table, row.entity_id),
+                            title,
                             content_ref: Some(hash_ref),
                             shareable: false,
                             expires_unix_ms: 0,
+                            summary,
                         },
                     )),
                     ..Default::default()

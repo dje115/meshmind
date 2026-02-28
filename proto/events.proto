@@ -122,6 +122,7 @@ message ArtifactPublished {
   meshmind.common.HashRef content_ref = 5;
   bool shareable = 6;
   int64 expires_unix_ms = 7;
+  string summary = 8;
 }
 message ArtifactDeprecated { string artifact_id = 1; uint32 version = 2; string reason = 3; }
 

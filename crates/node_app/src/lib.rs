@@ -122,6 +122,7 @@ pub fn load_seed_data(
                         artifact_type: ArtifactType::Runbook as i32,
                         version: 1,
                         title: runbook.title,
+                        summary: runbook.content.chars().take(500).collect(),
                         content_ref: Some(content_ref),
                         shareable: true,
                         expires_unix_ms: 0,

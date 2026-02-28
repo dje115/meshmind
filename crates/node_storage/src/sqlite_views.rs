@@ -39,6 +39,7 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             version         INTEGER NOT NULL,
             artifact_type   INTEGER NOT NULL,
             title           TEXT NOT NULL,
+            summary         TEXT NOT NULL DEFAULT '',
             content_hash    TEXT,
             shareable       INTEGER NOT NULL DEFAULT 0,
             tenant_id       TEXT NOT NULL,
@@ -173,6 +174,25 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             started_at_ms   INTEGER NOT NULL DEFAULT 0,
             completed_at_ms INTEGER
         );
+
+        -- Chat conversations
+        CREATE TABLE IF NOT EXISTS conversations_view (
+            conversation_id TEXT PRIMARY KEY,
+            title           TEXT NOT NULL DEFAULT 'New conversation',
+            created_at_ms   INTEGER NOT NULL,
+            updated_at_ms   INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS messages_view (
+            message_id      TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            context_used    TEXT NOT NULL DEFAULT '[]',
+            model           TEXT NOT NULL DEFAULT '',
+            confidence      REAL NOT NULL DEFAULT 0.0,
+            created_at_ms   INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -189,7 +209,11 @@ fn create_fts_tables(conn: &Connection) -> Result<()> {
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
-            artifact_id, title
+            artifact_id, title, summary
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            message_id, content
         );
         ",
     )?;
@@ -207,8 +231,32 @@ pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     }
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    migrate_artifacts_summary(&conn)?;
     create_schema(&conn)?;
     Ok(conn)
+}
+
+/// Migrate existing databases: add `summary` column to artifacts_view
+/// and recreate artifacts_fts with the new schema.
+fn migrate_artifacts_summary(conn: &Connection) -> Result<()> {
+    let has_summary: bool = conn
+        .prepare("PRAGMA table_info(artifacts_view)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(names.contains(&"summary".to_string()))
+        })
+        .unwrap_or(false);
+
+    if !has_summary {
+        let _ = conn.execute_batch(
+            "ALTER TABLE artifacts_view ADD COLUMN summary TEXT NOT NULL DEFAULT '';
+             DROP TABLE IF EXISTS artifacts_fts;",
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -240,6 +288,8 @@ mod tests {
         assert!(tables.contains(&"ingests_view".to_string()));
         assert!(tables.contains(&"datasets_view".to_string()));
         assert!(tables.contains(&"federated_view".to_string()));
+        assert!(tables.contains(&"conversations_view".to_string()));
+        assert!(tables.contains(&"messages_view".to_string()));
     }
 
     #[test]

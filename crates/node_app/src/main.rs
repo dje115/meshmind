@@ -13,12 +13,13 @@ use node_api::AppState;
 use node_crypto::DevCa;
 use node_mesh::tcp_transport::{EnvelopeHandler, TcpServer, TcpTransport};
 use node_mesh::{ConsultConfig, PeerDirectory};
-use node_policy::PolicyEngine;
+use node_policy::{PolicyConfig, PolicyEngine};
 use node_proto::common::*;
 use node_proto::mesh::*;
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
 use node_storage::sqlite_views;
+use node_trainer::{ModelRegistry, Trainer};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct NodeConfig {
@@ -374,13 +375,21 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var_os("HOME"))
     {
         let home = std::path::PathBuf::from(home);
-        for subdir in &["Documents", "Pictures", "Desktop", "Downloads"] {
+        for subdir in &["Documents", "Pictures", "Desktop", "Downloads", "OneDrive"] {
             let p = home.join(subdir);
             if p.is_dir() {
                 scan_dirs.push(p);
             }
         }
     }
+
+    // Training subsystem: policy allows training, model registry shared with trainer
+    let train_policy = Arc::new(PolicyEngine::new(PolicyConfig {
+        allow_train: true,
+        ..Default::default()
+    }));
+    let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
+    let trainer = Arc::new(Trainer::new(train_policy, model_registry.clone()));
 
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
@@ -393,6 +402,8 @@ async fn main() -> Result<()> {
         node_id: node_id.clone(),
         admin_token: config.admin_token,
         scan_dirs,
+        trainer,
+        model_registry,
     });
 
     // Start TCP mesh server

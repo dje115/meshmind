@@ -94,14 +94,15 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
             Payload::ArtifactPublished(ap) => {
                 conn.execute(
                     "INSERT OR REPLACE INTO artifacts_view
-                     (artifact_id, version, artifact_type, title, content_hash,
+                     (artifact_id, version, artifact_type, title, summary, content_hash,
                       shareable, tenant_id, sensitivity, node_id, expires_at_ms, created_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         ap.artifact_id,
                         ap.version,
                         ap.artifact_type,
                         ap.title,
+                        ap.summary,
                         ap.content_ref.as_ref().map(|h| &h.sha256),
                         ap.shareable as i32,
                         tenant_id,
@@ -486,8 +487,8 @@ fn update_artifacts_fts(conn: &Connection, artifact_id: &str, _version: u32) -> 
         params![artifact_id],
     )?;
     conn.execute(
-        "INSERT INTO artifacts_fts (artifact_id, title)
-         SELECT artifact_id, title FROM artifacts_view
+        "INSERT INTO artifacts_fts (artifact_id, title, summary)
+         SELECT artifact_id, title, summary FROM artifacts_view
          WHERE artifact_id = ?1
          ORDER BY version DESC
          LIMIT 1",
@@ -647,6 +648,7 @@ mod tests {
                     artifact_type: ArtifactType::Runbook as i32,
                     version: 1,
                     title: "K8s runbook".into(),
+                    summary: "Step-by-step guide to K8s operations".into(),
                     content_ref: Some(HashRef {
                         sha256: "rb-hash".into(),
                     }),

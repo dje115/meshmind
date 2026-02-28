@@ -39,6 +39,13 @@ fn create_node_state(
     let db_path = tmp.path().join("sqlite").join("meshmind.db");
     let _conn = sqlite_views::open_db(&db_path).unwrap();
 
+    let policy = Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+        allow_train: true,
+        ..Default::default()
+    }));
+    let model_registry = Arc::new(tokio::sync::Mutex::new(node_trainer::ModelRegistry::new()));
+    let trainer = Arc::new(node_trainer::Trainer::new(policy, model_registry.clone()));
+
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
         cas,
@@ -50,6 +57,8 @@ fn create_node_state(
         node_id: name.into(),
         admin_token: "test-token".into(),
         scan_dirs: vec![],
+        trainer,
+        model_registry,
     });
 
     (state, tmp)

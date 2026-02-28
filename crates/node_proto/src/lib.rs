@@ -208,6 +208,7 @@ mod tests {
                     artifact_type: ArtifactType::Runbook as i32,
                     version: 1,
                     title: "K8s rollback playbook".into(),
+                    summary: "Step-by-step guide to rolling back K8s deployments".into(),
                     content_ref: Some(HashRef {
                         sha256: "abcd".into(),
                     }),
