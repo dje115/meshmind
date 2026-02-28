@@ -40,6 +40,14 @@ struct NodeConfig {
     enable_mdns: bool,
     #[serde(default = "default_repl_interval")]
     replication_interval_secs: u64,
+    #[serde(default)]
+    relay_addr: Option<String>,
+    #[serde(default)]
+    relay_port: Option<u16>,
+    #[serde(default)]
+    relay_only: bool,
+    #[serde(default)]
+    public_addr: Option<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -76,6 +84,10 @@ impl Default for NodeConfig {
             admin_token: default_admin_token(),
             enable_mdns: true,
             replication_interval_secs: 30,
+            relay_addr: None,
+            relay_port: None,
+            relay_only: false,
+            public_addr: None,
         }
     }
 }
@@ -394,6 +406,99 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => tracing::warn!("mDNS daemon failed: {e}"),
+        }
+    }
+
+    // Start relay transport (Internet Mode) if configured
+    if let (Some(relay_addr), Some(relay_port)) = (&config.relay_addr, config.relay_port) {
+        tracing::info!("relay mode enabled: {}:{}", relay_addr, relay_port);
+        match node_mesh::RelayTransport::new(&identity, &ca.cert_pem, relay_addr, relay_port) {
+            Ok(relay_transport) => {
+                let relay = Arc::new(relay_transport);
+                let public_addr = config
+                    .public_addr
+                    .clone()
+                    .unwrap_or_default();
+
+                let relay_reg = relay.clone();
+                tokio::spawn(async move {
+                    match relay_reg
+                        .register(
+                            vec!["inference".into(), "storage".into()],
+                            &public_addr,
+                            config.relay_only,
+                        )
+                        .await
+                    {
+                        Ok(resp) if resp.success => {
+                            tracing::info!("registered with relay server (token={})", resp.relay_token);
+                        }
+                        Ok(resp) => {
+                            tracing::warn!("relay registration failed: {}", resp.error);
+                        }
+                        Err(e) => {
+                            tracing::warn!("relay registration error: {e}");
+                        }
+                    }
+                });
+
+                // Start relay heartbeat loop
+                let relay_hb = relay.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        match relay_hb.heartbeat().await {
+                            Ok(resp) if resp.alive => {
+                                tracing::debug!("relay heartbeat ok ({} peers)", resp.connected_peers);
+                            }
+                            Ok(_) => {
+                                tracing::warn!("relay heartbeat: not alive");
+                            }
+                            Err(e) => {
+                                tracing::debug!("relay heartbeat failed: {e}");
+                            }
+                        }
+                    }
+                });
+
+                // Start WAN discovery loop
+                let relay_disc = relay.clone();
+                let wan_peer_dir = peer_dir.clone();
+                let wan_node_id = node_id.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        match relay_disc.discover("public", 30).await {
+                            Ok(resp) => {
+                                let mut dir = wan_peer_dir.write().await;
+                                for peer in &resp.peers {
+                                    let pid = peer.node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
+                                    if pid.is_empty() || pid == wan_node_id {
+                                        continue;
+                                    }
+                                    let addr = if peer.public_addr.is_empty() {
+                                        "relay".to_string()
+                                    } else {
+                                        peer.public_addr.clone()
+                                    };
+                                    let is_new = dir.upsert(pid, &addr, peer.mesh_port as u16);
+                                    if is_new {
+                                        tracing::info!("WAN: discovered peer {pid} at {addr}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("WAN discovery failed: {e}");
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("failed to create relay transport: {e}");
+            }
         }
     }
 

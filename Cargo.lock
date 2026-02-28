@@ -998,6 +998,7 @@ dependencies = [
  "node_mesh",
  "node_policy",
  "node_proto",
+ "node_relay",
  "node_repl",
  "node_research",
  "node_storage",
@@ -1152,6 +1153,27 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-build",
+]
+
+[[package]]
+name = "node_relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "node_crypto",
+ "node_proto",
+ "prost",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

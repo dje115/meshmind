@@ -1,0 +1,84 @@
+syntax = "proto3";
+package meshmind.relay;
+import "common.proto";
+
+// Registration: node announces itself to the rendezvous server.
+message RegisterRequest {
+  meshmind.common.NodeId node_id = 1;
+  string public_addr = 2;   // externally reachable host:port, empty if relay-only
+  uint32 mesh_port = 3;
+  repeated string capabilities = 4;
+  meshmind.common.TenantId tenant_id = 5;
+  bool relay_only = 6;      // true = node cannot accept direct connections
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string relay_token = 2;   // opaque token for authenticating relay frames
+  string assigned_relay_id = 3;
+  string error = 4;
+}
+
+// Heartbeat: keep registration alive.
+message HeartbeatRequest {
+  meshmind.common.NodeId node_id = 1;
+  string relay_token = 2;
+}
+
+message HeartbeatResponse {
+  bool alive = 1;
+  uint32 connected_peers = 2;
+}
+
+// Discovery: find peers via the rendezvous server.
+message DiscoverRequest {
+  meshmind.common.NodeId requester = 1;
+  meshmind.common.TenantId tenant_id = 2;
+  uint32 max_results = 3;
+}
+
+message PeerInfo {
+  meshmind.common.NodeId node_id = 1;
+  string public_addr = 2;
+  uint32 mesh_port = 3;
+  repeated string capabilities = 4;
+  bool relay_only = 5;
+  uint64 last_seen_ms = 6;
+}
+
+message DiscoverResponse {
+  repeated PeerInfo peers = 1;
+}
+
+// Relay: forward an envelope through the relay server.
+message RelayFrame {
+  meshmind.common.NodeId from_node_id = 1;
+  meshmind.common.NodeId to_node_id = 2;
+  string relay_token = 3;
+  bytes envelope_bytes = 4;  // serialized mesh.Envelope
+  uint64 sequence = 5;
+}
+
+message RelayAck {
+  uint64 sequence = 1;
+  bool delivered = 2;
+  string error = 3;
+}
+
+// Rendezvous server wire protocol: wraps all message types in one frame.
+enum RelayMsgType {
+  RELAY_MSG_TYPE_UNSPECIFIED = 0;
+  REGISTER = 1;
+  REGISTER_RESP = 2;
+  HEARTBEAT = 3;
+  HEARTBEAT_RESP = 4;
+  DISCOVER = 5;
+  DISCOVER_RESP = 6;
+  RELAY = 7;
+  RELAY_ACK = 8;
+}
+
+message RelayWireFrame {
+  RelayMsgType msg_type = 1;
+  bytes payload = 2;  // one of the above messages, serialized
+}

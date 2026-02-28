@@ -399,7 +399,7 @@ List all dataset manifests with source, preset, item count, and size.
 ## Testing
 
 ```bash
-# Run all tests (228 tests across 18 crates)
+# Run all tests (246 tests across 19 crates)
 cargo test --workspace
 
 # Run tests for a specific crate
@@ -421,10 +421,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | Crate | Tests | Coverage |
 |---|---|---|
-| `node_proto` | 49 | Protobuf roundtrip serialization, enum coverage, all message types |
+| `node_proto` | 55 | Protobuf roundtrip serialization, enum coverage, all message types incl. relay |
 | `node_storage` | 39 | CAS put/get/dedup, event log append/replay/chain, projector, FTS search, snapshots |
 | `node_policy` | 31 | Tenant, sensitivity, share, web, train, ingest, redaction, dataset, delta gates |
-| `node_mesh` | 24 | Membership states, peer directory, transport mock, peer consult, mTLS TCP |
+| `node_mesh` | 26 | Membership states, peer directory, transport mock, peer consult, mTLS TCP, hybrid relay |
 | `node_repl` | 8 | Gossip, segment pull, CAS pull, full A→B replication, policy gates |
 | `node_crypto` | 7 | CA generation, node certs, mTLS server/client config |
 | `node_connectors` | 9 | SQLite/CSV/JSON inspect + ingest, PII/secrets classifier |
@@ -439,8 +439,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 | `node_federated` | 5 | Round lifecycle, delta submission, FedAvg aggregation, policy integration |
 | `node_trainer` | 6 | Model registry, versioning, rollback, eval gates |
 | `node_research` | 2 | Source extraction, policy gating |
+| `node_relay` | 10 | Rendezvous directory, registration, discovery, frame handling, mTLS server |
 | `node_mesh` (integration) | 4 | Two-node mTLS ping/pong, ask/answer, bidirectional, concurrent |
-| **Total** | **228** | **0 failures, 0 clippy warnings** |
+| **Total** | **246** | **0 failures, 0 clippy warnings** |
 
 ---
 
@@ -484,6 +485,7 @@ meshmind/
 │   ├── node_datasets/        # Dataset manifest builder (5 presets)
 │   ├── node_trainer/         # Training jobs, model registry
 │   ├── node_federated/       # Federated learning coordinator (FedAvg)
+│   ├── node_relay/           # Rendezvous + relay server for WAN
 │   ├── node_api/             # Axum HTTP API (12 endpoints)
 │   └── node_app/             # Main binary entrypoint
 ├── ui/
@@ -515,7 +517,8 @@ meshmind/
 │   ├── research.proto        # Web research messages
 │   ├── training.proto        # Training messages
 │   ├── datasets.proto        # Dataset + connector schemas
-│   └── federated.proto       # Federated learning protocol
+│   ├── federated.proto       # Federated learning protocol
+│   └── relay.proto           # Rendezvous + relay wire protocol
 ├── seed/
 │   └── public/               # Sample runbooks, cases, templates
 ├── Cargo.toml                # Workspace manifest
@@ -546,6 +549,7 @@ meshmind/
 | `node_datasets` | node_storage, node_policy | Dataset manifest builder with 5 presets and provenance tracking |
 | `node_trainer` | node_policy | Model registry, training jobs, eval gates, rollback |
 | `node_federated` | node_mesh, node_trainer | Federated learning coordinator, FedAvg aggregation, delta publishing |
+| `node_relay` | node_proto, node_crypto, tokio-rustls | Rendezvous directory + relay server for WAN connectivity |
 | `node_api` | axum, node_storage, node_ai, node_mesh, node_policy | HTTP API with 12 endpoints |
 | `node_app` | all crates | Binary: config loading, storage init, mTLS, mDNS, server startup |
 
@@ -668,7 +672,7 @@ See [docs/roadmap.md](docs/roadmap.md) for detailed progress.
 | 13. Training | Done | Model registry, eval gates, rollback — 6 tests |
 | 14. Federated Learning | Done | FedAvg coordinator, delta publishing — 5 tests |
 | 15. Tauri UI | Done | 7-page desktop app, dark theme, status polling |
-| 16. Internet Mode | Planned | Rendezvous + relay for WAN |
+| 16. Internet Mode | Done | Rendezvous + relay server, WAN discovery, HybridTransport — 12 tests |
 
 ---
 

@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/training.proto",
         "../../proto/datasets.proto",
         "../../proto/federated.proto",
+        "../../proto/relay.proto",
     ];
 
     prost_build::Config::new().compile_protos(protos, &["../../proto/"])?;

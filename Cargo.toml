@@ -17,6 +17,7 @@ members = [
     "crates/node_datasets",
     "crates/node_trainer",
     "crates/node_federated",
+    "crates/node_relay",
     "crates/node_api",
     "crates/node_app",
 ]
@@ -95,5 +96,6 @@ node_ingest = { path = "crates/node_ingest" }
 node_datasets = { path = "crates/node_datasets" }
 node_trainer = { path = "crates/node_trainer" }
 node_federated = { path = "crates/node_federated" }
+node_relay = { path = "crates/node_relay" }
 node_api = { path = "crates/node_api" }
 node_app = { path = "crates/node_app" }

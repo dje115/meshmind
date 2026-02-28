@@ -40,6 +40,10 @@ pub mod federated {
     include!(concat!(env!("OUT_DIR"), "/meshmind.federated.rs"));
 }
 
+pub mod relay {
+    include!(concat!(env!("OUT_DIR"), "/meshmind.relay.rs"));
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
@@ -1623,5 +1627,121 @@ mod tests {
         for (i, evt) in decoded_events.iter().enumerate() {
             assert_eq!(evt.event_id, format!("evt-{i}"));
         }
+    }
+
+    // ===== Relay types =====
+
+    #[test]
+    fn relay_register_roundtrip() {
+        use super::common::*;
+        use super::relay::*;
+
+        let req = RegisterRequest {
+            node_id: Some(NodeId {
+                value: "node-wan-1".into(),
+            }),
+            public_addr: "203.0.113.10:9901".into(),
+            mesh_port: 9901,
+            capabilities: vec!["inference".into(), "storage".into()],
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
+            relay_only: false,
+        };
+        let decoded = roundtrip(&req);
+        assert_eq!(decoded.public_addr, "203.0.113.10:9901");
+        assert!(!decoded.relay_only);
+        assert_eq!(decoded.capabilities.len(), 2);
+    }
+
+    #[test]
+    fn relay_register_response_roundtrip() {
+        use super::relay::*;
+
+        let resp = RegisterResponse {
+            success: true,
+            relay_token: "tok-abc123".into(),
+            assigned_relay_id: "relay-1".into(),
+            error: String::new(),
+        };
+        let decoded = roundtrip(&resp);
+        assert!(decoded.success);
+        assert_eq!(decoded.relay_token, "tok-abc123");
+    }
+
+    #[test]
+    fn relay_discover_roundtrip() {
+        use super::common::*;
+        use super::relay::*;
+
+        let resp = DiscoverResponse {
+            peers: vec![
+                PeerInfo {
+                    node_id: Some(NodeId {
+                        value: "peer-a".into(),
+                    }),
+                    public_addr: "10.0.0.1:9901".into(),
+                    mesh_port: 9901,
+                    capabilities: vec!["inference".into()],
+                    relay_only: false,
+                    last_seen_ms: 1700000000000,
+                },
+                PeerInfo {
+                    node_id: Some(NodeId {
+                        value: "peer-b".into(),
+                    }),
+                    public_addr: "".into(),
+                    mesh_port: 0,
+                    capabilities: vec![],
+                    relay_only: true,
+                    last_seen_ms: 1700000001000,
+                },
+            ],
+        };
+        let decoded = roundtrip(&resp);
+        assert_eq!(decoded.peers.len(), 2);
+        assert!(decoded.peers[1].relay_only);
+    }
+
+    #[test]
+    fn relay_frame_roundtrip() {
+        use super::common::*;
+        use super::relay::*;
+
+        let frame = RelayFrame {
+            from_node_id: Some(NodeId {
+                value: "sender".into(),
+            }),
+            to_node_id: Some(NodeId {
+                value: "receiver".into(),
+            }),
+            relay_token: "tok-xyz".into(),
+            envelope_bytes: vec![1, 2, 3, 4, 5],
+            sequence: 42,
+        };
+        let decoded = roundtrip(&frame);
+        assert_eq!(decoded.sequence, 42);
+        assert_eq!(decoded.envelope_bytes, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn relay_wire_frame_roundtrip() {
+        use super::relay::*;
+
+        let wire = RelayWireFrame {
+            msg_type: RelayMsgType::Register as i32,
+            payload: vec![10, 20, 30],
+        };
+        let decoded = roundtrip(&wire);
+        assert_eq!(decoded.msg_type, RelayMsgType::Register as i32);
+    }
+
+    #[test]
+    fn relay_msg_type_enum_coverage() {
+        use super::relay::RelayMsgType;
+        assert_eq!(RelayMsgType::Unspecified as i32, 0);
+        assert_eq!(RelayMsgType::Register as i32, 1);
+        assert_eq!(RelayMsgType::Relay as i32, 7);
+        assert_eq!(RelayMsgType::RelayAck as i32, 8);
     }
 }

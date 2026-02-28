@@ -90,24 +90,32 @@
 - [x] 15.4 Tauri v2 backend scaffold (src-tauri)
 - [x] 15.5 Wired to localhost API (http://127.0.0.1:3000)
 
+## Phase 16: Internet Mode (Rendezvous + Relay)
+- [x] 16.1 relay.proto: RegisterRequest/Response, HeartbeatRequest/Response, DiscoverRequest/Response, RelayFrame/Ack, RelayWireFrame
+- [x] 16.2 node_relay crate: RelayDirectory + handle_frame protocol + mTLS server (10 tests)
+- [x] 16.3 RelayTransport in node_mesh: register, discover, heartbeat, envelope forwarding (2 tests)
+- [x] 16.4 HybridTransport: tries direct TCP first, falls back to relay
+- [x] 16.5 WAN discovery loop in node_app: periodic relay-based peer discovery
+- [x] 16.6 Config: relay_addr, relay_port, relay_only, public_addr in meshmind.toml
+
 ---
 
-**Current status**: 228 tests, 0 failures, 0 clippy warnings across 18 crates.
-All phases complete (v2 spec).
+**Current status**: 246 tests, 0 failures, 0 clippy warnings across 19 crates.
+All phases complete (v2 spec + Internet Mode).
 
 **API endpoints implemented**:
 - GET /status, /peers, /search, /admin/sources, /admin/models, /admin/datasets, /admin/logs
 - POST /ask, /admin/event, /admin/sources/approve, /admin/train, /admin/models/rollback
 
-**Crate summary (18 crates)**:
+**Crate summary (19 crates)**:
 | Crate | Purpose | Tests |
 |---|---|---|
-| node_proto | Protobuf types (9 proto files) | 49 |
+| node_proto | Protobuf types (11 proto files) | 55 |
 | node_crypto | Dev CA + mTLS helpers | 7 |
 | node_storage | CAS + EventLog + SQLite + Projector | 39 |
-| node_policy | Policy engine (replication, ingest, train, web) | 24 |
+| node_policy | Policy engine (replication, ingest, train, web) | 31 |
 | node_repl | Replication protocol | 8 |
-| node_mesh | TCP+mTLS transport, mDNS, peer directory, consult | 31 |
+| node_mesh | TCP+mTLS + relay transport, mDNS, peer directory, consult | 26+4 |
 | node_ai | InferenceBackend trait | 2 |
 | node_ai_ollama | Ollama HTTP backend | 3 |
 | node_ai_mock | Mock backend for tests | 6 |
@@ -118,5 +126,6 @@ All phases complete (v2 spec).
 | node_datasets | Dataset manifest builder | 4 |
 | node_trainer | Model registry + training jobs | 6 |
 | node_federated | Federated learning coordinator | 5 |
+| node_relay | Rendezvous + relay server | 10 |
 | node_api | Axum HTTP API (12 endpoints) | 10 |
-| node_app | Main binary + mesh integration | 4 e2e |
+| node_app | Main binary + mesh integration | 6 e2e |
