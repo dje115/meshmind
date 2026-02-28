@@ -226,18 +226,151 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
             | Payload::DataSharedRecorded(_) => {
                 // Audit entry already written above
             }
-            // Discovery, ingestion, dataset, federated events — audit only for now
-            Payload::DataSourceDiscovered(_)
-            | Payload::DataSourceClassified(_)
-            | Payload::DataSourceApproved(_)
-            | Payload::IngestStarted(_)
-            | Payload::IngestCompleted(_)
-            | Payload::DatasetManifestCreated(_)
-            | Payload::TrainDeltaPublished(_)
-            | Payload::TrainDeltaApplied(_)
-            | Payload::FederatedRoundStarted(_)
-            | Payload::FederatedRoundCompleted(_) => {
-                // Audit entry already written above; view projections added in later phases
+            Payload::DataSourceDiscovered(d) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO sources_view
+                     (source_id, connector_type, path_or_uri, display_name,
+                      estimated_size_bytes, estimated_tables, status, discovered_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'discovered', ?7)",
+                    params![
+                        d.source_id,
+                        d.connector_type,
+                        d.path_or_uri,
+                        d.display_name,
+                        d.estimated_size_bytes as i64,
+                        d.estimated_tables,
+                        d.discovered_at.as_ref().map(|t| t.unix_ms).unwrap_or(ts),
+                    ],
+                )?;
+            }
+            Payload::DataSourceClassified(c) => {
+                conn.execute(
+                    "UPDATE sources_view SET status = 'classified', sensitivity = ?1,
+                     pii_detected = ?2, secrets_detected = ?3,
+                     schema_snapshot_hash = ?4, classified_at_ms = ?5
+                     WHERE source_id = ?6",
+                    params![
+                        c.suggested_sensitivity,
+                        c.pii_detected as i32,
+                        c.secrets_detected as i32,
+                        c.schema_snapshot_ref.as_ref().map(|h| &h.sha256),
+                        ts,
+                        c.source_id,
+                    ],
+                )?;
+            }
+            Payload::DataSourceApproved(a) => {
+                let tables_json =
+                    serde_json::to_string(&a.allowed_tables).unwrap_or_else(|_| "[]".into());
+                conn.execute(
+                    "UPDATE sources_view SET status = 'approved', approved_at_ms = ?1
+                     WHERE source_id = ?2",
+                    params![
+                        a.approved_at.as_ref().map(|t| t.unix_ms).unwrap_or(ts),
+                        a.source_id
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO source_profiles_view
+                     (profile_id, source_id, approved_by, approved_at_ms,
+                      profile_hash, allowed_tables_json, row_limit)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        format!("prof-{}", a.source_id),
+                        a.source_id,
+                        a.approved_by,
+                        a.approved_at.as_ref().map(|t| t.unix_ms).unwrap_or(ts),
+                        a.source_profile_ref.as_ref().map(|h| &h.sha256),
+                        tables_json,
+                        a.row_limit,
+                    ],
+                )?;
+            }
+            Payload::IngestStarted(i) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO ingests_view
+                     (ingest_id, source_id, connector_type, status, started_at_ms)
+                     VALUES (?1, ?2, ?3, 'started', ?4)",
+                    params![
+                        i.ingest_id,
+                        i.source_id,
+                        i.connector_type,
+                        i.started_at.as_ref().map(|t| t.unix_ms).unwrap_or(ts),
+                    ],
+                )?;
+            }
+            Payload::IngestCompleted(i) => {
+                conn.execute(
+                    "UPDATE ingests_view SET status = ?1, rows_ingested = ?2,
+                     documents_created = ?3, facts_created = ?4,
+                     bytes_stored = ?5, duration_ms = ?6, notes = ?7, completed_at_ms = ?8
+                     WHERE ingest_id = ?9",
+                    params![
+                        if i.success { "completed" } else { "failed" },
+                        i.rows_ingested as i64,
+                        i.documents_created as i64,
+                        i.facts_created as i64,
+                        i.bytes_stored as i64,
+                        i.duration_ms,
+                        i.notes,
+                        ts,
+                        i.ingest_id,
+                    ],
+                )?;
+            }
+            Payload::DatasetManifestCreated(dm) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO datasets_view
+                     (manifest_id, source_id, preset, manifest_hash, item_count, total_bytes, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        dm.manifest_id,
+                        dm.source_id,
+                        dm.preset,
+                        dm.manifest_ref.as_ref().map(|h| &h.sha256),
+                        dm.item_count as i64,
+                        dm.total_bytes as i64,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::FederatedRoundStarted(fr) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO federated_view
+                     (round_id, model_id, round_number, status, expected_participants,
+                      coordinator, started_at_ms)
+                     VALUES (?1, ?2, ?3, 'started', ?4, ?5, ?6)",
+                    params![
+                        fr.round_id,
+                        fr.model_id,
+                        fr.round_number,
+                        fr.expected_participants,
+                        fr.coordinator
+                            .as_ref()
+                            .map(|n| &n.value)
+                            .unwrap_or(&String::new()),
+                        fr.started_at.as_ref().map(|t| t.unix_ms).unwrap_or(ts),
+                    ],
+                )?;
+            }
+            Payload::FederatedRoundCompleted(fr) => {
+                conn.execute(
+                    "UPDATE federated_view SET status = ?1, actual_participants = ?2,
+                     success = ?3, resulting_model_hash = ?4, notes = ?5, completed_at_ms = ?6
+                     WHERE round_id = ?7",
+                    params![
+                        if fr.success { "completed" } else { "failed" },
+                        fr.actual_participants,
+                        fr.success as i32,
+                        fr.resulting_model_ref.as_ref().map(|h| &h.sha256),
+                        fr.notes,
+                        ts,
+                        fr.round_id,
+                    ],
+                )?;
+            }
+            Payload::TrainDeltaPublished(_) | Payload::TrainDeltaApplied(_) => {
+                // Audit entry already written above
             }
         }
     }

@@ -979,6 +979,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1104,6 +1105,7 @@ dependencies = [
  "node_policy",
  "node_proto",
  "node_storage",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

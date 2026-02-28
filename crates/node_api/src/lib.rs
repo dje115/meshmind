@@ -8,6 +8,11 @@
 //! - POST /admin/event
 //! - POST /admin/train
 //! - GET  /admin/logs
+//! - GET  /admin/sources
+//! - POST /admin/sources/approve
+//! - GET  /admin/models
+//! - POST /admin/models/rollback
+//! - GET  /admin/datasets
 
 use std::sync::Arc;
 
@@ -47,6 +52,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ask", post(handle_ask))
         .route("/admin/event", post(handle_admin_event))
         .route("/admin/logs", get(handle_admin_logs))
+        .route("/admin/sources", get(handle_admin_sources))
+        .route("/admin/sources/approve", post(handle_admin_approve_source))
+        .route("/admin/train", post(handle_admin_train))
+        .route("/admin/models", get(handle_admin_models))
+        .route("/admin/models/rollback", post(handle_admin_rollback_model))
+        .route("/admin/datasets", get(handle_admin_datasets))
         .with_state(state)
 }
 
@@ -139,6 +150,74 @@ struct AuditEntry {
     event_type: i32,
     summary: String,
     created_at_ms: i64,
+}
+
+// ---------- Admin data types ----------
+
+#[derive(Serialize, Deserialize)]
+struct SourceRow {
+    source_id: String,
+    display_name: String,
+    connector_type: i32,
+    status: String,
+    pii_detected: bool,
+    estimated_size_bytes: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ApproveSourceRequest {
+    source_id: String,
+    #[serde(default)]
+    allowed_tables: Vec<String>,
+    #[serde(default)]
+    row_limit: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ApproveSourceResponse {
+    event_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TrainRequest {
+    target: String,
+    #[serde(default)]
+    dataset_preset: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TrainResponse {
+    job_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ModelRow {
+    model_id: String,
+    version: i32,
+    promoted: bool,
+    rolled_back: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RollbackModelRequest {
+    model_id: String,
+    from_version: u32,
+    to_version: u32,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RollbackModelResponse {
+    event_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DatasetRow {
+    manifest_id: String,
+    source_id: String,
+    preset: String,
+    item_count: i64,
+    total_bytes: i64,
 }
 
 // ---------- Handlers ----------
@@ -373,6 +452,229 @@ async fn handle_admin_logs(
     Ok(Json(entries))
 }
 
+async fn handle_admin_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SourceRow>>, StatusCode> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT source_id, display_name, connector_type, status, pii_detected, estimated_size_bytes
+             FROM sources_view
+             ORDER BY source_id",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SourceRow {
+                source_id: row.get(0)?,
+                display_name: row.get(1)?,
+                connector_type: row.get(2)?,
+                status: row.get(3)?,
+                pii_detected: row.get::<_, i32>(4)? != 0,
+                estimated_size_bytes: row.get(5)?,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(rows))
+}
+
+async fn handle_admin_approve_source(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ApproveSourceRequest>,
+) -> Result<Json<ApproveSourceResponse>, StatusCode> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let event_id = format!("evt-approve-{}", uuid::Uuid::new_v4());
+
+    let event = EventEnvelope {
+        event_id: event_id.clone(),
+        r#type: EventType::DataSourceApproved as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::DataSourceApproved(
+            DataSourceApproved {
+                source_id: req.source_id,
+                source_profile_ref: None,
+                approved_by: "admin".into(),
+                approved_at: None,
+                allowed_tables: req.allowed_tables,
+                row_limit: req.row_limit,
+            },
+        )),
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApproveSourceResponse { event_id }))
+}
+
+async fn handle_admin_train(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TrainRequest>,
+) -> Result<Json<TrainResponse>, StatusCode> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let job_id = format!("job-{}", uuid::Uuid::new_v4());
+    let event_id = format!("evt-train-{}", uuid::Uuid::new_v4());
+
+    let event = EventEnvelope {
+        event_id,
+        r#type: EventType::TrainJobStarted as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::TrainJobStarted(TrainJobStarted {
+            job_id: job_id.clone(),
+            target: req.target,
+            dataset_manifest_ref: None,
+            max_steps: 1000,
+            max_minutes: 10,
+        })),
+        tags: vec![format!("preset:{}", req.dataset_preset)],
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(TrainResponse { job_id }))
+}
+
+async fn handle_admin_models(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ModelRow>>, StatusCode> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT model_id, version, promoted, rolled_back
+             FROM models_view
+             ORDER BY model_id, version",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ModelRow {
+                model_id: row.get(0)?,
+                version: row.get(1)?,
+                promoted: row.get::<_, i32>(2)? != 0,
+                rolled_back: row.get::<_, i32>(3)? != 0,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(rows))
+}
+
+async fn handle_admin_rollback_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RollbackModelRequest>,
+) -> Result<Json<RollbackModelResponse>, StatusCode> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let event_id = format!("evt-rollback-{}", uuid::Uuid::new_v4());
+
+    let event = EventEnvelope {
+        event_id: event_id.clone(),
+        r#type: EventType::ModelRolledBack as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::ModelRolledBack(ModelRolledBack {
+            model_id: req.model_id,
+            from_version: req.from_version,
+            to_version: req.to_version,
+            reason: req.reason,
+        })),
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(RollbackModelResponse { event_id }))
+}
+
+async fn handle_admin_datasets(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DatasetRow>>, StatusCode> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT manifest_id, source_id, preset, item_count, total_bytes
+             FROM datasets_view
+             ORDER BY manifest_id",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DatasetRow {
+                manifest_id: row.get(0)?,
+                source_id: row.get(1)?,
+                preset: row.get(2)?,
+                item_count: row.get(3)?,
+                total_bytes: row.get(4)?,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +839,80 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_sources_empty() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::get("/admin/sources").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let sources: Vec<SourceRow> = serde_json::from_slice(&body).unwrap();
+        assert!(sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_models_empty() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::get("/admin/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let models: Vec<ModelRow> = serde_json::from_slice(&body).unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_datasets_empty() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::get("/admin/datasets").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let datasets: Vec<DatasetRow> = serde_json::from_slice(&body).unwrap();
+        assert!(datasets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_train() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/admin/train")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&TrainRequest {
+                            target: "router".into(),
+                            dataset_preset: "public_shareable_only".into(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let result: TrainResponse = serde_json::from_slice(&body).unwrap();
+        assert!(result.job_id.starts_with("job-"));
     }
 }

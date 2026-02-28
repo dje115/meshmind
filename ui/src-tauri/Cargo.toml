@@ -1,0 +1,18 @@
+[package]
+name = "meshmind-ui"
+version = "0.1.0"
+edition = "2021"
+description = "MeshMind - Distributed Autonomous Intelligence Platform"
+default-run = "meshmind-ui"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "meshmind-ui"
+path = "src/main.rs"

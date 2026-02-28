@@ -35,12 +35,16 @@ A production-grade, local-first, cross-platform distributed AI node system built
 
 - **Hybrid Memory Engine** — Append-only event log + content-addressed store (CAS) + SQLite materialized views with FTS5 full-text search
 - **Peer-to-Peer Mesh** — mDNS LAN discovery, membership states (Alive/Suspect/Dead/Quarantined), pull-based replication
-- **Policy Engine** — Tenant isolation, sensitivity levels, default-deny replication, per-artifact shareability
+- **Policy Engine** — Tenant isolation, sensitivity levels, default-deny replication, ingestion approval, column redaction, dataset presets
+- **Data Pipeline** — Source discovery (SQLite/CSV/JSON), schema inspection, PII/secrets classification, batched ingestion with checkpointing
+- **Dataset Manifests** — Reproducible training datasets with 5 presets, provenance tracking, CAS-stored manifests
 - **Pluggable AI Inference** — Swap backends at runtime (Ollama, mock, future: llama.cpp)
 - **Peer Consult** — ASK/ANSWER forwarding across nodes with budget enforcement (TTL hops, deadlines, context limits)
 - **Web Research** — Fetch, summarize, extract citations, store as WebBrief artifacts with policy gating
 - **On-device Training** — Bounded CPU training jobs with eval gates, versioned models, instant rollback
+- **Federated Learning** — Multi-node training coordination with FedAvg aggregation, delta publishing, policy-gated sharing
 - **mTLS Security** — Certificate-based node identity, dev CA for local development, mutual TLS for all peer communication
+- **Tauri Desktop UI** — Dark-themed desktop app with 7 pages: Dashboard, Ask, Sources, Datasets, Models, Peers, Audit Log
 - **Cross-platform** — Windows-first, works on Linux and macOS. CI tests on both Windows and Ubuntu.
 
 ---
@@ -48,25 +52,33 @@ A production-grade, local-first, cross-platform distributed AI node system built
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   node_app                        │
-│         (config, bootstrap, run loops)            │
-├──────────────────────────────────────────────────┤
-│                   node_api                        │
-│    (axum HTTP: /status /peers /search /ask)       │
-├──────────┬──────────┬──────────┬─────────────────┤
-│ node_ai  │node_mesh │node_repl │  node_research  │
-│(inference│(discovery│(gossip + │  (web fetch +   │
-│ backend) │ + peers) │  pull)   │   summarize)    │
-├──────────┴──────────┴──────────┴─────────────────┤
-│              node_policy  +  node_trainer         │
-│       (policy gates, eval gates, models)          │
-├──────────────────────────────────────────────────┤
-│              node_storage                         │
-│   (CAS + EventLog + SQLite + FTS5 + Snapshots)   │
-├──────────────────────────────────────────────────┤
-│  node_proto (protobuf)  │  node_crypto (mTLS)    │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│              Tauri Desktop UI (Vite + JS)                 │
+│  Dashboard │ Ask │ Sources │ Datasets │ Models │ Peers   │
+├──────────────────────────────────────────────────────────┤
+│                      node_app                             │
+│            (config, bootstrap, run loops)                 │
+├──────────────────────────────────────────────────────────┤
+│                      node_api                             │
+│   (axum HTTP: 12 endpoints — status, ask, admin, etc.)   │
+├──────────┬──────────┬──────────┬─────────────────────────┤
+│ node_ai  │node_mesh │node_repl │     node_research       │
+│(inference│(mDNS +   │(gossip + │     (web fetch +        │
+│ backend) │ mTLS)    │  pull)   │      summarize)         │
+├──────────┴──────────┴──────────┴─────────────────────────┤
+│   node_policy  +  node_trainer  +  node_federated        │
+│   (policy gates, eval gates, models, federated learning) │
+├──────────────────────────────────────────────────────────┤
+│                    node_storage                           │
+│      (CAS + EventLog + SQLite + FTS5 + Snapshots)        │
+├──────────────────────────────────────────────────────────┤
+│ node_discovery → node_connectors → node_ingest           │
+│ (scan sources)   (inspect + PII)   (pipeline + batch)    │
+│                                      → node_datasets     │
+│                                        (manifests)       │
+├──────────────────────────────────────────────────────────┤
+│    node_proto (protobuf)    │    node_crypto (mTLS)      │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -364,12 +376,30 @@ Append a new event to the event log and project it to SQLite views.
 #### `GET /admin/logs?n=<count>`
 Fetch recent audit log entries.
 
+#### `GET /admin/sources`
+List all discovered data sources with status, PII flags, and schema snapshots.
+
+#### `POST /admin/sources/approve`
+Approve a discovered data source for ingestion.
+
+#### `POST /admin/train`
+Start a training job with a target and dataset preset.
+
+#### `GET /admin/models`
+List all models in the registry with version, status, and metrics.
+
+#### `POST /admin/models/rollback`
+Roll back a model to a previous version.
+
+#### `GET /admin/datasets`
+List all dataset manifests with source, preset, item count, and size.
+
 ---
 
 ## Testing
 
 ```bash
-# Run all tests (146 tests across 13 crates)
+# Run all tests (228 tests across 18 crates)
 cargo test --workspace
 
 # Run tests for a specific crate
@@ -391,19 +421,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | Crate | Tests | Coverage |
 |---|---|---|
-| `node_proto` | 24 | Protobuf roundtrip serialization, enum coverage |
+| `node_proto` | 49 | Protobuf roundtrip serialization, enum coverage, all message types |
 | `node_storage` | 39 | CAS put/get/dedup, event log append/replay/chain, projector, FTS search, snapshots |
-| `node_policy` | 22 | All policy rules: tenant, sensitivity, share, web, train |
-| `node_mesh` | 19 | Membership states, peer directory, transport mock, peer consult |
+| `node_policy` | 31 | Tenant, sensitivity, share, web, train, ingest, redaction, dataset, delta gates |
+| `node_mesh` | 24 | Membership states, peer directory, transport mock, peer consult, mTLS TCP |
 | `node_repl` | 8 | Gossip, segment pull, CAS pull, full A→B replication, policy gates |
 | `node_crypto` | 7 | CA generation, node certs, mTLS server/client config |
+| `node_connectors` | 9 | SQLite/CSV/JSON inspect + ingest, PII/secrets classifier |
+| `node_api` | 10 | All 12 HTTP endpoints via tower::ServiceExt |
 | `node_ai` | 2 | Default config/request validation |
 | `node_ai_mock` | 6 | Health check, deterministic responses |
 | `node_ai_ollama` | 3 | Backend config, timeout handling |
-| `node_api` | 6 | All HTTP endpoints via tower::ServiceExt |
+| `node_app` | 6 | Seed data, config loading, 4 e2e mesh integration tests |
+| `node_discovery` | 5 | Scan SQLite/CSV/JSON sources, disable flag, event building |
+| `node_ingest` | 3 | Pipeline execution, row limits, event verification |
+| `node_datasets` | 4 | Empty/filtered/no-restricted datasets, CAS storage |
+| `node_federated` | 5 | Round lifecycle, delta submission, FedAvg aggregation, policy integration |
 | `node_trainer` | 6 | Model registry, versioning, rollback, eval gates |
 | `node_research` | 2 | Source extraction, policy gating |
-| **Total** | **146** | **0 failures, 0 clippy warnings** |
+| `node_mesh` (integration) | 4 | Two-node mTLS ping/pong, ask/answer, bidirectional, concurrent |
+| **Total** | **228** | **0 failures, 0 clippy warnings** |
 
 ---
 
@@ -417,31 +454,46 @@ meshmind/
 │   └── workflows/
 │       └── ci.yml            # GitHub Actions CI (Windows + Ubuntu)
 ├── crates/
-│   ├── node_proto/           # Protobuf types (prost-build)
+│   ├── node_proto/           # Protobuf types (prost-build, 10 .proto files)
 │   ├── node_crypto/          # mTLS, dev CA, node identity
 │   ├── node_storage/         # CAS, EventLog, SQLite, FTS5, Snapshots
 │   │   └── src/
 │   │       ├── cas.rs        # Content-addressed store
 │   │       ├── event_log.rs  # Append-only event log with hash chain
-│   │       ├── sqlite_views.rs # Schema definition
+│   │       ├── sqlite_views.rs # Schema (12 tables incl. sources, ingests, datasets)
 │   │       ├── projector.rs  # Event → SQLite materialization
 │   │       ├── search.rs     # FTS5 full-text search
 │   │       └── snapshot.rs   # Snapshot create/restore
-│   ├── node_policy/          # Policy evaluation engine
+│   ├── node_policy/          # Policy evaluation (ingest, redaction, datasets, deltas)
 │   ├── node_repl/            # Pull-based replication
 │   ├── node_mesh/            # Peer discovery, membership, transport
 │   │   └── src/
 │   │       ├── membership.rs # Alive/Suspect/Dead/Quarantined
 │   │       ├── peer_dir.rs   # Capped peer directory with eviction
 │   │       ├── transport.rs  # Transport trait + mock
+│   │       ├── tcp_transport.rs # TCP+mTLS transport
+│   │       ├── discovery.rs  # mDNS LAN discovery
 │   │       └── consult.rs    # ASK/ANSWER peer forwarding
 │   ├── node_ai/              # InferenceBackend trait
 │   ├── node_ai_ollama/       # Ollama HTTP client
 │   ├── node_ai_mock/         # Deterministic mock backend
 │   ├── node_research/        # Web research + WebBrief
+│   ├── node_discovery/       # Data source scanning (SQLite, CSV, JSON)
+│   ├── node_connectors/      # Connector trait + 3 impls + PII classifier
+│   ├── node_ingest/          # Ingestion pipelines with batching
+│   ├── node_datasets/        # Dataset manifest builder (5 presets)
 │   ├── node_trainer/         # Training jobs, model registry
-│   ├── node_api/             # Axum HTTP API
+│   ├── node_federated/       # Federated learning coordinator (FedAvg)
+│   ├── node_api/             # Axum HTTP API (12 endpoints)
 │   └── node_app/             # Main binary entrypoint
+├── ui/
+│   ├── src/
+│   │   ├── main.js           # SPA routing + page rendering
+│   │   ├── api.js            # API client (localhost:3000)
+│   │   └── styles.css        # Dark theme CSS
+│   ├── src-tauri/            # Tauri v2 Rust backend
+│   ├── index.html            # App shell with sidebar nav
+│   └── package.json          # Vite + Tauri dependencies
 ├── docs/
 │   ├── spec.md               # Full architecture specification
 │   ├── protocol.md           # Wire protocol documentation
@@ -461,7 +513,11 @@ meshmind/
 │   ├── replication.proto     # Gossip + pull protocol
 │   ├── mesh.proto            # Peer envelope (Hello, Ask, Answer)
 │   ├── research.proto        # Web research messages
-│   └── training.proto        # Training messages
+│   ├── training.proto        # Training messages
+│   ├── datasets.proto        # Dataset + connector schemas
+│   └── federated.proto       # Federated learning protocol
+├── seed/
+│   └── public/               # Sample runbooks, cases, templates
 ├── Cargo.toml                # Workspace manifest
 ├── .gitignore
 ├── meshmind.toml              # Node configuration (user-created)
@@ -474,19 +530,24 @@ meshmind/
 
 | Crate | Dependencies | Purpose |
 |---|---|---|
-| `node_proto` | prost | Protobuf schema compilation and generated Rust types |
+| `node_proto` | prost | Protobuf schema compilation and generated Rust types (10 .proto files) |
 | `node_crypto` | rustls, rcgen, sha2 | Dev CA, node certificates, mTLS ServerConfig/ClientConfig |
 | `node_storage` | rusqlite, sha2 | CAS blob store, append-only event log, SQLite views, FTS5 search, snapshots |
-| `node_policy` | node_proto | Tenant/sensitivity/share policy evaluation, web/train gates |
+| `node_policy` | node_proto | Tenant/sensitivity/share/ingest/redaction/dataset/delta policy evaluation |
 | `node_repl` | node_storage, node_policy | Gossip metadata, segment/CAS pulling, policy-gated import |
-| `node_mesh` | node_proto, node_crypto | mDNS discovery, membership FSM, peer directory, transport trait, peer consult |
+| `node_mesh` | node_proto, node_crypto | mDNS discovery, membership FSM, peer directory, TCP+mTLS transport, peer consult |
 | `node_ai` | async-trait | `InferenceBackend` trait definition |
 | `node_ai_ollama` | reqwest, node_ai | Ollama HTTP API client |
 | `node_ai_mock` | node_ai | Deterministic mock for testing |
 | `node_research` | node_ai, node_storage, reqwest | Web fetch, AI summarization, WebBrief events |
+| `node_discovery` | node_storage, node_policy | Scan directories for SQLite, CSV, JSON data sources |
+| `node_connectors` | rusqlite, node_policy | Connector trait + SQLite/CSV/JSON impls + PII/secrets classifier |
+| `node_ingest` | node_connectors, node_storage | Ingestion pipelines with batching, checkpointing, CAS storage |
+| `node_datasets` | node_storage, node_policy | Dataset manifest builder with 5 presets and provenance tracking |
 | `node_trainer` | node_policy | Model registry, training jobs, eval gates, rollback |
-| `node_api` | axum, node_storage, node_ai, node_mesh | HTTP API endpoints |
-| `node_app` | all crates | Binary: config loading, storage init, server startup |
+| `node_federated` | node_mesh, node_trainer | Federated learning coordinator, FedAvg aggregation, delta publishing |
+| `node_api` | axum, node_storage, node_ai, node_mesh, node_policy | HTTP API with 12 endpoints |
+| `node_app` | all crates | Binary: config loading, storage init, mTLS, mDNS, server startup |
 
 ---
 
@@ -528,13 +589,15 @@ All wire messages use Protocol Buffers. See the `proto/` directory for full sche
 | Schema | Contents |
 |---|---|
 | `common.proto` | Timestamp, Sensitivity, TenantId, NodeId, HashRef, Budget |
-| `events.proto` | EventEnvelope with 16 event types (cases, artifacts, web briefs, peers, training, audit) |
+| `events.proto` | EventEnvelope with 25+ event types (cases, artifacts, web briefs, peers, training, data pipeline, federated, audit) |
 | `cas.proto` | CAS object headers and manifests |
 | `snapshot.proto` | Snapshot file format |
 | `replication.proto` | GossipMeta, PullSegments, PullCasObjects |
 | `mesh.proto` | Envelope with Hello, Ping/Pong, Ask/Answer, Refuse + PolicyFlags |
 | `research.proto` | ResearchRequest, ResearchResponse |
 | `training.proto` | TrainingConfig, DatasetManifest, TrainingResult |
+| `datasets.proto` | DiscoveredSource, SchemaSnapshot, ColumnClassification, SourceProfile, IngestBatch/Checkpoint |
+| `federated.proto` | RoundConfig, ModelDelta, AggregateResult, RoundSummary |
 
 ---
 
@@ -590,19 +653,22 @@ See [docs/roadmap.md](docs/roadmap.md) for detailed progress.
 | Phase | Status | Description |
 |---|---|---|
 | 0. Workspace + CI | Done | Cargo workspace, GitHub Actions, documentation |
-| 1. Protobuf | Done | All 8 proto schemas, prost-build, 24 roundtrip tests |
-| 2. Storage | Done | CAS, EventLog, SQLite, FTS5, projector — 39 tests |
+| 1. Protobuf | Done | All 10 proto schemas, prost-build, 49 roundtrip tests |
+| 2. Storage | Done | CAS, EventLog, SQLite (12 tables), FTS5, projector — 39 tests |
 | 3. Snapshots | Done | Snapshot create/restore with event replay |
 | 4. Replication | Done | Pull-based with policy gates, A→B equivalence test |
-| 5. Policy | Done | Tenant/sensitivity/share/web/train gates — 22 tests |
-| 6. Crypto + Mesh | Done | Dev CA, mTLS, membership, peer directory — 19 tests |
-| 7. API + Wiring | Done | Axum endpoints, main binary, TOML config |
-| 8. Inference | Done | Backend trait, Ollama, Mock, /ask with retrieval |
-| 9. Peer Consult | Done | ASK/ANSWER forwarding with budgets |
-| 10. Web Research | Done | Fetch, summarize, WebBrief, policy gating |
-| 11. Training | Done | Model registry, eval gates, rollback — 6 tests |
-| 12. Tauri UI | Planned | Desktop tray app |
-| 13. Internet Mode | Planned | Rendezvous + relay for WAN |
+| 5. Policy | Done | Tenant, sensitivity, share, web, train, ingest, redaction, dataset, delta gates — 31 tests |
+| 6. Discovery + Catalog | Done | Scan SQLite/CSV/JSON sources, emit events — 5 tests |
+| 7. Connectors + Classification | Done | 3 connectors + PII/secrets classifier — 9 tests |
+| 8. Ingestion Pipelines | Done | Batched ingestion with checkpointing — 3 tests |
+| 9. Dataset Manifests | Done | 5 presets, provenance, CAS storage — 4 tests |
+| 10. Inference + /ask | Done | Backend trait, Ollama, Mock, FTS retrieval + peer consult |
+| 11. LAN Mesh | Done | mDNS discovery, mTLS TCP transport, membership FSM — 28 tests |
+| 12. Web Research | Done | Fetch, summarize, WebBrief, citations, policy gating |
+| 13. Training | Done | Model registry, eval gates, rollback — 6 tests |
+| 14. Federated Learning | Done | FedAvg coordinator, delta publishing — 5 tests |
+| 15. Tauri UI | Done | 7-page desktop app, dark theme, status polling |
+| 16. Internet Mode | Planned | Rendezvous + relay for WAN |
 
 ---
 

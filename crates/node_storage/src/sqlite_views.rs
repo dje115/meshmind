@@ -101,6 +101,78 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             last_event_hash TEXT NOT NULL,
             event_count     INTEGER NOT NULL DEFAULT 0
         );
+
+        -- Data discovery views
+        CREATE TABLE IF NOT EXISTS sources_view (
+            source_id       TEXT PRIMARY KEY,
+            connector_type  INTEGER NOT NULL DEFAULT 0,
+            path_or_uri     TEXT NOT NULL,
+            display_name    TEXT NOT NULL DEFAULT '',
+            estimated_size_bytes INTEGER NOT NULL DEFAULT 0,
+            estimated_tables INTEGER NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'discovered',
+            sensitivity     INTEGER NOT NULL DEFAULT 0,
+            pii_detected    INTEGER NOT NULL DEFAULT 0,
+            secrets_detected INTEGER NOT NULL DEFAULT 0,
+            schema_snapshot_hash TEXT,
+            discovered_at_ms INTEGER NOT NULL DEFAULT 0,
+            classified_at_ms INTEGER,
+            approved_at_ms  INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS source_profiles_view (
+            profile_id      TEXT PRIMARY KEY,
+            source_id       TEXT NOT NULL,
+            approved_by     TEXT NOT NULL DEFAULT '',
+            approved_at_ms  INTEGER NOT NULL DEFAULT 0,
+            profile_hash    TEXT,
+            allowed_tables_json TEXT NOT NULL DEFAULT '[]',
+            row_limit       INTEGER NOT NULL DEFAULT 0,
+            allow_raw_retention INTEGER NOT NULL DEFAULT 0,
+            allow_training  INTEGER NOT NULL DEFAULT 0,
+            max_sensitivity INTEGER NOT NULL DEFAULT 2,
+            redaction_policy_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS ingests_view (
+            ingest_id       TEXT PRIMARY KEY,
+            source_id       TEXT NOT NULL,
+            connector_type  INTEGER NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'started',
+            rows_ingested   INTEGER NOT NULL DEFAULT 0,
+            documents_created INTEGER NOT NULL DEFAULT 0,
+            facts_created   INTEGER NOT NULL DEFAULT 0,
+            bytes_stored    INTEGER NOT NULL DEFAULT 0,
+            duration_ms     INTEGER NOT NULL DEFAULT 0,
+            notes           TEXT NOT NULL DEFAULT '',
+            started_at_ms   INTEGER NOT NULL DEFAULT 0,
+            completed_at_ms INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS datasets_view (
+            manifest_id     TEXT PRIMARY KEY,
+            source_id       TEXT NOT NULL DEFAULT '',
+            preset          TEXT NOT NULL DEFAULT '',
+            manifest_hash   TEXT,
+            item_count      INTEGER NOT NULL DEFAULT 0,
+            total_bytes     INTEGER NOT NULL DEFAULT 0,
+            created_at_ms   INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS federated_view (
+            round_id        TEXT PRIMARY KEY,
+            model_id        TEXT NOT NULL DEFAULT '',
+            round_number    INTEGER NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'started',
+            expected_participants INTEGER NOT NULL DEFAULT 0,
+            actual_participants INTEGER NOT NULL DEFAULT 0,
+            coordinator     TEXT NOT NULL DEFAULT '',
+            success         INTEGER NOT NULL DEFAULT 0,
+            resulting_model_hash TEXT,
+            notes           TEXT NOT NULL DEFAULT '',
+            started_at_ms   INTEGER NOT NULL DEFAULT 0,
+            completed_at_ms INTEGER
+        );
         ",
     )?;
 
@@ -163,6 +235,11 @@ mod tests {
         assert!(tables.contains(&"models_view".to_string()));
         assert!(tables.contains(&"audit_view".to_string()));
         assert!(tables.contains(&"projector_checkpoint".to_string()));
+        assert!(tables.contains(&"sources_view".to_string()));
+        assert!(tables.contains(&"source_profiles_view".to_string()));
+        assert!(tables.contains(&"ingests_view".to_string()));
+        assert!(tables.contains(&"datasets_view".to_string()));
+        assert!(tables.contains(&"federated_view".to_string()));
     }
 
     #[test]

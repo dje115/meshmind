@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MeshMind</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar">
+      <div class="logo">
+        <span class="logo-icon">◆</span>
+        <span class="logo-text">MeshMind</span>
+      </div>
+      <ul class="nav-items">
+        <li class="nav-item active" data-page="dashboard"><span class="nav-icon">⊞</span> Dashboard</li>
+        <li class="nav-item" data-page="ask"><span class="nav-icon">?</span> Ask</li>
+        <li class="nav-item" data-page="sources"><span class="nav-icon">⊟</span> Sources</li>
+        <li class="nav-item" data-page="datasets"><span class="nav-icon">≡</span> Datasets</li>
+        <li class="nav-item" data-page="models"><span class="nav-icon">◎</span> Models</li>
+        <li class="nav-item" data-page="peers"><span class="nav-icon">◇</span> Peers</li>
+        <li class="nav-item" data-page="audit"><span class="nav-icon">◈</span> Audit Log</li>
+      </ul>
+      <div class="sidebar-footer">
+        <div id="node-status" class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting...</span>
+        </div>
+      </div>
+    </nav>
+    <main id="content">
+      <!-- Pages rendered here -->
+    </main>
+  </div>
+  <div id="toast-container"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

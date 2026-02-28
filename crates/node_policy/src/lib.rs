@@ -22,6 +22,14 @@ pub struct PolicyConfig {
     pub allow_train: bool,
     /// Maximum sensitivity level allowed for replication (0=unspecified, 1=public, 2=internal, 3=restricted).
     pub max_replication_sensitivity: i32,
+    /// Whether data source ingestion is allowed on this node.
+    pub allow_ingest: bool,
+    /// Source IDs that have been approved for ingestion.
+    pub approved_sources: Vec<String>,
+    /// Column names that should always be redacted.
+    pub global_redact_columns: Vec<String>,
+    /// Dataset presets available for training.
+    pub dataset_presets: Vec<String>,
 }
 
 impl Default for PolicyConfig {
@@ -32,6 +40,15 @@ impl Default for PolicyConfig {
             research_web_capable: false,
             allow_train: false,
             max_replication_sensitivity: Sensitivity::Internal as i32,
+            allow_ingest: false,
+            approved_sources: vec![],
+            global_redact_columns: vec![],
+            dataset_presets: vec![
+                "public_shareable_only".into(),
+                "this_tenant_confirmed".into(),
+                "all_approved_no_restricted".into(),
+                "numeric_only".into(),
+            ],
         }
     }
 }
@@ -164,6 +181,51 @@ impl PolicyEngine {
             return PolicyDecision::Deny("node policy does not allow training".into());
         }
 
+        PolicyDecision::Allow
+    }
+
+    /// Can a discovered source be ingested?
+    pub fn can_ingest_source(&self, source_id: &str) -> PolicyDecision {
+        if !self.config.allow_ingest {
+            return PolicyDecision::Deny("node policy does not allow ingestion".into());
+        }
+        if !self
+            .config
+            .approved_sources
+            .contains(&source_id.to_string())
+        {
+            return PolicyDecision::Deny(format!(
+                "source '{source_id}' not in approved_sources list"
+            ));
+        }
+        PolicyDecision::Allow
+    }
+
+    /// Should a column be redacted based on global policy?
+    pub fn should_redact_column(&self, column_name: &str) -> bool {
+        let lower = column_name.to_lowercase();
+        self.config
+            .global_redact_columns
+            .iter()
+            .any(|c| c.to_lowercase() == lower)
+    }
+
+    /// Can a dataset be built with a given preset?
+    pub fn can_build_dataset(&self, preset: &str) -> PolicyDecision {
+        if !self.config.allow_train {
+            return PolicyDecision::Deny("training not allowed; cannot build datasets".into());
+        }
+        if !self.config.dataset_presets.contains(&preset.to_string()) {
+            return PolicyDecision::Deny(format!("preset '{preset}' not available"));
+        }
+        PolicyDecision::Allow
+    }
+
+    /// Can federated learning deltas be shared?
+    pub fn can_share_deltas(&self) -> PolicyDecision {
+        if !self.config.allow_train {
+            return PolicyDecision::Deny("training not allowed; cannot share deltas".into());
+        }
         PolicyDecision::Allow
     }
 
@@ -385,5 +447,90 @@ mod tests {
     fn default_policy_denies_train() {
         let engine = PolicyEngine::with_defaults();
         assert!(!engine.can_train(true).is_allowed());
+    }
+
+    #[test]
+    fn ingest_approved_source() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_ingest: true,
+            approved_sources: vec!["src-001".into()],
+            ..Default::default()
+        });
+        assert!(engine.can_ingest_source("src-001").is_allowed());
+    }
+
+    #[test]
+    fn ingest_unapproved_source_denied() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_ingest: true,
+            approved_sources: vec!["src-001".into()],
+            ..Default::default()
+        });
+        assert!(!engine.can_ingest_source("src-999").is_allowed());
+    }
+
+    #[test]
+    fn ingest_not_allowed_denied() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_ingest: false,
+            approved_sources: vec!["src-001".into()],
+            ..Default::default()
+        });
+        assert!(!engine.can_ingest_source("src-001").is_allowed());
+    }
+
+    #[test]
+    fn redact_column_global() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            global_redact_columns: vec!["email".into(), "SSN".into()],
+            ..Default::default()
+        });
+        assert!(engine.should_redact_column("email"));
+        assert!(engine.should_redact_column("EMAIL"));
+        assert!(engine.should_redact_column("ssn"));
+        assert!(!engine.should_redact_column("name"));
+    }
+
+    #[test]
+    fn dataset_preset_valid() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_train: true,
+            ..Default::default()
+        });
+        assert!(engine
+            .can_build_dataset("public_shareable_only")
+            .is_allowed());
+    }
+
+    #[test]
+    fn dataset_preset_invalid() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_train: true,
+            ..Default::default()
+        });
+        assert!(!engine.can_build_dataset("nonexistent_preset").is_allowed());
+    }
+
+    #[test]
+    fn dataset_train_not_allowed() {
+        let engine = PolicyEngine::with_defaults();
+        assert!(!engine
+            .can_build_dataset("public_shareable_only")
+            .is_allowed());
+    }
+
+    #[test]
+    fn share_deltas_allowed() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            allow_train: true,
+            ..Default::default()
+        });
+        assert!(engine.can_share_deltas().is_allowed());
+    }
+
+    #[test]
+    fn share_deltas_denied() {
+        let engine = PolicyEngine::with_defaults();
+        assert!(!engine.can_share_deltas().is_allowed());
     }
 }

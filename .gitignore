@@ -10,3 +10,5 @@ Thumbs.db
 .env
 meshmind.toml
 .cargo/config.toml
+ui/node_modules/
+ui/dist/
