@@ -656,6 +656,35 @@ fn is_document_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Extract text from PDF using pdf_oxide (more robust than pdf-extract, handles complex PDFs).
+fn extract_pdf_text(path: &Path) -> String {
+    let mut doc = match pdf_oxide::PdfDocument::open(path) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "PDF open failed");
+            return String::new();
+        }
+    };
+    let page_count = doc.page_count().unwrap_or(0) as usize;
+    let mut text = String::new();
+    for page in 0..page_count {
+        match doc.extract_text(page) {
+            Ok(page_text) => {
+                if !page_text.is_empty() {
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&page_text);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), page = page, error = %e, "PDF page extract failed");
+            }
+        }
+    }
+    text
+}
+
 fn extract_text_from_file(path: &Path) -> (String, String, u64) {
     let ext = path
         .extension()
@@ -669,12 +698,7 @@ fn extract_text_from_file(path: &Path) -> (String, String, u64) {
         "txt" | "md" | "rtf" => {
             fs::read_to_string(path).unwrap_or_default()
         }
-        "pdf" => {
-            match fs::read(path) {
-                Ok(bytes) => pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default(),
-                Err(_) => String::new(),
-            }
-        }
+        "pdf" => extract_pdf_text(path),
         "docx" => {
             match docx_rust::DocxFile::from_file(path) {
                 Ok(docx_file) => {

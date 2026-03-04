@@ -4,6 +4,9 @@
 //! Prompt assembly and retrieval happen in the application layer.
 
 use std::collections::HashMap;
+use std::pin::Pin;
+
+use futures_util::Stream;
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -52,6 +55,22 @@ pub trait InferenceBackend: Send + Sync {
 
     /// Generate a response from a prompt.
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse>;
+
+    /// Whether this backend supports streaming (generate_stream).
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Stream token chunks. Default implementation yields one chunk from generate().
+    async fn generate_stream(
+        &self,
+        request: GenerateRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>> {
+        let resp = self.generate(request).await?;
+        let text = resp.text;
+        let stream = futures_util::stream::once(async move { Ok(text) });
+        Ok(Box::pin(stream))
+    }
 }
 
 /// Configuration for selecting and configuring a backend.

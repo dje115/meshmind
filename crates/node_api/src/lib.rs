@@ -49,10 +49,10 @@ use node_connectors::{
 fn connector_for_type(connector_type: i32) -> Option<(Box<dyn Connector>, &'static str)> {
     let (connector, name) = match connector_type {
         1 => (Box::new(SQLiteConnector::new("sqlite")) as Box<dyn Connector>, "sqlite"),
-        2 => (Box::new(CsvFolderConnector::new("csv")), "csv"),
-        3 => (Box::new(JsonFolderConnector::new("json")), "json"),
-        7 => (Box::new(ImageConnector::new("image")), "image"),
-        8 => (Box::new(DocumentConnector::new("document")), "document"),
+        2 => (Box::new(CsvFolderConnector::new("csv")) as Box<dyn Connector>, "csv"),
+        3 => (Box::new(JsonFolderConnector::new("json")) as Box<dyn Connector>, "json"),
+        7 => (Box::new(ImageConnector::new("image")) as Box<dyn Connector>, "image"),
+        8 => (Box::new(DocumentConnector::new("document")) as Box<dyn Connector>, "document"),
         _ => return None,
     };
     Some((connector, name))
@@ -396,7 +396,7 @@ struct TrainRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct TrainResponse {
+pub struct TrainResponse {
     job_id: String,
     status: String,
     dataset_items: u64,
@@ -1430,7 +1430,7 @@ async fn handle_admin_research(
 
 async fn handle_admin_scan(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ScanResponse>, StatusCode> {
+) -> Result<Json<ScanResponse>, ApiError> {
     let config = DiscoveryConfig {
         scan_dirs: state.scan_dirs.clone(),
         scan_sqlite: true,

@@ -17,7 +17,9 @@
 
 ## Issues Found and Fixed
 
-- **Windows toolchain**: `cargo test` fails on Windows when `gcc.exe` is not in PATH (libsqlite3-sys, ring, aws-lc-sys). This is an environment setup issue; use MSYS2/MinGW or WSL for full test runs.
+- **Windows toolchain**: `cargo test` may fail if the C toolchain is misconfigured:
+  - **GNU**: Ensure MSYS2 MinGW is in PATH (`C:\msys64\mingw64\bin`). See [docs/SETUP_WINDOWS.md](SETUP_WINDOWS.md).
+  - **MSVC**: Run from "x64 Native Tools Command Prompt" so `msvcrt.lib` is found.
 - Research endpoint and policy wiring added; WebBrief events are now projected into SQLite views.
 
 ## Next Steps Roadmap

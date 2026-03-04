@@ -3,8 +3,10 @@
 //! Calls the Ollama REST API at a configurable endpoint.
 //! Default: http://localhost:11434
 
+use std::pin::Pin;
 use std::time::Duration;
 
+use futures_util::Stream;
 use node_ai::{BackendHealth, GenerateRequest, GenerateResponse, InferenceBackend};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -157,6 +159,66 @@ impl InferenceBackend for OllamaBackend {
             model: ollama_resp.model,
             finish_reason: if ollama_resp.done { "stop" } else { "length" }.into(),
         })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn generate_stream(
+        &self,
+        request: GenerateRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>> {
+        let url = format!("{}/api/generate", self.endpoint);
+        let body = OllamaGenerateRequest {
+            model: self.model.clone(),
+            prompt: request.prompt,
+            system: request.system,
+            stream: true,
+            options: OllamaOptions {
+                num_predict: request.max_tokens,
+                temperature: request.temperature,
+                stop: request.stop,
+            },
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("ollama returned {status}: {body_text}");
+        }
+
+        let stream = resp.bytes_stream();
+        let stream = async_stream::stream! {
+            use futures_util::StreamExt;
+            let mut buf = Vec::new();
+            let mut lines = stream.map(|r| r.map(|b| b.to_vec()).map_err(anyhow::Error::from));
+            while let Some(chunk) = lines.next().await {
+                let chunk = chunk?;
+                buf.extend_from_slice(&chunk);
+                while let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                    let line = buf.drain(..=i).collect::<Vec<_>>();
+                    let line = String::from_utf8_lossy(&line).trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(parsed) = serde_json::from_str::<OllamaGenerateResponse>(&line) {
+                        if !parsed.response.is_empty() {
+                            yield Ok(parsed.response);
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 }
 

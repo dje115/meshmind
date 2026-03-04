@@ -43,8 +43,14 @@ In the **Ask** page, try:
 
 The system uses FTS search over ingested content and an LLM (Ollama) to answer.
 
+## API verification script
+
+From the repo root, run `.\scripts\verify-e2e-flow.ps1` to exercise scan → approve → ingest → ask via the API. Requires `meshmind` built and `ui/dist` present. The script starts the server, runs the flow, and stops it.
+
 ## Troubleshooting
 
 - **No context / "no data found"**: Ensure you've scanned, approved, and ingested. Check Sources for approved items.
+- **Server crash during ingest**: Rare with pdf_oxide (replaced pdf-extract); if it occurs, try excluding problematic folders from scan dirs.
 - **Ollama not responding**: Start Ollama (`ollama serve`) and pull a model (e.g. `ollama pull llama3.2:3b`).
 - **Empty search results**: Verify files are in supported formats and were successfully ingested (check ingest logs).
+- **PDF content not searchable**: Text-based PDFs are extracted via pdf_oxide. Scanned/image-only PDFs have no embedded text—OCR support would be needed for those.

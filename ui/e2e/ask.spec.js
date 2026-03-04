@@ -14,7 +14,7 @@ test.describe('Ask page', () => {
 
   test('shows Ask page and chat input', async ({ page }) => {
     await expect(page.locator('#chat-input')).toBeVisible();
-    await expect(page.locator('.chat-welcome, .chat-main')).toBeVisible();
+    await expect(page.locator('.chat-welcome, .chat-main').first()).toBeVisible();
   });
 
   test('can type and send a message', async ({ page }) => {
