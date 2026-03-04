@@ -1,0 +1,13 @@
+INVOICE #003
+Date: 2024-03-10
+Vendor: Software Tools Co.
+Client: Widget Corp
+
+Items:
+- License renewal     $499.00
+- Support package     $199.00
+Subtotal: $698.00
+Tax: $69.80
+Total: $767.80
+
+Payment due in 30 days.

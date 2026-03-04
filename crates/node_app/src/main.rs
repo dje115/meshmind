@@ -49,6 +49,9 @@ struct NodeConfig {
     relay_only: bool,
     #[serde(default)]
     public_addr: Option<String>,
+    /// If false, /status will not include admin_token (for production).
+    #[serde(default = "default_true")]
+    expose_admin_token: bool,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -89,6 +92,7 @@ impl Default for NodeConfig {
             relay_port: None,
             relay_only: false,
             public_addr: None,
+            expose_admin_token: true,
         }
     }
 }
@@ -459,9 +463,21 @@ async fn main() -> Result<()> {
         consult_config: ConsultConfig::default(),
         node_id: node_id.clone(),
         admin_token: config.admin_token,
+        expose_admin_token: config.expose_admin_token,
         scan_dirs,
         trainer,
         model_registry,
+        ui_dir: {
+            let ui_path = std::path::Path::new("ui/dist");
+            if ui_path.exists() { Some(ui_path.to_path_buf()) } else { None }
+        },
+        last_train_status: Arc::new(RwLock::new(None)),
+        ask_chat_limiter: Some(node_api::default_ask_chat_limiter()),
+        research_policy: Arc::new(PolicyEngine::new(PolicyConfig {
+            allow_web: true,
+            research_web_capable: true,
+            ..Default::default()
+        })),
     });
 
     // Start TCP mesh server

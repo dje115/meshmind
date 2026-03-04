@@ -1,0 +1,13 @@
+INVOICE #002
+Date: 2024-02-20
+Vendor: Cloud Services Ltd.
+Client: Widget Corp
+
+Items:
+- Monthly hosting     $299.00
+- SSL certificate     $89.00
+Subtotal: $388.00
+Tax: $38.80
+Total: $426.80
+
+Payment due in 15 days.

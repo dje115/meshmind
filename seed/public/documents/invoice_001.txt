@@ -1,0 +1,13 @@
+INVOICE #001
+Date: 2024-01-15
+Vendor: Acme Supplies Inc.
+Client: Widget Corp
+
+Items:
+- Office supplies     $125.00
+- Printer paper       $45.00
+Subtotal: $170.00
+Tax: $17.00
+Total: $187.00
+
+Payment due in 30 days.

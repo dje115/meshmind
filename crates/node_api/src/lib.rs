@@ -25,12 +25,17 @@
 
 use std::sync::Arc;
 
+use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, Sse};
 use axum::response::{Json, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
+use futures_util::StreamExt;
+use governor::{Quota, RateLimiter};
+use nonzero_ext::nonzero;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
@@ -40,6 +45,18 @@ use node_connectors::{
     Connector, CsvFolderConnector, DocumentConnector, ImageConnector, JsonFolderConnector,
     SQLiteConnector,
 };
+
+fn connector_for_type(connector_type: i32) -> Option<(Box<dyn Connector>, &'static str)> {
+    let (connector, name) = match connector_type {
+        1 => (Box::new(SQLiteConnector::new("sqlite")) as Box<dyn Connector>, "sqlite"),
+        2 => (Box::new(CsvFolderConnector::new("csv")), "csv"),
+        3 => (Box::new(JsonFolderConnector::new("json")), "json"),
+        7 => (Box::new(ImageConnector::new("image")), "image"),
+        8 => (Box::new(DocumentConnector::new("document")), "document"),
+        _ => return None,
+    };
+    Some((connector, name))
+}
 use node_datasets::{DatasetBuildConfig, DatasetPreset};
 use node_discovery::{DiscoveryConfig, scan_directory, build_discovered_event};
 use node_ingest::{IngestConfig, IngestJob};
@@ -76,6 +93,13 @@ fn to_fts5_query(text: &str) -> String {
     }
 }
 use node_trainer::{ModelRegistry, Trainer, TrainingJob, JobStatus};
+use node_federated::{FederatedConfig, FederatedCoordinator};
+
+/// Returns a default rate limiter for /ask and chat (120/min, burst 10). Use in production.
+pub fn default_ask_chat_limiter() -> Arc<governor::DefaultDirectRateLimiter> {
+    let quota = Quota::per_minute(nonzero!(120u32)).allow_burst(nonzero!(10u32));
+    Arc::new(RateLimiter::direct(quota))
+}
 
 /// Shared application state for all API handlers.
 pub struct AppState {
@@ -88,9 +112,18 @@ pub struct AppState {
     pub consult_config: ConsultConfig,
     pub node_id: String,
     pub admin_token: String,
+    /// If false, /status omits admin_token.
+    pub expose_admin_token: bool,
     pub scan_dirs: Vec<std::path::PathBuf>,
     pub trainer: Arc<Trainer>,
     pub model_registry: Arc<tokio::sync::Mutex<ModelRegistry>>,
+    pub ui_dir: Option<std::path::PathBuf>,
+    /// Last training job result for GET /admin/train/status.
+    pub last_train_status: Arc<RwLock<Option<TrainResponse>>>,
+    /// Optional rate limiter for /ask and POST .../messages (and stream). When set, returns 429 when exceeded.
+    pub ask_chat_limiter: Option<Arc<governor::DefaultDirectRateLimiter>>,
+    /// Policy engine for web research (allow_web, research_web_capable). Required for POST /admin/research.
+    pub research_policy: Arc<node_policy::PolicyEngine>,
 }
 
 async fn admin_auth(
@@ -98,7 +131,7 @@ async fn admin_auth(
     headers: HeaderMap,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -106,8 +139,29 @@ async fn admin_auth(
 
     match token {
         Some(t) if t == state.admin_token => Ok(next.run(request).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
+        _ => Err(ApiError::from_status(StatusCode::UNAUTHORIZED, "missing or invalid authorization")),
     }
+}
+
+async fn rate_limit_ask_chat(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let path = request.uri().path();
+    let is_limited = request.method() == axum::http::Method::POST
+        && (path == "/ask" || path.ends_with("/messages") || path.ends_with("/messages/stream"));
+    if is_limited {
+        if let Some(ref limiter) = state.ask_chat_limiter {
+            if limiter.check().is_err() {
+                return Err(ApiError::from_status(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate limit exceeded for ask/chat",
+                ));
+            }
+        }
+    }
+    Ok(next.run(request).await)
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -130,30 +184,49 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/sources", get(handle_admin_sources))
         .route("/admin/sources/approve", post(handle_admin_approve_source))
         .route("/admin/train", post(handle_admin_train))
+        .route("/admin/train/status", get(handle_admin_train_status))
         .route("/admin/train/export", post(handle_admin_train_export))
         .route("/admin/train/modelfile", post(handle_admin_train_modelfile))
         .route("/admin/models", get(handle_admin_models))
         .route("/admin/models/rollback", post(handle_admin_rollback_model))
         .route("/admin/datasets", get(handle_admin_datasets))
+        .route("/admin/federated/status", get(handle_admin_federated_status))
+        .route("/admin/research", post(handle_admin_research))
         .route("/admin/scan", post(handle_admin_scan))
         .route("/admin/ingest", post(handle_admin_ingest))
         .route("/admin/sources/approve-all", post(handle_admin_approve_all))
         .route("/admin/ingest-all", post(handle_admin_ingest_all))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
-    Router::new()
+    let api_routes = Router::new()
         .route("/status", get(handle_status))
         .route("/peers", get(handle_peers))
         .route("/search", get(handle_search))
         .route("/ask", post(handle_ask))
         .route("/conversations", get(handle_list_conversations).post(handle_create_conversation))
         .route("/conversations/:id/messages", get(handle_get_messages).post(handle_send_message))
+        .route("/conversations/:id/messages/stream", post(handle_send_message_stream))
         .route("/conversations/:id", delete(handle_delete_conversation))
-        .route("/repl/gossip", post(handle_repl_gossip))
-        .route("/repl/pull", post(handle_repl_pull))
+        .route("/ws", get(handle_ws))
+        .route_layer(middleware::from_fn_with_state(state.clone(), rate_limit_ask_chat))
         .merge(admin_routes)
-        .layer(cors)
-        .with_state(state)
+        .layer(cors);
+
+    let mut app = Router::new()
+        .nest("/v1", api_routes)
+        .route("/repl/gossip", post(handle_repl_gossip))
+        .route("/repl/pull", post(handle_repl_pull));
+
+    if let Some(ref ui_dir) = state.ui_dir {
+        if ui_dir.exists() {
+            let serve = tower_http::services::ServeDir::new(ui_dir)
+                .fallback(tower_http::services::ServeFile::new(ui_dir.join("index.html")));
+            app = app.fallback_service(serve);
+            tracing::info!("serving UI from {}", ui_dir.display());
+        }
+    }
+
+    app.with_state(state)
 }
 
 // ---------- Error type ----------
@@ -187,6 +260,12 @@ impl axum::response::IntoResponse for ApiError {
 impl From<(StatusCode, String)> for ApiError {
     fn from((status, msg): (StatusCode, String)) -> Self {
         Self { error: msg, code: status.as_u16() }
+    }
+}
+
+impl ApiError {
+    fn from_status(status: StatusCode, msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), code: status.as_u16() }
     }
 }
 
@@ -316,7 +395,7 @@ struct TrainRequest {
     dataset_preset: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TrainResponse {
     job_id: String,
     status: String,
@@ -361,6 +440,11 @@ struct DatasetRow {
 async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let event_count = state.event_log.read().await.event_count();
     let peer_count = state.peer_dir.read().await.all_peers().len();
+    let admin_token = if state.expose_admin_token {
+        state.admin_token.clone()
+    } else {
+        String::new()
+    };
 
     Json(StatusResponse {
         node_id: state.node_id.clone(),
@@ -368,7 +452,7 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRespons
         event_count,
         peer_count,
         backend: state.backend.name().to_string(),
-        admin_token: state.admin_token.clone(),
+        admin_token,
     })
 }
 
@@ -392,13 +476,13 @@ async fn handle_peers(State(state): State<Arc<AppState>>) -> Json<Vec<PeerInfo>>
 async fn handle_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
-) -> Result<Json<Vec<SearchResult>>, StatusCode> {
+) -> Result<Json<Vec<SearchResult>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let fts_query = to_fts5_query(&params.q);
     let hits = search::search_all(&conn, &fts_query, params.limit)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let results = hits
         .into_iter()
@@ -416,13 +500,13 @@ async fn handle_search(
 async fn handle_ask(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AskRequest>,
-) -> Result<Json<AskResponse>, StatusCode> {
+) -> Result<Json<AskResponse>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let fts_query = to_fts5_query(&req.question);
     let context_hits = search::search_all(&conn, &fts_query, 10)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let context_bullets: Vec<String> = context_hits
         .iter()
@@ -467,7 +551,7 @@ and suggest they scan and ingest more sources.";
         .backend
         .generate(gen_req)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let local_confidence: f32 = if context_bullets.is_empty() { 0.3 } else { 0.7 };
 
@@ -571,16 +655,16 @@ fn now_ms() -> i64 {
 
 async fn handle_list_conversations(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ConversationSummary>>, StatusCode> {
+) -> Result<Json<Vec<ConversationSummary>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
             "SELECT conversation_id, title, created_at_ms, updated_at_ms
              FROM conversations_view ORDER BY updated_at_ms DESC LIMIT 100",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let convos = stmt
         .query_map([], |row| {
@@ -591,7 +675,7 @@ async fn handle_list_conversations(
                 updated_at_ms: row.get(3)?,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -600,9 +684,9 @@ async fn handle_list_conversations(
 
 async fn handle_create_conversation(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ConversationSummary>, StatusCode> {
+) -> Result<Json<ConversationSummary>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let ts = now_ms();
@@ -612,7 +696,7 @@ async fn handle_create_conversation(
          VALUES (?1, 'New conversation', ?2, ?2)",
         rusqlite::params![id, ts],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(ConversationSummary {
         conversation_id: id,
@@ -625,16 +709,16 @@ async fn handle_create_conversation(
 async fn handle_get_messages(
     State(state): State<Arc<AppState>>,
     Path(conv_id): Path<String>,
-) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
+) -> Result<Json<Vec<MessageResponse>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
             "SELECT message_id, conversation_id, role, content, context_used, model, confidence, created_at_ms
              FROM messages_view WHERE conversation_id = ?1 ORDER BY created_at_ms ASC",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let msgs = stmt
         .query_map(rusqlite::params![conv_id], |row| {
@@ -652,7 +736,7 @@ async fn handle_get_messages(
                 created_at_ms: row.get(7)?,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -662,9 +746,9 @@ async fn handle_get_messages(
 async fn handle_delete_conversation(
     State(state): State<Arc<AppState>>,
     Path(conv_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let msg_ids: Vec<String> = conn
         .prepare("SELECT message_id FROM messages_view WHERE conversation_id = ?1")
@@ -696,9 +780,9 @@ async fn handle_send_message(
     State(state): State<Arc<AppState>>,
     Path(conv_id): Path<String>,
     Json(req): Json<SendMessageRequest>,
-) -> Result<Json<MessageResponse>, StatusCode> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let ts = now_ms();
     let user_msg_id = uuid::Uuid::new_v4().to_string();
@@ -709,13 +793,13 @@ async fn handle_send_message(
          VALUES (?1, ?2, 'user', ?3, ?4)",
         rusqlite::params![user_msg_id, conv_id, req.content, ts],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     conn.execute(
         "INSERT INTO messages_fts (message_id, content) VALUES (?1, ?2)",
         rusqlite::params![user_msg_id, req.content],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // 2. Load conversation history (last 10 messages)
     let history: Vec<(String, String)> = conn
@@ -831,7 +915,7 @@ async fn handle_send_message(
         .backend
         .generate(gen_req)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let confidence: f32 = if context_bullets.is_empty() && cross_session.is_empty() {
         0.3
@@ -860,13 +944,13 @@ async fn handle_send_message(
             asst_ts,
         ],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     conn.execute(
         "INSERT INTO messages_fts (message_id, content) VALUES (?1, ?2)",
         rusqlite::params![asst_msg_id, gen_resp.text],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // 8. Auto-title from first user message
     let msg_count: i64 = conn
@@ -902,10 +986,217 @@ async fn handle_send_message(
     }))
 }
 
+async fn handle_send_message_stream(
+    State(state): State<Arc<AppState>>,
+    Path(conv_id): Path<String>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let ts = now_ms();
+    let user_msg_id = uuid::Uuid::new_v4().to_string();
+
+    conn.execute(
+        "INSERT INTO messages_view (message_id, conversation_id, role, content, created_at_ms)
+         VALUES (?1, ?2, 'user', ?3, ?4)",
+        rusqlite::params![user_msg_id, conv_id, req.content, ts],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    conn.execute(
+        "INSERT INTO messages_fts (message_id, content) VALUES (?1, ?2)",
+        rusqlite::params![user_msg_id, req.content],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let history: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT role, content FROM messages_view
+             WHERE conversation_id = ?1 ORDER BY created_at_ms DESC LIMIT 10",
+        )
+        .and_then(|mut s| {
+            let rows: Vec<(String, String)> = s
+                .query_map(rusqlite::params![conv_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let fts_query = to_fts5_query(&req.content);
+    let context_hits = search::search_all(&conn, &fts_query, 10)
+        .unwrap_or_default();
+
+    let context_bullets: Vec<String> = context_hits
+        .iter()
+        .map(|h| {
+            let preview: String = h.summary.chars().take(300).collect();
+            format!("- [{}] {}: {}", h.hit_type, h.title, preview)
+        })
+        .collect();
+
+    let cross_session: Vec<String> = conn
+        .prepare(
+            "SELECT m.content FROM messages_fts f
+             JOIN messages_view m ON m.message_id = f.message_id
+             WHERE f.content MATCH ?1 AND m.role = 'assistant' AND m.conversation_id != ?2
+             ORDER BY rank LIMIT 3",
+        )
+        .and_then(|mut s| {
+            let rows: Vec<String> = s
+                .query_map(rusqlite::params![&fts_query, &conv_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .unwrap_or_default();
+
+    let mut prompt_parts = Vec::new();
+    if !context_bullets.is_empty() {
+        prompt_parts.push(format!(
+            "Knowledge base context:\n{}",
+            context_bullets.join("\n")
+        ));
+    }
+    if !cross_session.is_empty() {
+        let cross_bullets: Vec<String> = cross_session
+            .iter()
+            .map(|a| {
+                let preview: String = a.chars().take(200).collect();
+                format!("- {}", preview)
+            })
+            .collect();
+        prompt_parts.push(format!(
+            "Relevant answers from previous conversations:\n{}",
+            cross_bullets.join("\n")
+        ));
+    }
+    let hist_len = history.len();
+    if hist_len > 1 {
+        let mut hist_lines = Vec::new();
+        for (role, content) in &history[..hist_len - 1] {
+            let label = if role == "user" { "User" } else { "Assistant" };
+            let preview: String = content.chars().take(400).collect();
+            hist_lines.push(format!("{}: {}", label, preview));
+        }
+        prompt_parts.push(format!(
+            "Conversation history:\n{}",
+            hist_lines.join("\n")
+        ));
+    }
+    prompt_parts.push(format!("User: {}", req.content));
+    if context_bullets.is_empty() && cross_session.is_empty() && hist_len <= 1 {
+        prompt_parts.push(
+            "No matching data was found in the knowledge base. \
+             Tell the user you searched but found no relevant results. \
+             Suggest they scan and ingest local data sources first."
+                .to_string(),
+        );
+    }
+    let prompt = prompt_parts.join("\n\n");
+
+    let gen_req = node_ai::GenerateRequest {
+        prompt,
+        system: Some(MESHMIND_SYSTEM_PROMPT.into()),
+        max_tokens: req.max_tokens.unwrap_or(1024),
+        ..Default::default()
+    };
+
+    let mut backend_stream = state
+        .backend
+        .generate_stream(gen_req)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let db_path = state.db_path.clone();
+    let context_ids: Vec<String> = context_hits.iter().map(|h| h.id.clone()).collect();
+    let backend_name = state.backend.name().to_string();
+    let backend_name_for_done = backend_name.clone();
+    let confidence: f32 = if context_bullets.is_empty() && cross_session.is_empty() {
+        0.3
+    } else {
+        0.7
+    };
+
+    let stream = async_stream::stream! {
+        let mut full_text = String::new();
+        while let Some(result) = backend_stream.next().await {
+            match result {
+                Ok(chunk) => {
+                    full_text.push_str(&chunk);
+                    let data = serde_json::json!({ "token": chunk });
+                    yield Ok(Event::default().data(data.to_string()));
+                }
+                Err(_) => break,
+            }
+        }
+        let asst_msg_id = uuid::Uuid::new_v4().to_string();
+        let asst_ts = now_ms();
+        let ctx_json = serde_json::to_string(&context_ids).unwrap_or_else(|_| "[]".into());
+        let _ = rusqlite::Connection::open(&db_path).and_then(|conn| {
+            conn.execute(
+                "INSERT INTO messages_view (message_id, conversation_id, role, content, context_used, model, confidence, created_at_ms)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    asst_msg_id,
+                    conv_id,
+                    full_text,
+                    ctx_json,
+                    backend_name,
+                    confidence,
+                    asst_ts,
+                ],
+            )?;
+            conn.execute(
+                "INSERT INTO messages_fts (message_id, content) VALUES (?1, ?2)",
+                rusqlite::params![asst_msg_id, full_text],
+            )?;
+            let msg_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages_view WHERE conversation_id = ?1",
+                    rusqlite::params![conv_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if msg_count <= 2 {
+                let title: String = req.content.chars().take(60).collect();
+                let _ = conn.execute(
+                    "UPDATE conversations_view SET title = ?1, updated_at_ms = ?2 WHERE conversation_id = ?3",
+                    rusqlite::params![title, asst_ts, conv_id],
+                );
+            } else {
+                let _ = conn.execute(
+                    "UPDATE conversations_view SET updated_at_ms = ?1 WHERE conversation_id = ?2",
+                    rusqlite::params![asst_ts, conv_id],
+                );
+            }
+            Ok::<(), rusqlite::Error>(())
+        });
+        let done_data = serde_json::json!({
+            "done": true,
+            "message_id": asst_msg_id,
+            "content": full_text,
+            "model": backend_name_for_done,
+            "confidence": confidence,
+            "context_used": context_ids,
+            "created_at_ms": asst_ts,
+        });
+        yield Ok(Event::default().data(done_data.to_string()));
+    };
+
+    Ok(Sse::new(stream))
+}
+
 async fn handle_admin_event(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminEventRequest>,
-) -> Result<Json<AdminEventResponse>, StatusCode> {
+) -> Result<Json<AdminEventResponse>, ApiError> {
     use node_proto::common::*;
     use node_proto::events::*;
 
@@ -915,7 +1206,7 @@ async fn handle_admin_event(
         let href = state
             .cas
             .put_bytes("text/plain", req.summary.as_bytes())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| ApiError::internal(e.to_string()))?;
         Some(href)
     } else {
         None
@@ -943,12 +1234,12 @@ async fn handle_admin_event(
     let mut log = state.event_log.write().await;
     let stored = log
         .append(event)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     node_storage::projector::apply_event(&conn, &stored)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let event_hash = stored.event_hash.map(|h| h.sha256).unwrap_or_default();
 
@@ -961,9 +1252,9 @@ async fn handle_admin_event(
 async fn handle_admin_logs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogParams>,
-) -> Result<Json<Vec<AuditEntry>>, StatusCode> {
+) -> Result<Json<Vec<AuditEntry>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
@@ -972,7 +1263,7 @@ async fn handle_admin_logs(
              ORDER BY created_at_ms DESC
              LIMIT ?1",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let entries = stmt
         .query_map([params.n as i64], |row| {
@@ -983,7 +1274,7 @@ async fn handle_admin_logs(
                 created_at_ms: row.get(3)?,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -992,9 +1283,9 @@ async fn handle_admin_logs(
 
 async fn handle_admin_sources(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<SourceRow>>, StatusCode> {
+) -> Result<Json<Vec<SourceRow>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
@@ -1002,7 +1293,7 @@ async fn handle_admin_sources(
              FROM sources_view
              ORDER BY source_id",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -1015,7 +1306,7 @@ async fn handle_admin_sources(
                 estimated_size_bytes: row.get(5)?,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -1025,7 +1316,7 @@ async fn handle_admin_sources(
 async fn handle_admin_approve_source(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ApproveSourceRequest>,
-) -> Result<Json<ApproveSourceResponse>, StatusCode> {
+) -> Result<Json<ApproveSourceResponse>, ApiError> {
     use node_proto::common::*;
     use node_proto::events::*;
 
@@ -1057,12 +1348,12 @@ async fn handle_admin_approve_source(
     let mut log = state.event_log.write().await;
     let stored = log
         .append(event)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     node_storage::projector::apply_event(&conn, &stored)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(ApproveSourceResponse { event_id }))
 }
@@ -1080,6 +1371,61 @@ struct ScanSourceInfo {
     connector_type: i32,
     path: String,
     estimated_size_bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct ResearchApiRequest {
+    url: String,
+    question: String,
+    #[serde(default)]
+    allow_web: bool,
+    #[serde(default)]
+    redaction_required: bool,
+}
+
+#[derive(Serialize)]
+struct ResearchApiResponse {
+    artifact_id: String,
+    question: String,
+    summary: String,
+    sources: Vec<String>,
+    confidence: f32,
+    event_id: String,
+}
+
+async fn handle_admin_research(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ResearchApiRequest>,
+) -> Result<Json<ResearchApiResponse>, ApiError> {
+    let research_req = node_research::ResearchRequest {
+        url: req.url,
+        question: req.question,
+        tenant_id: "public".into(),
+        allow_web: req.allow_web,
+        redaction_required: req.redaction_required,
+    };
+
+    let mut log = state.event_log.write().await;
+    let result = node_research::research(
+        &research_req,
+        &state.research_policy,
+        &state.backend,
+        &state.cas,
+        &mut log,
+        &state.node_id,
+        Some(&state.db_path),
+    )
+    .await
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    Ok(Json(ResearchApiResponse {
+        artifact_id: result.artifact_id,
+        question: result.question,
+        summary: result.summary,
+        sources: result.sources,
+        confidence: result.confidence,
+        event_id: result.event_id,
+    }))
 }
 
 async fn handle_admin_scan(
@@ -1102,7 +1448,7 @@ async fn handle_admin_scan(
 
     let mut log = state.event_log.write().await;
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut result_sources = Vec::new();
     for source in &all_sources {
@@ -1169,25 +1515,8 @@ async fn handle_admin_ingest(
         )));
     }
 
-    let connector: Box<dyn Connector> = match connector_type {
-        1 => Box::new(SQLiteConnector::new("sqlite")),
-        2 => Box::new(CsvFolderConnector::new("csv")),
-        3 => Box::new(JsonFolderConnector::new("json")),
-        7 => Box::new(ImageConnector::new("image")),
-        8 => Box::new(DocumentConnector::new("document")),
-        other => {
-            return Err(ApiError::bad_request(format!("unsupported connector type: {other}")))
-        }
-    };
-
-    let connector_str = match connector_type {
-        1 => "sqlite",
-        2 => "csv",
-        3 => "json",
-        7 => "image",
-        8 => "document",
-        _ => "unknown",
-    };
+    let (connector, connector_str) = connector_for_type(connector_type)
+        .ok_or_else(|| ApiError::bad_request(format!("unsupported connector type: {connector_type}")))?;
 
     let source_path = std::path::PathBuf::from(&path_or_uri);
 
@@ -1323,17 +1652,9 @@ async fn handle_admin_ingest_all(
     let mut total_docs = 0u64;
 
     for (source_id, connector_type, path_or_uri) in &sources {
-        let connector: Box<dyn Connector> = match *connector_type {
-            1 => Box::new(SQLiteConnector::new("sqlite")),
-            2 => Box::new(CsvFolderConnector::new("csv")),
-            3 => Box::new(JsonFolderConnector::new("json")),
-            7 => Box::new(ImageConnector::new("image")),
-            8 => Box::new(DocumentConnector::new("document")),
-            _ => { failed += 1; continue; }
-        };
-
-        let connector_str = match *connector_type {
-            1 => "sqlite", 2 => "csv", 3 => "json", 7 => "image", 8 => "document", _ => "unknown",
+        let (connector, connector_str) = match connector_for_type(*connector_type) {
+            Some(p) => p,
+            None => { failed += 1; continue; }
         };
 
         let source_path = std::path::PathBuf::from(path_or_uri);
@@ -1464,14 +1785,16 @@ async fn handle_admin_train(
             JobStatus::Rejected { reason } => format!("rejected: {reason}"),
             _ => "rejected".into(),
         };
-        return Ok(Json(TrainResponse {
+        let resp = TrainResponse {
             job_id,
             status: status_msg,
             dataset_items,
             dataset_manifest_id,
             score: None,
             model_version: None,
-        }));
+        };
+        let _ = state.last_train_status.write().await.insert(resp.clone());
+        return Ok(Json(resp));
     }
 
     // 5. Run the training job (eval gate + model registration)
@@ -1556,14 +1879,25 @@ async fn handle_admin_train(
         "training pipeline completed"
     );
 
-    Ok(Json(TrainResponse {
+    let resp = TrainResponse {
         job_id,
         status: status_str,
         dataset_items,
         dataset_manifest_id,
         score,
         model_version,
-    }))
+    };
+    let _ = state.last_train_status.write().await.insert(resp.clone());
+    Ok(Json(resp))
+}
+
+async fn handle_admin_train_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TrainResponse>, ApiError> {
+    let status = state.last_train_status.read().await.clone();
+    status
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("no training job has run yet"))
 }
 
 const MESHMIND_TRAINING_SYSTEM: &str = "\
@@ -1693,9 +2027,9 @@ TEMPLATE \"\"\"
 
 async fn handle_admin_models(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ModelRow>>, StatusCode> {
+) -> Result<Json<Vec<ModelRow>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
@@ -1703,7 +2037,7 @@ async fn handle_admin_models(
              FROM models_view
              ORDER BY model_id, version",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -1714,7 +2048,7 @@ async fn handle_admin_models(
                 rolled_back: row.get::<_, i32>(3)? != 0,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -1724,7 +2058,7 @@ async fn handle_admin_models(
 async fn handle_admin_rollback_model(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RollbackModelRequest>,
-) -> Result<Json<RollbackModelResponse>, StatusCode> {
+) -> Result<Json<RollbackModelResponse>, ApiError> {
     use node_proto::common::*;
     use node_proto::events::*;
 
@@ -1752,21 +2086,21 @@ async fn handle_admin_rollback_model(
     let mut log = state.event_log.write().await;
     let stored = log
         .append(event)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     node_storage::projector::apply_event(&conn, &stored)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(RollbackModelResponse { event_id }))
 }
 
 async fn handle_admin_datasets(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<DatasetRow>>, StatusCode> {
+) -> Result<Json<Vec<DatasetRow>>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut stmt = conn
         .prepare(
@@ -1774,7 +2108,7 @@ async fn handle_admin_datasets(
              FROM datasets_view
              ORDER BY manifest_id",
         )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -1786,11 +2120,59 @@ async fn handle_admin_datasets(
                 total_bytes: row.get(4)?,
             })
         })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .collect();
 
     Ok(Json(rows))
+}
+
+#[derive(Serialize)]
+struct FederatedStatusResponse {
+    supported: bool,
+    aggregation: String,
+    min_participants: u32,
+    max_participants: u32,
+}
+
+async fn handle_admin_federated_status(
+) -> Result<Json<FederatedStatusResponse>, ApiError> {
+    let config = FederatedConfig::new("router");
+    let _coordinator = FederatedCoordinator::new(config.clone());
+    Ok(Json(FederatedStatusResponse {
+        supported: true,
+        aggregation: config.aggregation_strategy,
+        min_participants: config.min_participants,
+        max_participants: config.max_participants,
+    }))
+}
+
+// ---------- WebSocket (real-time status) ----------
+
+async fn handle_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> axum::response::Response {
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, state))
+}
+
+async fn handle_ws_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    use axum::extract::ws::Message;
+    use tokio::time::interval;
+    let mut ticker = interval(std::time::Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        let event_count = state.event_log.read().await.event_count();
+        let peer_count = state.peer_dir.read().await.all_peers().len();
+        let last_train = state.last_train_status.read().await.clone();
+        let payload = serde_json::json!({
+            "type": "status",
+            "event_count": event_count,
+            "peer_count": peer_count,
+            "backend": state.backend.name(),
+            "last_train": last_train,
+        });
+        if socket.send(Message::Text(payload.to_string())).await.is_err() {
+            break;
+        }
+    }
 }
 
 // ---------- Replication endpoints ----------
@@ -1927,9 +2309,18 @@ mod tests {
             consult_config: ConsultConfig::default(),
             node_id: "test-node-001".into(),
             admin_token: "test-token".into(),
+            expose_admin_token: true,
             scan_dirs: vec![],
             trainer,
             model_registry,
+            ui_dir: None,
+            last_train_status: Arc::new(RwLock::new(None)),
+            ask_chat_limiter: None,
+            research_policy: Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+                allow_web: true,
+                research_web_capable: true,
+                ..Default::default()
+            })),
         })
     }
 
@@ -1939,7 +2330,7 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1961,7 +2352,7 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/peers").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/v1/peers").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1978,7 +2369,7 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/search?q=test").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/v1/search?q=test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1995,7 +2386,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::post("/ask")
+                Request::post("/v1/ask")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_string(&AskRequest {
@@ -2024,7 +2415,7 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/admin/sources").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/v1/admin/sources").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -2038,7 +2429,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::post("/admin/event")
+                Request::post("/v1/admin/event")
                     .header("content-type", "application/json")
                     .header("authorization", TEST_AUTH)
                     .body(Body::from(
@@ -2071,7 +2462,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::get("/admin/logs?n=10")
+                Request::get("/v1/admin/logs?n=10")
                     .header("authorization", TEST_AUTH)
                     .body(Body::empty())
                     .unwrap(),
@@ -2089,7 +2480,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::get("/admin/sources")
+                Request::get("/v1/admin/sources")
                     .header("authorization", TEST_AUTH)
                     .body(Body::empty())
                     .unwrap(),
@@ -2110,7 +2501,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::get("/admin/models")
+                Request::get("/v1/admin/models")
                     .header("authorization", TEST_AUTH)
                     .body(Body::empty())
                     .unwrap(),
@@ -2131,7 +2522,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::get("/admin/datasets")
+                Request::get("/v1/admin/datasets")
                     .header("authorization", TEST_AUTH)
                     .body(Body::empty())
                     .unwrap(),
@@ -2152,7 +2543,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::post("/admin/train")
+                Request::post("/v1/admin/train")
                     .header("content-type", "application/json")
                     .header("authorization", TEST_AUTH)
                     .body(Body::from(
@@ -2174,5 +2565,93 @@ mod tests {
         assert_eq!(result.status, "completed");
         assert!(result.score.is_some());
         assert!(result.model_version.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_admin_research_policy_denied() {
+        // Use a policy that denies web research
+        let deny_policy = Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+            allow_web: false,
+            research_web_capable: false,
+            ..Default::default()
+        }));
+        // We need a new AppState - create_test_state returns Arc<AppState> and we can't mutate.
+        // Create custom state for this test.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let event_log = EventLog::open(tmp.path()).unwrap();
+        let cas = CasStore::open(tmp.path()).unwrap();
+        let db_path = tmp.path().join("sqlite").join("meshmind.db");
+        let _conn = sqlite_views::open_db(&db_path).unwrap();
+        let policy = Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+            allow_train: true,
+            ..Default::default()
+        }));
+        let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
+        let trainer = Arc::new(Trainer::new(policy, model_registry.clone()));
+        let state = Arc::new(AppState {
+            event_log: RwLock::new(event_log),
+            cas,
+            db_path,
+            peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
+            backend: Arc::new(MockBackend::new()),
+            transport: None,
+            consult_config: ConsultConfig::default(),
+            node_id: "test-node".into(),
+            admin_token: "test-token".into(),
+            expose_admin_token: true,
+            scan_dirs: vec![],
+            trainer,
+            model_registry,
+            ui_dir: None,
+            last_train_status: Arc::new(RwLock::new(None)),
+            ask_chat_limiter: None,
+            research_policy: deny_policy,
+        });
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/v1/admin/research")
+                    .header("content-type", "application/json")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "url": "https://example.com",
+                            "question": "What is this?",
+                            "allow_web": false,
+                            "redaction_required": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body).to_lowercase();
+        assert!(
+            body_str.contains("denied") || body_str.contains("policy"),
+            "expected policy denial message, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_train_status_404_when_no_train() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/admin/train/status")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

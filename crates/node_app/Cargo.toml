@@ -17,7 +17,6 @@ node_mesh = { workspace = true }
 node_ai = { workspace = true }
 node_ai_ollama = { workspace = true }
 node_ai_mock = { workspace = true }
-node_research = { workspace = true }
 node_trainer = { workspace = true }
 node_relay = { workspace = true }
 node_api = { workspace = true }
@@ -40,3 +39,5 @@ tempfile = { workspace = true }
 tower = "0.5"
 http-body-util = "0.1"
 node_ai_mock = { path = "../node_ai_mock" }
+node_ingest = { path = "../node_ingest" }
+node_connectors = { path = "../node_connectors" }

@@ -1,4 +1,5 @@
 import { api, setAdminToken } from './api.js';
+import { store } from './store.js';
 import { marked } from 'marked';
 
 marked.use({
@@ -8,10 +9,6 @@ marked.use({
     html: () => '',
   },
 });
-
-let currentPage = 'dashboard';
-let statusData = null;
-let pollInterval = null;
 
 // --- Toast system ---
 function toast(message, type = 'info') {
@@ -30,9 +27,13 @@ document.querySelectorAll('.nav-item').forEach(item => {
     navigateTo(page);
   });
 });
+document.getElementById('content').addEventListener('click', (e) => {
+  const page = e.target.closest('[data-page]')?.dataset?.page;
+  if (page) navigateTo(page);
+});
 
 function navigateTo(page) {
-  currentPage = page;
+  store.setCurrentPage(page);
   document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
   renderPage(page);
@@ -44,9 +45,11 @@ function renderPage(page) {
   switch (page) {
     case 'dashboard': renderDashboard(content); break;
     case 'ask': renderAsk(content); break;
+    case 'search': renderSearch(content); break;
     case 'sources': renderSources(content); break;
     case 'datasets': renderDatasets(content); break;
     case 'models': renderModels(content); break;
+    case 'federated': renderFederated(content); break;
     case 'peers': renderPeers(content); break;
     case 'audit': renderAudit(content); break;
     default: content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">?</div><div class="empty-state-text">Page not found</div></div>';
@@ -68,7 +71,7 @@ async function renderDashboard(el) {
         <span class="card-title">Quick Actions</span>
       </div>
       <div class="actions-row">
-        <button class="btn btn-primary" onclick="window._nav('ask')">Ask a Question</button>
+        <button class="btn btn-primary" type="button" data-page="ask">Ask a Question</button>
         <button class="btn btn-secondary" id="btn-train-quick">Train Now</button>
         <button class="btn btn-secondary" id="btn-scan-sources">Scan Sources</button>
       </div>
@@ -78,8 +81,6 @@ async function renderDashboard(el) {
       <div id="dash-activity"><div class="empty-state"><div class="spinner"></div></div></div>
     </div>
   `;
-
-  window._nav = navigateTo;
 
   document.getElementById('btn-train-quick')?.addEventListener('click', () => showTrainModal());
   document.getElementById('btn-scan-sources')?.addEventListener('click', async () => {
@@ -106,7 +107,7 @@ async function renderDashboard(el) {
       api.getDatasets().catch(() => []),
       api.getLogs(10).catch(() => []),
     ]);
-    statusData = status;
+    store.setStatusData(status);
     if (status.admin_token) setAdminToken(status.admin_token);
     updateNodeStatus(true, status);
 
@@ -175,7 +176,7 @@ async function renderDashboard(el) {
 }
 
 // --- Ask / Chat ---
-let chatState = { conversationId: null, conversations: [], sending: false, searchQuery: '' };
+function chatState() { return store.getChatState(); }
 
 async function renderAsk(el) {
   el.innerHTML = `
@@ -235,15 +236,15 @@ async function renderAsk(el) {
 
   const searchInput = document.getElementById('chat-search');
   searchInput.addEventListener('input', () => {
-    chatState.searchQuery = searchInput.value;
+    chatState().searchQuery = searchInput.value;
     renderConversationList();
   });
 }
 
 async function loadConversationList() {
   try {
-    chatState.conversations = await api.listConversations();
-  } catch { chatState.conversations = []; }
+    chatState().conversations = await api.listConversations();
+  } catch { chatState().conversations = []; }
   renderConversationList();
 }
 
@@ -251,12 +252,12 @@ function renderConversationList() {
   const list = document.getElementById('chat-conv-list');
   if (!list) return;
 
-  const query = (chatState.searchQuery || '').toLowerCase();
+  const query = (chatState().searchQuery || '').toLowerCase();
   const filtered = query
-    ? chatState.conversations.filter(c => (c.title || '').toLowerCase().includes(query))
-    : chatState.conversations;
+    ? chatState().conversations.filter(c => (c.title || '').toLowerCase().includes(query))
+    : chatState().conversations;
 
-  if (chatState.conversations.length === 0) {
+  if (chatState().conversations.length === 0) {
     list.innerHTML = '<div class="chat-conv-empty">No conversations yet</div>';
     return;
   }
@@ -267,7 +268,7 @@ function renderConversationList() {
   }
 
   list.innerHTML = filtered.map(c => `
-    <div class="chat-conv-item ${c.conversation_id === chatState.conversationId ? 'active' : ''}" data-id="${escapeHtml(c.conversation_id)}">
+    <div class="chat-conv-item ${c.conversation_id === chatState().conversationId ? 'active' : ''}" data-id="${escapeHtml(c.conversation_id)}">
       <span class="chat-conv-title">${escapeHtml(c.title)}</span>
       <span class="chat-conv-time">${formatTimeShort(c.updated_at_ms)}</span>
       <button class="chat-conv-delete" data-id="${escapeHtml(c.conversation_id)}" title="Delete">&times;</button>
@@ -287,8 +288,8 @@ function renderConversationList() {
       const id = btn.dataset.id;
       try {
         await api.deleteConversation(id);
-        if (chatState.conversationId === id) {
-          chatState.conversationId = null;
+        if (chatState().conversationId === id) {
+          chatState().conversationId = null;
           showWelcome();
         }
         await loadConversationList();
@@ -321,7 +322,7 @@ function showWelcome() {
 }
 
 async function loadConversation(convId) {
-  chatState.conversationId = convId;
+  chatState().conversationId = convId;
   await loadConversationList();
 
   const area = document.getElementById('chat-messages');
@@ -342,7 +343,7 @@ async function loadConversation(convId) {
 async function startNewChat() {
   try {
     const conv = await api.createConversation();
-    chatState.conversationId = conv.conversation_id;
+    chatState().conversationId = conv.conversation_id;
     showWelcome();
     await loadConversationList();
     document.getElementById('chat-input')?.focus();
@@ -350,15 +351,15 @@ async function startNewChat() {
 }
 
 async function sendChatMessage() {
-  if (chatState.sending) return;
+  if (chatState().sending) return;
   const textarea = document.getElementById('chat-input');
   const content = textarea.value.trim();
   if (!content) return;
 
-  if (!chatState.conversationId) {
+  if (!chatState().conversationId) {
     try {
       const conv = await api.createConversation();
-      chatState.conversationId = conv.conversation_id;
+      chatState().conversationId = conv.conversation_id;
     } catch (e) { toast(`Error: ${e.message}`, 'error'); return; }
   }
 
@@ -376,22 +377,54 @@ async function sendChatMessage() {
   area.appendChild(typingEl);
   area.scrollTop = area.scrollHeight;
 
-  chatState.sending = true;
+  chatState().sending = true;
   const sendBtn = document.getElementById('chat-send');
   if (sendBtn) sendBtn.disabled = true;
 
+  let bubble = null;
   try {
-    const resp = await api.sendMessage(chatState.conversationId, content);
-    typingEl.remove();
-    appendMessageBubble('assistant', resp.content, resp);
+    bubble = document.createElement('div');
+    bubble.className = 'chat-bubble chat-bubble-assistant';
+    const textDiv = document.createElement('div');
+    textDiv.className = 'chat-bubble-text';
+    bubble.appendChild(textDiv);
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'chat-bubble-meta';
+    bubble.appendChild(metaDiv);
+    area.appendChild(bubble);
+    let typingRemoved = false;
+
+    let streamedText = '';
+    await api.sendMessageStream(chatState().conversationId, content, 1024, {
+      onToken: (token) => {
+        if (!typingRemoved) {
+          typingEl.remove();
+          typingRemoved = true;
+        }
+        streamedText += token;
+        textDiv.innerHTML = marked.parse(streamedText);
+        area.scrollTop = area.scrollHeight;
+      },
+      onDone: (data) => {
+        if (!typingRemoved) typingEl.remove();
+        textDiv.innerHTML = marked.parse(data.content || '');
+        const parts = [];
+        if (data.model) parts.push(data.model);
+        if (data.confidence) parts.push(`${(data.confidence * 100).toFixed(0)}%`);
+        if (data.context_used?.length) parts.push(`${data.context_used.length} sources`);
+        metaDiv.textContent = parts.join(' · ');
+        area.scrollTop = area.scrollHeight;
+      },
+    });
     area.scrollTop = area.scrollHeight;
     await loadConversationList();
   } catch (e) {
     typingEl.remove();
+    if (bubble?.parentNode) bubble.remove();
     appendMessageBubble('assistant', `Error: ${e.message}`, { confidence: 0, model: '', context_used: [] });
   }
 
-  chatState.sending = false;
+  chatState().sending = false;
   if (sendBtn) sendBtn.disabled = false;
   textarea.focus();
 }
@@ -434,6 +467,66 @@ function formatTimeShort(ms) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// --- Search ---
+async function renderSearch(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <h1>Search</h1>
+      <p>Full-text search over your ingested knowledge base</p>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Query</span>
+      </div>
+      <div class="form-group" style="display:flex;gap:8px;align-items:center">
+        <input type="search" id="search-query" class="form-input" placeholder="Enter search terms..." style="flex:1" />
+        <button class="btn btn-primary" id="search-btn">Search</button>
+      </div>
+    </div>
+    <div id="search-results" class="card" style="margin-top:16px">
+      <div class="card-header"><span class="card-title">Results</span></div>
+      <div id="search-results-body" class="empty-state"><div class="empty-state-text">Enter a query and click Search</div></div>
+    </div>
+  `;
+
+  const runSearch = async () => {
+    const q = document.getElementById('search-query').value.trim();
+    const body = document.getElementById('search-results-body');
+    if (!q) {
+      body.innerHTML = '<div class="empty-state-text">Enter a query and click Search</div>';
+      return;
+    }
+    body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+    try {
+      const results = await api.search(q, 30);
+      if (results.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⌕</div><div class="empty-state-text">No results found</div></div>';
+        return;
+      }
+      body.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Type</th><th>ID</th><th>Title</th><th>Summary</th></tr></thead>
+          <tbody>${results.map(r => `
+            <tr>
+              <td><span class="badge badge-blue">${escapeHtml(r.result_type)}</span></td>
+              <td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(r.id)}</td>
+              <td>${escapeHtml(r.title)}</td>
+              <td>${escapeHtml(r.summary).slice(0, 120)}${r.summary.length > 120 ? '…' : ''}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  };
+
+  document.getElementById('search-btn').addEventListener('click', runSearch);
+  document.getElementById('search-query').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runSearch();
+  });
 }
 
 // --- Sources ---
@@ -496,36 +589,41 @@ async function renderSources(el) {
             <td>${s.pii_detected ? '<span class="badge badge-red">PII</span>' : '<span class="badge badge-green">Clean</span>'}</td>
             <td>${formatBytes(s.estimated_size_bytes)}</td>
             <td>${s.status !== 'approved'
-              ? `<button class="btn btn-sm btn-primary" onclick="window._approveSource('${escapeHtml(s.source_id)}')">Approve</button>`
-              : `<button class="btn btn-sm btn-primary" onclick="window._ingestSource('${escapeHtml(s.source_id)}')">Ingest</button>`}</td>
+              ? `<button class="btn btn-sm btn-primary" type="button" data-action="approve-source" data-source-id="${escapeHtml(s.source_id)}">Approve</button>`
+              : `<button class="btn btn-sm btn-primary" type="button" data-action="ingest-source" data-source-id="${escapeHtml(s.source_id)}">Ingest</button>`}</td>
           </tr>
         `).join('')}</tbody>
       </table></div></div>
     `;
 
-    window._approveSource = async (id) => {
-      try {
-        await api.approveSource(id);
-        toast('Source approved', 'success');
-        renderSources(el);
-      } catch (e) {
-        toast(`Error: ${e.message}`, 'error');
+    document.getElementById('sources-content').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action][data-source-id]');
+      if (!btn) return;
+      const id = btn.dataset.sourceId;
+      const action = btn.dataset.action;
+      if (action === 'approve-source') {
+        try {
+          await api.approveSource(id);
+          toast('Source approved', 'success');
+          renderSources(el);
+        } catch (err) {
+          toast(`Error: ${err.message}`, 'error');
+        }
+      } else if (action === 'ingest-source') {
+        btn.disabled = true;
+        btn.textContent = 'Ingesting...';
+        toast('Ingestion started...', 'info');
+        try {
+          const result = await api.ingestSource(id);
+          toast(`Ingested: ${result.rows_ingested} rows, ${result.documents_created} docs, ${formatBytes(result.bytes_stored)} in ${result.duration_ms}ms`, 'success');
+          renderSources(el);
+        } catch (err) {
+          toast(`Ingest error: ${err.message}`, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Ingest';
+        }
       }
-    };
-
-    window._ingestSource = async (id) => {
-      const btn = document.querySelector(`button[onclick*="${id}"]`);
-      if (btn) { btn.disabled = true; btn.textContent = 'Ingesting...'; }
-      toast('Ingestion started...', 'info');
-      try {
-        const result = await api.ingestSource(id);
-        toast(`Ingested: ${result.rows_ingested} rows, ${result.documents_created} docs, ${formatBytes(result.bytes_stored)} in ${result.duration_ms}ms`, 'success');
-        renderSources(el);
-      } catch (e) {
-        toast(`Ingest error: ${e.message}`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = 'Ingest'; }
-      }
-    };
+    });
   } catch (e) {
     document.getElementById('sources-content').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">Failed to load sources: ${escapeHtml(e.message)}</div></div>`;
   }
@@ -592,23 +690,58 @@ async function renderModels(el) {
             <td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(m.model_id)}</td>
             <td>v${m.version}</td>
             <td>${m.promoted ? '<span class="badge badge-green">Promoted</span>' : m.rolled_back ? '<span class="badge badge-red">Rolled Back</span>' : '<span class="badge badge-default">Pending</span>'}</td>
-            <td>${!m.rolled_back ? `<button class="btn btn-sm btn-danger" onclick="window._rollbackModel('${escapeHtml(m.model_id)}', ${m.version})">Rollback</button>` : ''}</td>
+            <td>${!m.rolled_back ? `<button class="btn btn-sm btn-danger" type="button" data-action="rollback-model" data-model-id="${escapeHtml(m.model_id)}" data-version="${m.version}">Rollback</button>` : ''}</td>
           </tr>
         `).join('')}</tbody>
       </table></div></div>
     `;
 
-    window._rollbackModel = async (id, ver) => {
+    document.getElementById('models-content').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action="rollback-model"]');
+      if (!btn) return;
+      const id = btn.dataset.modelId;
+      const ver = parseInt(btn.dataset.version, 10);
       try {
         await api.rollbackModel(id, ver, Math.max(1, ver - 1), 'Manual rollback from UI');
         toast('Model rolled back', 'success');
         renderModels(el);
-      } catch (e) {
-        toast(`Error: ${e.message}`, 'error');
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
       }
-    };
+    });
   } catch (e) {
     document.getElementById('models-content').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">Failed to load models</div></div>`;
+  }
+}
+
+// --- Federated ---
+async function renderFederated(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <h1>Federated Learning</h1>
+      <p>Multi-node training without sharing raw data</p>
+    </div>
+    <div id="federated-content"><div class="empty-state"><div class="spinner"></div></div></div>
+  `;
+  try {
+    const status = await api.getFederatedStatus();
+    const container = document.getElementById('federated-content');
+    container.innerHTML = `
+      <div class="card">
+        <div class="card-header"><span class="card-title">Status</span></div>
+        <div class="table-container"><table>
+          <tbody>
+            <tr><td>Supported</td><td>${status.supported ? '<span class="badge badge-green">Yes</span>' : 'No'}</td></tr>
+            <tr><td>Aggregation</td><td>${escapeHtml(status.aggregation)}</td></tr>
+            <tr><td>Min participants</td><td>${status.min_participants}</td></tr>
+            <tr><td>Max participants</td><td>${status.max_participants}</td></tr>
+          </tbody>
+        </table></div>
+        <p style="margin:16px;color:var(--text-muted)">Federated rounds can be started when multiple nodes are connected. Deltas are policy-gated.</p>
+      </div>
+    `;
+  } catch (e) {
+    document.getElementById('federated-content').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
   }
 }
 
@@ -730,7 +863,7 @@ function showTrainModal() {
         toast(`Training ${res.status} (${res.dataset_items} dataset items)`, res.status.startsWith('rejected') || res.status.startsWith('failed') ? 'error' : 'info');
       }
       overlay.remove();
-      renderPage(currentPage);
+      renderPage(store.getCurrentPage());
     } catch (e) {
       toast(`Error: ${e.message}`, 'error');
     }
@@ -794,7 +927,7 @@ function statusBadge(status) {
 async function pollStatus() {
   try {
     const s = await api.getStatus();
-    statusData = s;
+    store.setStatusData(s);
     if (s.admin_token) setAdminToken(s.admin_token);
     updateNodeStatus(true, s);
   } catch {
@@ -804,5 +937,5 @@ async function pollStatus() {
 
 // --- Init ---
 renderPage('dashboard');
-pollInterval = setInterval(pollStatus, 10000);
+store.setPollInterval(setInterval(pollStatus, 10000));
 pollStatus();

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["ui/src-tauri"]
 members = [
     "crates/node_proto",
     "crates/node_crypto",
@@ -33,7 +34,7 @@ rust-version = "1.75"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP / API
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "json", "tokio", "ws"] }
 
 # Serialization
 prost = "0.13"
@@ -72,12 +73,18 @@ serde_json = "1"
 toml = "0.8"
 
 # HTTP client (for Ollama, web research)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+
+# Rate limiting
+governor = "0.6"
+nonzero_ext = "0.3"
 
 # Misc
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 tempfile = "3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+async-stream = "0.3"
 
 # Workspace crates
 node_proto = { path = "crates/node_proto" }

@@ -56,9 +56,18 @@ fn create_node_state(
         consult_config: ConsultConfig::default(),
         node_id: name.into(),
         admin_token: "test-token".into(),
+        expose_admin_token: true,
         scan_dirs: vec![],
         trainer,
         model_registry,
+        ui_dir: None,
+        last_train_status: Arc::new(RwLock::new(None)),
+        ask_chat_limiter: None,
+        research_policy: Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+            allow_web: true,
+            research_web_capable: true,
+            ..Default::default()
+        })),
     });
 
     (state, tmp)
@@ -195,7 +204,7 @@ async fn e2e_ask_peer_over_mesh() {
 
     let resp = app
         .oneshot(
-            Request::post("/ask")
+            Request::post("/v1/ask")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -252,7 +261,7 @@ async fn e2e_http_status_with_mesh() {
     let app = node_api::build_router(state_a);
 
     let resp = app
-        .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
         .await
         .unwrap();
 

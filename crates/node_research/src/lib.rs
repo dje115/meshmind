@@ -7,6 +7,7 @@
 //! 4. Store WebBrief as event
 //! 5. Optionally redact before sharing
 
+use std::path::Path;
 use std::sync::Arc;
 
 use node_ai::InferenceBackend;
@@ -49,6 +50,7 @@ pub enum ResearchError {
 }
 
 /// Perform web research: fetch, summarize, store WebBrief.
+/// If db_path is Some, projects the WebBrief event into SQLite views.
 pub async fn research(
     req: &ResearchRequest,
     policy: &PolicyEngine,
@@ -56,6 +58,7 @@ pub async fn research(
     cas: &CasStore,
     event_log: &mut EventLog,
     node_id: &str,
+    db_path: Option<&Path>,
 ) -> std::result::Result<ResearchResult, ResearchError> {
     match policy.can_research_web(req.allow_web, req.redaction_required) {
         PolicyDecision::Allow => {}
@@ -106,6 +109,13 @@ pub async fn research(
     let stored = event_log
         .append(event)
         .map_err(|e| ResearchError::StorageError(e.to_string()))?;
+
+    if let Some(path) = db_path {
+        let conn = node_storage::sqlite_views::open_db(path)
+            .map_err(|e| ResearchError::StorageError(e.to_string()))?;
+        node_storage::projector::apply_event(&conn, &stored)
+            .map_err(|e| ResearchError::StorageError(e.to_string()))?;
+    }
 
     Ok(ResearchResult {
         artifact_id,

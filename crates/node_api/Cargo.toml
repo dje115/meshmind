@@ -14,7 +14,9 @@ node_connectors = { path = "../node_connectors" }
 node_ingest = { path = "../node_ingest" }
 node_trainer = { workspace = true }
 node_datasets = { workspace = true }
+node_federated = { workspace = true }
 node_repl = { workspace = true }
+node_research = { path = "../node_research" }
 hex = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -27,7 +29,11 @@ rusqlite = { workspace = true }
 async-trait = "0.1"
 prost = { workspace = true }
 uuid = { workspace = true }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+governor = { workspace = true }
+nonzero_ext = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

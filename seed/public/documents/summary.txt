@@ -1,0 +1,14 @@
+Project Summary - MeshMind Integration
+
+Overview
+This document summarizes the integration work completed for the MeshMind local-first AI node. The system supports ingestion of Word documents, PDFs, invoices, and other business files.
+
+Capabilities
+- Document ingestion: PDF, DOCX, TXT, MD, RTF
+- Full-text search across ingested content
+- Natural language Q&A over local data
+- Support for questions like "How many invoices do I have?" and "Summarize my documents"
+
+Next Steps
+- Add OneDrive connector for cloud file sync
+- Add email integration for Outlook/Microsoft 365
