@@ -5,6 +5,28 @@
 
 ---
 
+## Recent Session (2026-03-04)
+
+### Completed
+
+1. **Web research fix** – Real DuckDuckGo search when user says "search the web", "look it up online", etc.
+   - `node_research`: `web_search()`, `search_and_summarize_for_chat()`, DuckDuckGo HTML parsing
+   - `node_api`: Triggers in Ask and chat stream; policy-gated (`allow_web`, `research_web_capable`, `redaction_required`)
+
+2. **Context drift fix** – Follow-up questions (e.g. "yes please", "tell me more") stay on topic
+   - Detects short follow-ups; uses previous user message for FTS; skips KB context for vague queries; adds prompt instruction to stay on topic
+
+3. **Build fix** – Use GNU target on Windows: `cargo build --target x86_64-pc-windows-gnu` (or `cargo b` alias)
+
+### Modified Files
+
+- `crates/node_research/src/lib.rs` – web search, DuckDuckGo parser
+- `crates/node_api/src/lib.rs` – web search detection, follow-up handling, borrow fix
+- `Cargo.toml` / `crates/node_research/Cargo.toml` – urlencoding dep
+- `.cargo/config.toml` – alias `cargo b` for GNU target (local, gitignored)
+
+---
+
 ## Current State
 
 ### What's Done

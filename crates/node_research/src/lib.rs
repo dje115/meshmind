@@ -47,6 +47,126 @@ pub enum ResearchError {
     InferenceError(String),
     #[error("storage error: {0}")]
     StorageError(String),
+    #[error("search error: {0}")]
+    SearchError(String),
+}
+
+/// Perform a DuckDuckGo web search and return (title, url) pairs.
+pub async fn web_search(query: &str, limit: usize) -> std::result::Result<Vec<(String, String)>, ResearchError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0")
+        .build()
+        .map_err(|e| ResearchError::SearchError(e.to_string()))?;
+
+    let url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        urlencoding::encode(query)
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ResearchError::SearchError(e.to_string()))?;
+
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| ResearchError::SearchError(e.to_string()))?;
+
+    parse_ddg_html_results(&html, limit)
+}
+
+fn parse_ddg_html_results(html: &str, limit: usize) -> std::result::Result<Vec<(String, String)>, ResearchError> {
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while results.len() < limit {
+        // DuckDuckGo HTML: links with class result__a, href may be uddg= encoded
+        let link_start = match html[pos..].find("class=\"result__a\"") {
+            Some(i) => pos + i,
+            None => break,
+        };
+        let href_start = match html[link_start..].find("href=\"") {
+            Some(i) => link_start + i + 6,
+            None => break,
+        };
+        let href_end = match html[href_start..].find('"') {
+            Some(i) => href_start + i,
+            None => break,
+        };
+        let raw_url = html[href_start..href_end].trim();
+        let url = if raw_url.contains("uddg=") {
+            if let Some(uddg_start) = raw_url.find("uddg=") {
+                let rest = &raw_url[uddg_start + 5..];
+                let uddg_end = rest.find('&').unwrap_or(rest.len());
+                let encoded = &rest[..uddg_end];
+                match urlencoding::decode(encoded).map(|c| c.into_owned()) {
+                    Ok(decoded) => decoded,
+                    Err(_) => {
+                        pos = href_end + 1;
+                        continue;
+                    }
+                }
+            } else {
+                pos = href_end + 1;
+                continue;
+            }
+        } else if raw_url.starts_with("https://duckduckgo.com/") || raw_url.starts_with("//duckduckgo.com") {
+            pos = href_end + 1;
+            continue;
+        } else if raw_url.starts_with("//") {
+            format!("https:{}", raw_url)
+        } else {
+            raw_url.to_string()
+        };
+        let title_start = html[href_end..].find('>').map(|i| href_end + i + 1).unwrap_or(href_end);
+        let title_end = match html[title_start..].find("</a>") {
+            Some(i) => title_start + i,
+            None => break,
+        };
+        let title = html[title_start..title_end]
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .trim()
+            .to_string();
+        if !title.is_empty() && !url.is_empty() && url.starts_with("http") {
+            results.push((title, url));
+        }
+        pos = title_end + 4;
+    }
+    Ok(results)
+}
+
+/// Search the web and summarize the top result for chat context. Returns None if policy denies or search fails.
+pub async fn search_and_summarize_for_chat(
+    query: &str,
+    policy: &PolicyEngine,
+    backend: &Arc<dyn InferenceBackend>,
+) -> Option<String> {
+    if !policy.can_research_web(true, true).is_allowed() {
+        return None;
+    }
+    let results = web_search(query, 3).await.ok()?;
+    let (_, first_url) = results.first()?;
+    let body = fetch_url(first_url).await.ok()?;
+    let summary = summarize(backend, query, &body).await.ok()?;
+    let mut out = format!("Web search result for \"{query}\":\n{summary}");
+    if results.len() > 1 {
+        out.push_str("\n\nOther results: ");
+        out.push_str(
+            &results[1..]
+                .iter()
+                .map(|(t, u)| format!("{t} ({u})"))
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    Some(out)
 }
 
 /// Perform web research: fetch, summarize, store WebBrief.

@@ -80,6 +80,7 @@ governor = "0.6"
 nonzero_ext = "0.3"
 
 # Misc
+urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 tempfile = "3"

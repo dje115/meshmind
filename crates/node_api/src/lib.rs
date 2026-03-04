@@ -77,6 +77,81 @@ const STOP_WORDS: &[&str] = &[
     "so", "how", "what", "when", "where", "who", "which", "why",
 ];
 
+/// Phrases that indicate the user wants a web search.
+const WEB_SEARCH_TRIGGERS: &[&str] = &[
+    "search the web",
+    "search the internet",
+    "look it up online",
+    "look it up on the web",
+    "google it",
+    "search online",
+    "find it online",
+    "look up online",
+    "search for it",
+];
+
+/// Short phrases that indicate a follow-up (continue previous topic).
+const FOLLOW_UP_PHRASES: &[&str] = &[
+    "yes please",
+    "yes, please",
+    "tell me more",
+    "elaborate",
+    "go on",
+    "continue",
+    "more details",
+    "more info",
+    "expand on that",
+    "can you elaborate",
+    "what else",
+];
+
+fn wants_web_search(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    WEB_SEARCH_TRIGGERS.iter().any(|t| lower.contains(t))
+}
+
+fn extract_search_query(content: &str, history: &[(String, String)]) -> Option<String> {
+    let lower = content.to_lowercase();
+    for trigger in WEB_SEARCH_TRIGGERS {
+        if let Some(pos) = lower.find(trigger) {
+            let mut rest = content[pos + trigger.len()..].trim().to_string();
+            for prefix in ["for ", "about ", "regarding "] {
+                if rest.to_lowercase().starts_with(prefix) {
+                    rest = rest[prefix.len()..].trim().to_string();
+                    break;
+                }
+            }
+            if !rest.is_empty() && rest.len() > 2 {
+                let query: String = rest.chars().take(100).collect();
+                return Some(query.trim().to_string());
+            }
+        }
+    }
+    // Fallback: use the last user question from history as the topic
+    for (role, content) in history.iter().rev() {
+        if role == "user" && content.len() > 5 && !content.chars().all(|c| c.is_whitespace()) {
+            let q: String = content.chars().take(80).collect();
+            return Some(q.trim().to_string());
+        }
+    }
+    None
+}
+
+fn is_follow_up_message(content: &str, history: &[(String, String)]) -> bool {
+    let trimmed = content.trim().to_lowercase();
+    if trimmed.len() > 40 {
+        return false;
+    }
+    let is_short_phrase = FOLLOW_UP_PHRASES
+        .iter()
+        .any(|p| trimmed == *p || trimmed.starts_with(&format!("{p} ")) || trimmed.ends_with(p));
+    if is_short_phrase {
+        return true;
+    }
+    // Very short messages after a multi-turn conversation are likely follow-ups
+    trimmed.len() <= 15 && history.len() >= 4
+}
+
 fn to_fts5_query(text: &str) -> String {
     let keywords: Vec<&str> = text
         .split_whitespace()
@@ -504,6 +579,21 @@ async fn handle_ask(
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    let mut web_search_context = String::new();
+    if wants_web_search(&req.question) {
+        if let Some(query) = extract_search_query(&req.question, &[]) {
+            if let Some(ctx) = node_research::search_and_summarize_for_chat(
+                &query,
+                &state.research_policy,
+                &state.backend,
+            )
+            .await
+            {
+                web_search_context = ctx;
+            }
+        }
+    }
+
     let fts_query = to_fts5_query(&req.question);
     let context_hits = search::search_all(&conn, &fts_query, 10)
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -516,7 +606,20 @@ async fn handle_ask(
         })
         .collect();
 
-    let prompt = if context_bullets.is_empty() {
+    let prompt = if !web_search_context.is_empty() {
+        let kb = if context_bullets.is_empty() {
+            String::new()
+        } else {
+            format!("Context from local knowledge base:\n{}\n\n", context_bullets.join("\n"))
+        };
+        format!(
+            "{}{}\nQuestion: {}\n\nAnswer based on the web search results above. {} Be concise and specific.",
+            kb,
+            web_search_context,
+            req.question,
+            if kb.is_empty() { "" } else { "Use local context if relevant. " }
+        )
+    } else if context_bullets.is_empty() {
         format!(
             "The user asked: \"{}\"\n\nNo matching data was found in the local knowledge base. \
              Tell the user you searched but found no relevant results. Suggest they scan and ingest \
@@ -1029,9 +1132,39 @@ async fn handle_send_message_stream(
         .rev()
         .collect();
 
-    let fts_query = to_fts5_query(&req.content);
-    let context_hits = search::search_all(&conn, &fts_query, 10)
-        .unwrap_or_default();
+    let is_follow_up = is_follow_up_message(&req.content, &history);
+    let fts_query_text: String = if is_follow_up {
+        history
+            .iter()
+            .rev()
+            .find(|(r, _)| r == "user")
+            .map(|(_, c)| c.as_str())
+            .unwrap_or(&req.content)
+            .to_string()
+    } else {
+        req.content.clone()
+    };
+    let fts_query = to_fts5_query(&fts_query_text);
+    let context_hits = if is_follow_up && fts_query_text.trim().len() < 10 {
+        Vec::new()
+    } else {
+        search::search_all(&conn, &fts_query, 10).unwrap_or_default()
+    };
+
+    let mut web_search_context = String::new();
+    if wants_web_search(&req.content) {
+        if let Some(query) = extract_search_query(&req.content, &history) {
+            if let Some(ctx) = node_research::search_and_summarize_for_chat(
+                &query,
+                &state.research_policy,
+                &state.backend,
+            )
+            .await
+            {
+                web_search_context = ctx;
+            }
+        }
+    }
 
     let context_bullets: Vec<String> = context_hits
         .iter()
@@ -1057,7 +1190,18 @@ async fn handle_send_message_stream(
         })
         .unwrap_or_default();
 
+    let has_context = !context_bullets.is_empty() || !cross_session.is_empty() || !web_search_context.is_empty();
     let mut prompt_parts = Vec::new();
+    if is_follow_up {
+        prompt_parts.push(
+            "The user is asking a follow-up question. Stay on the topic of your previous answer. \
+             Do NOT introduce new topics from the knowledge base. Elaborate on what you already discussed."
+                .to_string(),
+        );
+    }
+    if !web_search_context.is_empty() {
+        prompt_parts.push(web_search_context);
+    }
     if !context_bullets.is_empty() {
         prompt_parts.push(format!(
             "Knowledge base context:\n{}",
@@ -1091,7 +1235,7 @@ async fn handle_send_message_stream(
         ));
     }
     prompt_parts.push(format!("User: {}", req.content));
-    if context_bullets.is_empty() && cross_session.is_empty() && hist_len <= 1 {
+    if !has_context && hist_len <= 1 {
         prompt_parts.push(
             "No matching data was found in the knowledge base. \
              Tell the user you searched but found no relevant results. \
