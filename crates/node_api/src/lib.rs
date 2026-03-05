@@ -2143,10 +2143,10 @@ async fn handle_oauth_onedrive_callback(
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let base = state.listen_base_url.trim_end_matches('/');
-    let mut redirect = format!("{}/#settings", base);
+    let redirect_base = format!("{}/", base);
     if let Some(err) = q.error {
         let desc = q.error_description.as_deref().unwrap_or(&err);
-        redirect = format!("{}?onedrive_error={}", redirect, urlencoding::encode(desc));
+        let redirect = format!("{}?onedrive_error={}#settings", redirect_base, urlencoding::encode(desc));
         return Ok(axum::response::Redirect::temporary(&redirect));
     }
     let code = q
@@ -2189,9 +2189,9 @@ async fn handle_oauth_onedrive_callback(
         .map_err(|e| ApiError::internal(e.to_string()))?;
     if !status.is_success() {
         tracing::warn!("OneDrive token exchange failed: {} - {}", status, body);
-        redirect = format!(
-            "{}?onedrive_error={}",
-            redirect,
+        let redirect = format!(
+            "{}?onedrive_error={}#settings",
+            redirect_base,
             urlencoding::encode("Token exchange failed")
         );
         return Ok(axum::response::Redirect::temporary(&redirect));
@@ -2210,7 +2210,7 @@ async fn handle_oauth_onedrive_callback(
     };
     let path = state.data_dir.join("config").join("onedrive.json");
     save_onedrive_config(&path, &cfg).map_err(|e| ApiError::internal(e.to_string()))?;
-    redirect = format!("{}?onedrive=ok", redirect);
+    let redirect = format!("{}?onedrive=ok#settings", redirect_base);
     Ok(axum::response::Redirect::temporary(&redirect))
 }
 
