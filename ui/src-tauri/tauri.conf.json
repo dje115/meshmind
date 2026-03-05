@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/dev/tooling/cli/schema.json",
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/dev/src/content/docs/_schema/config.schema.json",
   "productName": "MeshMind",
   "version": "0.1.0",
   "identifier": "com.meshmind.app",
@@ -10,7 +10,6 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "title": "MeshMind",
     "windows": [
       {
         "title": "MeshMind",
@@ -30,7 +29,8 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.ico"
     ]
   }
 }

@@ -24,8 +24,11 @@ fn is_onedrive_path(path: &Path) -> bool {
 }
 
 /// OneDrive OAuth configuration (persisted to data/config/onedrive.json).
+/// After "Sign in with Microsoft" OAuth, only refresh_token is required;
+/// client_id and tenant_id can come from MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID env.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OneDriveConfig {
+    #[serde(default)]
     pub client_id: String,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
@@ -38,17 +41,32 @@ fn default_tenant() -> String {
     "common".to_string()
 }
 
+/// Resolve client_id: from config, or from MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID / MESHMIND_ONEDRIVE_CLIENT_ID.
+fn resolve_client_id(config_client_id: &str) -> Option<String> {
+    if !config_client_id.is_empty() {
+        return Some(config_client_id.to_string());
+    }
+    std::env::var("MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID")
+        .ok()
+        .or_else(|| std::env::var("MESHMIND_ONEDRIVE_CLIENT_ID").ok())
+}
+
 impl OneDriveConfig {
+    /// Returns true if we have enough to connect (refresh_token + client_id from config or env).
+    pub fn can_connect(&self) -> bool {
+        !self.refresh_token.is_empty() && resolve_client_id(&self.client_id).is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.client_id.is_empty() || self.refresh_token.is_empty()
+        !self.can_connect()
     }
 }
 
-/// Load OneDrive config from a JSON file. Returns None if file missing or invalid.
+/// Load OneDrive config from a JSON file. Returns None if file missing, invalid, or cannot connect.
 pub fn load_onedrive_config(path: &Path) -> Option<OneDriveConfig> {
     let text = std::fs::read_to_string(path).ok()?;
     let cfg: OneDriveConfig = serde_json::from_str(&text).ok()?;
-    if cfg.is_empty() {
+    if !cfg.can_connect() {
         return None;
     }
     Some(cfg)
@@ -162,9 +180,11 @@ impl OneDriveConnector {
 
     fn get_config(&self) -> anyhow::Result<(String, String, String, Option<String>)> {
         if let Some(ref cfg) = self.config {
-            if !cfg.is_empty() {
+            if cfg.can_connect() {
+                let client_id = resolve_client_id(&cfg.client_id)
+                    .context("client_id missing in config and MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID (or MESHMIND_ONEDRIVE_CLIENT_ID) not set")?;
                 return Ok((
-                    cfg.client_id.clone(),
+                    client_id,
                     cfg.tenant_id.clone(),
                     cfg.refresh_token.clone(),
                     cfg.client_secret.clone(),

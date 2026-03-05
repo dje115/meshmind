@@ -23,7 +23,9 @@
 //! - POST /admin/models/rollback
 //! - GET  /admin/datasets
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
@@ -45,6 +47,7 @@ use node_connectors::{
     load_onedrive_config, save_onedrive_config, Connector, CsvFolderConnector, DocumentConnector,
     ImageConnector, JsonFolderConnector, OneDriveConfig, OneDriveConnector, SQLiteConnector,
 };
+use sha2::Digest;
 
 async fn serve_fallback_landing() -> impl IntoResponse {
     let html = r##"<!DOCTYPE html>
@@ -325,6 +328,10 @@ pub struct AppState {
     pub ask_chat_limiter: Option<Arc<governor::DefaultDirectRateLimiter>>,
     /// Policy engine for web research (allow_web, research_web_capable). Required for POST /admin/research.
     pub research_policy: Arc<node_policy::PolicyEngine>,
+    /// Base URL for the API (e.g. http://127.0.0.1:9900). Used for OAuth redirect.
+    pub listen_base_url: String,
+    /// OAuth PKCE pending: state -> (code_verifier, created_at). Cleaned on callback.
+    pub oauth_pending: Arc<RwLock<HashMap<String, (String, Instant)>>>,
 }
 
 async fn admin_auth(
@@ -411,7 +418,25 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/admin/config/onedrive",
             post(handle_admin_config_onedrive_save),
         )
+        .route(
+            "/admin/config/general",
+            get(handle_admin_config_general_get),
+        )
+        .route(
+            "/admin/config/general",
+            post(handle_admin_config_general_save),
+        )
+        .route("/admin/restart", post(handle_admin_restart))
+        .route(
+            "/admin/config/onedrive/oauth/start",
+            get(handle_admin_config_onedrive_oauth_start),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
+
+    let oauth_public_routes = Router::new().route(
+        "/oauth/onedrive/callback",
+        get(handle_oauth_onedrive_callback),
+    );
 
     let api_routes = Router::new()
         .route("/status", get(handle_status))
@@ -436,6 +461,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             rate_limit_ask_chat,
         ))
+        .merge(oauth_public_routes)
         .merge(admin_routes)
         .layer(cors);
 
@@ -2045,6 +2071,322 @@ async fn handle_admin_config_onedrive_save(
     Ok(StatusCode::NO_CONTENT)
 }
 
+const ONEDRIVE_OAUTH_SCOPES: &str = "Files.ReadWrite offline_access User.Read";
+const ONEDRIVE_OAUTH_TENANT: &str = "common";
+
+fn onedrive_oauth_client_id() -> Option<String> {
+    std::env::var("MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID").ok()
+}
+
+fn pkce_code_verifier_and_challenge() -> (String, String) {
+    use base64::Engine;
+    let verifier: [u8; 32] = std::array::from_fn(|_| rand::random());
+    let verifier_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier);
+    let digest = sha2::Sha256::digest(verifier_b64.as_bytes());
+    let challenge_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    (verifier_b64, challenge_b64)
+}
+
+#[derive(Serialize)]
+struct OAuthStartResponse {
+    auth_url: String,
+    state: String,
+}
+
+async fn handle_admin_config_onedrive_oauth_start(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OAuthStartResponse>, ApiError> {
+    let client_id = onedrive_oauth_client_id().ok_or_else(|| {
+        ApiError::from_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OneDrive OAuth not configured: set MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID (see README)",
+        )
+    })?;
+    let redirect_uri = format!(
+        "{}/v1/oauth/onedrive/callback",
+        state.listen_base_url.trim_end_matches('/')
+    );
+    let (code_verifier, code_challenge) = pkce_code_verifier_and_challenge();
+    let state_param = uuid::Uuid::new_v4().to_string();
+    {
+        let mut pending = state.oauth_pending.write().await;
+        pending.insert(state_param.clone(), (code_verifier, Instant::now()));
+        // Clean expired (older than 10 min)
+        let cutoff = Instant::now() - Duration::from_secs(600);
+        pending.retain(|_, (_, t)| *t > cutoff);
+    }
+    let auth_url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        ONEDRIVE_OAUTH_TENANT,
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(ONEDRIVE_OAUTH_SCOPES),
+        urlencoding::encode(&state_param),
+        urlencoding::encode(&code_challenge),
+    );
+    Ok(Json(OAuthStartResponse {
+        auth_url,
+        state: state_param,
+    }))
+}
+
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn handle_oauth_onedrive_callback(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<OAuthCallbackQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let base = state.listen_base_url.trim_end_matches('/');
+    let mut redirect = format!("{}/#settings", base);
+    if let Some(err) = q.error {
+        let desc = q.error_description.as_deref().unwrap_or(&err);
+        redirect = format!("{}?onedrive_error={}", redirect, urlencoding::encode(desc));
+        return Ok(axum::response::Redirect::temporary(&redirect));
+    }
+    let code = q
+        .code
+        .ok_or_else(|| ApiError::bad_request("missing code"))?;
+    let state_param = q
+        .state
+        .ok_or_else(|| ApiError::bad_request("missing state"))?;
+    let (code_verifier, _) = {
+        let mut pending = state.oauth_pending.write().await;
+        pending
+            .remove(&state_param)
+            .ok_or_else(|| ApiError::bad_request("invalid or expired state"))?
+    };
+    let client_id = onedrive_oauth_client_id()
+        .ok_or_else(|| ApiError::internal("OAuth client ID not configured"))?;
+    let redirect_uri = format!("{}/v1/oauth/onedrive/callback", base);
+    let token_url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        ONEDRIVE_OAUTH_TENANT
+    );
+    let client = reqwest::Client::new();
+    let form = [
+        ("client_id", client_id.as_str()),
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("redirect_uri", redirect_uri.as_str()),
+        ("code_verifier", code_verifier.as_str()),
+    ];
+    let resp = client
+        .post(&token_url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !status.is_success() {
+        tracing::warn!("OneDrive token exchange failed: {} - {}", status, body);
+        redirect = format!(
+            "{}?onedrive_error={}",
+            redirect,
+            urlencoding::encode("Token exchange failed")
+        );
+        return Ok(axum::response::Redirect::temporary(&redirect));
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| ApiError::internal(e.to_string()))?;
+    let refresh_token = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::internal("no refresh_token in response"))?;
+    let cfg = OneDriveConfig {
+        client_id: client_id.clone(),
+        tenant_id: ONEDRIVE_OAUTH_TENANT.to_string(),
+        refresh_token: refresh_token.to_string(),
+        client_secret: None,
+    };
+    let path = state.data_dir.join("config").join("onedrive.json");
+    save_onedrive_config(&path, &cfg).map_err(|e| ApiError::internal(e.to_string()))?;
+    redirect = format!("{}?onedrive=ok", redirect);
+    Ok(axum::response::Redirect::temporary(&redirect))
+}
+
+fn meshmind_toml_path() -> std::path::PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("meshmind.toml")
+}
+
+#[derive(Serialize)]
+struct GeneralConfigResponse {
+    backend: String,
+    ollama_endpoint: Option<String>,
+    ollama_model: Option<String>,
+    enable_mdns: bool,
+    replication_interval_secs: u64,
+    relay_addr: Option<String>,
+    relay_port: Option<u16>,
+    relay_only: Option<bool>,
+    public_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listen: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GeneralConfigUpdate {
+    backend: Option<String>,
+    ollama_endpoint: Option<String>,
+    ollama_model: Option<String>,
+    enable_mdns: Option<bool>,
+    replication_interval_secs: Option<u64>,
+    relay_addr: Option<String>,
+    relay_port: Option<u16>,
+    relay_only: Option<bool>,
+    public_addr: Option<String>,
+}
+
+async fn handle_admin_config_general_get() -> Result<Json<GeneralConfigResponse>, ApiError> {
+    let path = meshmind_toml_path();
+    let empty_map = toml::map::Map::new();
+    let (
+        backend,
+        ollama_endpoint,
+        ollama_model,
+        enable_mdns,
+        replication_interval_secs,
+        relay_addr,
+        relay_port,
+        relay_only,
+        public_addr,
+        data_dir,
+        listen,
+    ) = if path.exists() {
+        let text = std::fs::read_to_string(&path).map_err(|e| ApiError::internal(e.to_string()))?;
+        let value: toml::Value =
+            toml::from_str(&text).map_err(|e| ApiError::internal(e.to_string()))?;
+        let t = value.as_table().unwrap_or(&empty_map);
+        (
+            t.get("backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("mock")
+                .to_string(),
+            t.get("ollama_endpoint")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            t.get("ollama_model")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            t.get("enable_mdns")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            t.get("replication_interval_secs")
+                .and_then(|v| v.as_integer())
+                .map(|i| i as u64)
+                .unwrap_or(30),
+            t.get("relay_addr")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            t.get("relay_port")
+                .and_then(|v| v.as_integer())
+                .map(|i| i as u16),
+            t.get("relay_only").and_then(|v| v.as_bool()),
+            t.get("public_addr")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            t.get("data_dir").and_then(|v| v.as_str()).map(String::from),
+            t.get("listen").and_then(|v| v.as_str()).map(String::from),
+        )
+    } else {
+        (
+            "mock".to_string(),
+            None,
+            None,
+            true,
+            30,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    Ok(Json(GeneralConfigResponse {
+        backend,
+        ollama_endpoint,
+        ollama_model,
+        enable_mdns,
+        replication_interval_secs,
+        relay_addr,
+        relay_port,
+        relay_only,
+        public_addr,
+        data_dir,
+        listen,
+    }))
+}
+
+async fn handle_admin_config_general_save(
+    Json(req): Json<GeneralConfigUpdate>,
+) -> Result<StatusCode, ApiError> {
+    let path = meshmind_toml_path();
+    let mut value: toml::Value = if path.exists() {
+        let text = std::fs::read_to_string(&path).map_err(|e| ApiError::internal(e.to_string()))?;
+        toml::from_str(&text).map_err(|e| ApiError::internal(e.to_string()))?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let t = value
+        .as_table_mut()
+        .ok_or_else(|| ApiError::internal("invalid config"))?;
+    if let Some(v) = req.backend {
+        t.insert("backend".into(), toml::Value::String(v));
+    }
+    if let Some(v) = req.ollama_endpoint {
+        t.insert("ollama_endpoint".into(), toml::Value::String(v));
+    }
+    if let Some(v) = req.ollama_model {
+        t.insert("ollama_model".into(), toml::Value::String(v));
+    }
+    if let Some(v) = req.enable_mdns {
+        t.insert("enable_mdns".into(), toml::Value::Boolean(v));
+    }
+    if let Some(v) = req.replication_interval_secs {
+        t.insert(
+            "replication_interval_secs".into(),
+            toml::Value::Integer(v as i64),
+        );
+    }
+    if let Some(v) = req.relay_addr {
+        t.insert("relay_addr".into(), toml::Value::String(v));
+    }
+    if let Some(v) = req.relay_port {
+        t.insert("relay_port".into(), toml::Value::Integer(v as i64));
+    }
+    if let Some(v) = req.relay_only {
+        t.insert("relay_only".into(), toml::Value::Boolean(v));
+    }
+    if let Some(v) = req.public_addr {
+        t.insert("public_addr".into(), toml::Value::String(v));
+    }
+    let text = toml::to_string_pretty(&value).map_err(|e| ApiError::internal(e.to_string()))?;
+    std::fs::write(&path, text).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn handle_admin_restart() -> Result<StatusCode, ApiError> {
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Serialize)]
 struct BulkIngestResponse {
     ingested: u64,
@@ -2820,6 +3162,8 @@ mod tests {
                 research_web_capable: true,
                 ..Default::default()
             })),
+            listen_base_url: "http://127.0.0.1:9900".into(),
+            oauth_pending: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -3119,6 +3463,8 @@ mod tests {
             last_train_status: Arc::new(RwLock::new(None)),
             ask_chat_limiter: None,
             research_policy: deny_policy,
+            listen_base_url: "http://127.0.0.1:9900".into(),
+            oauth_pending: Arc::new(RwLock::new(HashMap::new())),
         });
 
         let app = build_router(state);

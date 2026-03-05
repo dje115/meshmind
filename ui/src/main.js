@@ -787,42 +787,64 @@ async function renderSettings(el) {
       <p>Configure MeshMind and connected services</p>
     </div>
     <div class="settings-tabs">
-      <button class="settings-tab active" data-tab="onedrive">OneDrive</button>
       <button class="settings-tab" data-tab="general">General</button>
-    </div>
-    <div id="settings-onedrive" class="settings-panel">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">OneDrive Connector</span>
-        </div>
-        <p class="settings-desc">Connect to Microsoft OneDrive to ingest documents and files. You need an Azure AD app registration and OAuth tokens.</p>
-        <div class="form-group">
-          <label class="form-label">Client ID</label>
-          <input type="text" id="onedrive-client-id" class="form-input" placeholder="Your Azure app (client) ID" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Tenant ID</label>
-          <input type="text" id="onedrive-tenant-id" class="form-input" placeholder="common (default) or your tenant ID" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Refresh Token</label>
-          <input type="password" id="onedrive-refresh-token" class="form-input" placeholder="OAuth refresh token" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Client Secret (optional)</label>
-          <input type="password" id="onedrive-client-secret" class="form-input" placeholder="For confidential client apps only" autocomplete="off" />
-        </div>
-        <div class="settings-actions">
-          <button class="btn btn-primary" id="onedrive-save">Save OneDrive Config</button>
-        </div>
-      </div>
+      <button class="settings-tab active" data-tab="onedrive">OneDrive</button>
     </div>
     <div id="settings-general" class="settings-panel" style="display:none">
       <div class="card">
         <div class="card-header">
           <span class="card-title">General</span>
         </div>
-        <p class="settings-desc">General MeshMind settings. Edit meshmind.toml for data_dir, backend, and other options.</p>
+        <p class="settings-desc">Backend, Ollama, and mesh settings. Restart MeshMind after changing.</p>
+        <div class="form-group">
+          <label class="form-label">AI Backend</label>
+          <select id="general-backend" class="form-input">
+            <option value="mock">Mock (no AI)</option>
+            <option value="ollama">Ollama</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Ollama Endpoint</label>
+          <input type="text" id="general-ollama-endpoint" class="form-input" placeholder="http://localhost:11434" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Ollama Model</label>
+          <input type="text" id="general-ollama-model" class="form-input" placeholder="llama3.2:3b" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">
+            <input type="checkbox" id="general-enable-mdns" /> Enable mDNS discovery
+          </label>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Replication interval (seconds)</label>
+          <input type="number" id="general-replication-interval" class="form-input" min="5" placeholder="30" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Relay address (optional)</label>
+          <input type="text" id="general-relay-addr" class="form-input" placeholder="relay.example.com" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Relay port (optional)</label>
+          <input type="number" id="general-relay-port" class="form-input" placeholder="9902" />
+        </div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="general-save">Save Settings</button>
+          <button class="btn btn-secondary" id="general-restart">Restart MeshMind</button>
+        </div>
+      </div>
+    </div>
+    <div id="settings-onedrive" class="settings-panel">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">OneDrive Connector</span>
+        </div>
+        <p class="settings-desc">Connect to Microsoft OneDrive to ingest documents. Sign in with your Microsoft account.</p>
+        <div id="onedrive-status" class="settings-desc"></div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="onedrive-signin" style="display:none">Sign in with Microsoft</button>
+          <button class="btn btn-secondary" id="onedrive-disconnect" style="display:none">Disconnect</button>
+        </div>
       </div>
     </div>
   `;
@@ -831,41 +853,125 @@ async function renderSettings(el) {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      document.getElementById('settings-onedrive').style.display = tab.dataset.tab === 'onedrive' ? 'block' : 'none';
       document.getElementById('settings-general').style.display = tab.dataset.tab === 'general' ? 'block' : 'none';
+      document.getElementById('settings-onedrive').style.display = tab.dataset.tab === 'onedrive' ? 'block' : 'none';
     });
   });
 
-  try {
-    const cfg = await api.getConfigOnedrive();
-    document.getElementById('onedrive-client-id').value = cfg.client_id || '';
-    document.getElementById('onedrive-tenant-id').value = cfg.tenant_id || 'common';
-    document.getElementById('onedrive-refresh-token').value = cfg.refresh_token || '';
-    document.getElementById('onedrive-client-secret').value = cfg.client_secret || '';
-  } catch (e) {
-    document.getElementById('onedrive-client-id').value = '';
-    document.getElementById('onedrive-tenant-id').value = 'common';
-    document.getElementById('onedrive-refresh-token').value = '';
-    document.getElementById('onedrive-client-secret').value = '';
+  const hash = window.location.hash || '';
+  const qs = hash.includes('?') ? hash.split('?')[1] : (window.location.search || '').replace(/^\?/, '');
+  const urlParams = new URLSearchParams(qs);
+  if (urlParams.get('onedrive') === 'ok') {
+    toast('OneDrive connected successfully', 'success');
+    window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
+  }
+  if (urlParams.get('onedrive_error')) {
+    toast('OneDrive error: ' + decodeURIComponent(urlParams.get('onedrive_error') || ''), 'error');
+    window.history.replaceState({}, '', window.location.pathname + window.location.hash.split('?')[0]);
   }
 
-  document.getElementById('onedrive-save').addEventListener('click', async () => {
-    const btn = document.getElementById('onedrive-save');
+  try {
+    const gen = await api.getConfigGeneral();
+    document.getElementById('general-backend').value = gen.backend || 'mock';
+    document.getElementById('general-ollama-endpoint').value = gen.ollama_endpoint || '';
+    document.getElementById('general-ollama-model').value = gen.ollama_model || '';
+    document.getElementById('general-enable-mdns').checked = gen.enable_mdns !== false;
+    document.getElementById('general-replication-interval').value = gen.replication_interval_secs || 30;
+    document.getElementById('general-relay-addr').value = gen.relay_addr || '';
+    document.getElementById('general-relay-port').value = gen.relay_port || '';
+  } catch (e) {
+    document.getElementById('general-backend').value = 'mock';
+    document.getElementById('general-ollama-endpoint').value = '';
+    document.getElementById('general-ollama-model').value = '';
+    document.getElementById('general-enable-mdns').checked = true;
+    document.getElementById('general-replication-interval').value = 30;
+  }
+
+  document.getElementById('general-save').addEventListener('click', async () => {
+    const btn = document.getElementById('general-save');
     btn.disabled = true;
-    btn.textContent = 'Saving...';
     try {
-      await api.saveConfigOnedrive({
-        client_id: document.getElementById('onedrive-client-id').value.trim(),
-        tenant_id: document.getElementById('onedrive-tenant-id').value.trim() || 'common',
-        refresh_token: document.getElementById('onedrive-refresh-token').value,
-        client_secret: document.getElementById('onedrive-client-secret').value || undefined,
-      });
-      toast('OneDrive configuration saved', 'success');
+      const cfg = {};
+      const backend = document.getElementById('general-backend').value;
+      if (backend) cfg.backend = backend;
+      const ep = document.getElementById('general-ollama-endpoint').value.trim();
+      if (ep) cfg.ollama_endpoint = ep;
+      const model = document.getElementById('general-ollama-model').value.trim();
+      if (model) cfg.ollama_model = model;
+      cfg.enable_mdns = document.getElementById('general-enable-mdns').checked;
+      const interval = parseInt(document.getElementById('general-replication-interval').value, 10);
+      if (!isNaN(interval)) cfg.replication_interval_secs = interval;
+      const relayAddr = document.getElementById('general-relay-addr').value.trim();
+      if (relayAddr) cfg.relay_addr = relayAddr;
+      const relayPort = parseInt(document.getElementById('general-relay-port').value, 10);
+      if (!isNaN(relayPort) && relayPort > 0) cfg.relay_port = relayPort;
+      await api.saveConfigGeneral(cfg);
+      toast('Settings saved. Restart MeshMind to apply.', 'success');
     } catch (e) {
       toast(`Save failed: ${e.message}`, 'error');
     }
     btn.disabled = false;
-    btn.textContent = 'Save OneDrive Config';
+  });
+
+  document.getElementById('general-restart').addEventListener('click', async () => {
+    const btn = document.getElementById('general-restart');
+    btn.disabled = true;
+    btn.textContent = 'Restarting...';
+    try {
+      await api.restart();
+      toast('MeshMind is restarting...', 'info');
+    } catch (e) {
+      toast(`Restart failed: ${e.message}`, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Restart MeshMind';
+    }
+  });
+
+  try {
+    const cfg = await api.getConfigOnedrive();
+    const connected = cfg && cfg.refresh_token;
+    document.getElementById('onedrive-status').textContent = connected
+      ? 'Connected to OneDrive.'
+      : 'Not connected. Click "Sign in with Microsoft" to connect.';
+    document.getElementById('onedrive-signin').style.display = connected ? 'none' : 'inline-block';
+    document.getElementById('onedrive-disconnect').style.display = connected ? 'inline-block' : 'none';
+  } catch (e) {
+    document.getElementById('onedrive-status').textContent = 'Not connected.';
+    document.getElementById('onedrive-signin').style.display = 'inline-block';
+    document.getElementById('onedrive-disconnect').style.display = 'none';
+  }
+
+  document.getElementById('onedrive-signin').addEventListener('click', async () => {
+    const btn = document.getElementById('onedrive-signin');
+    btn.disabled = true;
+    try {
+      const { auth_url } = await api.getOAuthStart();
+      window.open(auth_url, '_blank', 'noopener,noreferrer');
+      toast('Complete sign-in in the new window', 'info');
+    } catch (e) {
+      toast(`Failed: ${e.message}`, 'error');
+    }
+    btn.disabled = false;
+  });
+
+  document.getElementById('onedrive-disconnect').addEventListener('click', async () => {
+    const btn = document.getElementById('onedrive-disconnect');
+    btn.disabled = true;
+    try {
+      await api.saveConfigOnedrive({
+        client_id: '',
+        tenant_id: 'common',
+        refresh_token: '',
+        client_secret: undefined,
+      });
+      document.getElementById('onedrive-status').textContent = 'Disconnected.';
+      document.getElementById('onedrive-signin').style.display = 'inline-block';
+      document.getElementById('onedrive-disconnect').style.display = 'none';
+      toast('OneDrive disconnected', 'success');
+    } catch (e) {
+      toast(`Disconnect failed: ${e.message}`, 'error');
+    }
+    btn.disabled = false;
   });
 }
 

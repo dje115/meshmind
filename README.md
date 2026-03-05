@@ -290,6 +290,31 @@ admin_token = "your-secret-token-here"
 | `ollama_model` | `llama3.2:3b` | Ollama model name |
 | `admin_token` | (random UUID) | Token for admin endpoints |
 
+### Settings UI
+
+The Settings page in the UI lets you configure backend, Ollama, mDNS, and relay settings without editing `meshmind.toml` directly. Changes take effect after restarting MeshMind. Use the **Restart MeshMind** button to apply settings.
+
+### OneDrive OAuth
+
+To use the OneDrive connector with "Sign in with Microsoft":
+
+1. **Register an Azure AD app** (one-time, project or org):
+   - Go to [Azure Portal](https://portal.azure.com) → Azure Active Directory → App registrations → New registration.
+   - Name: e.g. `MeshMind OneDrive`.
+   - Supported account types: "Accounts in any organizational directory and personal Microsoft accounts".
+   - Redirect URI: add **Web** platform with `http://127.0.0.1:9900/v1/oauth/onedrive/callback` (or your API URL if using a different port).
+   - Note the **Application (client) ID**.
+
+2. **Set the client ID**:
+   ```powershell
+   $env:MESHMIND_ONEDRIVE_OAUTH_CLIENT_ID = "your-client-id-here"
+   ```
+   Or add it to your environment before starting MeshMind.
+
+3. In the UI, go to Settings → OneDrive and click **Sign in with Microsoft**. Complete the sign-in in the popup; the refresh token is stored and the connector can access your OneDrive files.
+
+**Note:** If you change the `listen` port in `meshmind.toml`, add a matching redirect URI to your Azure app (e.g. `http://127.0.0.1:9910/v1/oauth/onedrive/callback` for port 9910).
+
 ---
 
 ## API Reference

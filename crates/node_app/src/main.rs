@@ -490,6 +490,15 @@ async fn main() -> Result<()> {
     let trainer = Arc::new(Trainer::new(train_policy, model_registry.clone()));
 
     let data_dir = config.data_dir.clone();
+    let listen_base_url = {
+        let s = &config.listen;
+        let host = if s.starts_with("0.0.0.0") {
+            s.replacen("0.0.0.0", "127.0.0.1", 1)
+        } else {
+            s.clone()
+        };
+        format!("http://{}", host)
+    };
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
         cas,
@@ -513,6 +522,8 @@ async fn main() -> Result<()> {
             research_web_capable: true,
             ..Default::default()
         })),
+        listen_base_url: listen_base_url.clone(),
+        oauth_pending: Arc::new(RwLock::new(std::collections::HashMap::new())),
     });
 
     // Start TCP mesh server

@@ -105,4 +105,8 @@ export const api = {
   deleteConversation: (conversationId) => request('DELETE', `/conversations/${encodeURIComponent(conversationId)}`),
   getConfigOnedrive: () => request('GET', '/admin/config/onedrive'),
   saveConfigOnedrive: (cfg) => request('POST', '/admin/config/onedrive', cfg),
+  getOAuthStart: () => request('GET', '/admin/config/onedrive/oauth/start'),
+  getConfigGeneral: () => request('GET', '/admin/config/general'),
+  saveConfigGeneral: (cfg) => request('POST', '/admin/config/general', cfg),
+  restart: () => request('POST', '/admin/restart'),
 };

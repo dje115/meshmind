@@ -69,6 +69,8 @@ fn create_node_state(
             research_web_capable: true,
             ..Default::default()
         })),
+        listen_base_url: "http://127.0.0.1:9900".into(),
+        oauth_pending: Arc::new(RwLock::new(std::collections::HashMap::new())),
     });
 
     (state, tmp)
