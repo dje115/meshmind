@@ -20,13 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup MSYS2 (Windows)
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -95,6 +88,10 @@ jobs:
 
       - name: Build UI
         run: npm run build
+        working-directory: ui
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
         working-directory: ui
 
       - name: Build node_app

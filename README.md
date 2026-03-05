@@ -105,7 +105,7 @@ A production-grade, local-first, cross-platform distributed AI node system built
 
 #### Windows
 
-You need **one of** these C toolchains:
+CI uses `stable` (MSVC on Windows). For local development you need **one of** these C toolchains:
 
 - **Option A (Recommended): MSYS2 + MinGW-w64**
   ```powershell
