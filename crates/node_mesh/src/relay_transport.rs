@@ -97,11 +97,7 @@ impl RelayTransport {
     }
 
     /// Discover peers via the relay server.
-    pub async fn discover(
-        &self,
-        tenant_id: &str,
-        max_results: u32,
-    ) -> Result<DiscoverResponse> {
+    pub async fn discover(&self, tenant_id: &str, max_results: u32) -> Result<DiscoverResponse> {
         let req = DiscoverRequest {
             requester: Some(NodeId {
                 value: self.node_id.clone(),
@@ -137,8 +133,7 @@ impl RelayTransport {
         };
 
         let resp_wire = self.send_wire_frame(&wire).await?;
-        HeartbeatResponse::decode(resp_wire.payload.as_slice())
-            .context("decode HeartbeatResponse")
+        HeartbeatResponse::decode(resp_wire.payload.as_slice()).context("decode HeartbeatResponse")
     }
 
     async fn next_sequence(&self) -> u64 {
@@ -197,9 +192,7 @@ impl Transport for RelayTransport {
             from_node_id: Some(NodeId {
                 value: self.node_id.clone(),
             }),
-            to_node_id: Some(NodeId {
-                value: to_node_id,
-            }),
+            to_node_id: Some(NodeId { value: to_node_id }),
             relay_token: token,
             envelope_bytes: envelope.encode_to_vec(),
             sequence: seq,
@@ -220,12 +213,7 @@ impl Transport for RelayTransport {
         Ok(())
     }
 
-    async fn request(
-        &self,
-        address: &str,
-        port: u16,
-        envelope: &Envelope,
-    ) -> Result<Envelope> {
+    async fn request(&self, address: &str, port: u16, envelope: &Envelope) -> Result<Envelope> {
         // For relay, request is the same as send — we don't get a response envelope back
         // through the relay in this simple implementation. The peer consult layer handles
         // the request/response pattern at a higher level.
@@ -260,12 +248,7 @@ impl Transport for HybridTransport {
         }
     }
 
-    async fn request(
-        &self,
-        address: &str,
-        port: u16,
-        envelope: &Envelope,
-    ) -> Result<Envelope> {
+    async fn request(&self, address: &str, port: u16, envelope: &Envelope) -> Result<Envelope> {
         match self.direct.request(address, port, envelope).await {
             Ok(resp) => Ok(resp),
             Err(direct_err) => {
@@ -313,9 +296,7 @@ mod tests {
 
         let ca = node_crypto::DevCa::generate().unwrap();
         let id = ca.generate_node_cert("test").unwrap();
-        let relay = Arc::new(
-            RelayTransport::new(&id, &ca.cert_pem, "127.0.0.1", 19999).unwrap(),
-        );
+        let relay = Arc::new(RelayTransport::new(&id, &ca.cert_pem, "127.0.0.1", 19999).unwrap());
 
         let hybrid = HybridTransport::new(mock.clone(), relay);
         let resp = hybrid
@@ -334,9 +315,7 @@ mod tests {
 
         let ca = node_crypto::DevCa::generate().unwrap();
         let id = ca.generate_node_cert("test").unwrap();
-        let relay = Arc::new(
-            RelayTransport::new(&id, &ca.cert_pem, "127.0.0.1", 19999).unwrap(),
-        );
+        let relay = Arc::new(RelayTransport::new(&id, &ca.cert_pem, "127.0.0.1", 19999).unwrap());
 
         let hybrid = HybridTransport::new(mock, relay);
         // Relay also fails (no server running), but the fallback path is exercised

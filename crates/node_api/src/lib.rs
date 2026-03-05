@@ -65,12 +65,30 @@ async fn serve_fallback_landing() -> impl IntoResponse {
 
 fn connector_for_type(connector_type: i32) -> Option<(Box<dyn Connector>, &'static str)> {
     let (connector, name) = match connector_type {
-        1 => (Box::new(SQLiteConnector::new("sqlite")) as Box<dyn Connector>, "sqlite"),
-        2 => (Box::new(CsvFolderConnector::new("csv")) as Box<dyn Connector>, "csv"),
-        3 => (Box::new(JsonFolderConnector::new("json")) as Box<dyn Connector>, "json"),
-        7 => (Box::new(ImageConnector::new("image")) as Box<dyn Connector>, "image"),
-        8 => (Box::new(DocumentConnector::new("document")) as Box<dyn Connector>, "document"),
-        9 => (Box::new(OneDriveConnector::new("onedrive")) as Box<dyn Connector>, "onedrive"),
+        1 => (
+            Box::new(SQLiteConnector::new("sqlite")) as Box<dyn Connector>,
+            "sqlite",
+        ),
+        2 => (
+            Box::new(CsvFolderConnector::new("csv")) as Box<dyn Connector>,
+            "csv",
+        ),
+        3 => (
+            Box::new(JsonFolderConnector::new("json")) as Box<dyn Connector>,
+            "json",
+        ),
+        7 => (
+            Box::new(ImageConnector::new("image")) as Box<dyn Connector>,
+            "image",
+        ),
+        8 => (
+            Box::new(DocumentConnector::new("document")) as Box<dyn Connector>,
+            "document",
+        ),
+        9 => (
+            Box::new(OneDriveConnector::new("onedrive")) as Box<dyn Connector>,
+            "onedrive",
+        ),
         _ => return None,
     };
     Some((connector, name))
@@ -86,7 +104,7 @@ fn connector_for_onedrive(data_dir: &std::path::Path) -> (Box<dyn Connector>, &'
     (connector, "onedrive")
 }
 use node_datasets::{DatasetBuildConfig, DatasetPreset};
-use node_discovery::{DiscoveryConfig, scan_directory, build_discovered_event};
+use node_discovery::{build_discovered_event, scan_directory, DiscoveryConfig};
 use node_ingest::{IngestConfig, IngestJob};
 use node_mesh::transport::Transport;
 use node_mesh::{ConsultConfig, PeerDirectory};
@@ -95,14 +113,12 @@ use node_storage::event_log::EventLog;
 use node_storage::search;
 
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-    "should", "may", "might", "can", "could", "am", "i", "me", "my",
-    "we", "our", "you", "your", "he", "she", "it", "they", "them",
-    "this", "that", "these", "those", "of", "in", "on", "at", "to",
-    "for", "with", "from", "by", "about", "into", "through", "during",
-    "before", "after", "and", "but", "or", "not", "no", "if", "then",
-    "so", "how", "what", "when", "where", "who", "which", "why",
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "shall", "should", "may", "might", "can", "could", "am",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they", "them", "this", "that",
+    "these", "those", "of", "in", "on", "at", "to", "for", "with", "from", "by", "about", "into",
+    "through", "during", "before", "after", "and", "but", "or", "not", "no", "if", "then", "so",
+    "how", "what", "when", "where", "who", "which", "why",
 ];
 
 /// Phrases that indicate the user wants a web search.
@@ -146,7 +162,15 @@ fn wants_web_search(content: &str) -> bool {
 }
 
 /// Generic words that are too vague to use as a search query.
-const VAGUE_QUERY_WORDS: &[&str] = &["it", "that", "this", "information", "info", "something", "things"];
+const VAGUE_QUERY_WORDS: &[&str] = &[
+    "it",
+    "that",
+    "this",
+    "information",
+    "info",
+    "something",
+    "things",
+];
 
 fn extract_search_query(content: &str, history: &[(String, String)]) -> Option<String> {
     let lower = content.to_lowercase();
@@ -156,9 +180,7 @@ fn extract_search_query(content: &str, history: &[(String, String)]) -> Option<S
         if let Some(pos) = lower.find(pattern) {
             let after = content[pos + pattern.len()..].trim();
             // Take up to next sentence/clause boundary
-            let end = after
-                .find(|c: char| c == '.' || c == ',' || c == '?' || c == '!')
-                .unwrap_or(after.len());
+            let end = after.find(['.', ',', '?', '!']).unwrap_or(after.len());
             let chunk: String = after.chars().take(end.min(80)).collect();
             let trimmed = chunk.trim();
             if trimmed.len() > 3
@@ -198,9 +220,7 @@ fn extract_search_query(content: &str, history: &[(String, String)]) -> Option<S
             for pattern in ["about ", "on ", "regarding "] {
                 if let Some(pos) = h_lower.find(pattern) {
                     let after = content[pos + pattern.len()..].trim();
-                    let end = after
-                        .find(|c: char| c == '.' || c == ',' || c == '?' || c == '!')
-                        .unwrap_or(after.len());
+                    let end = after.find(['.', ',', '?', '!']).unwrap_or(after.len());
                     let chunk: String = after.chars().take(end.min(80)).collect();
                     let trimmed = chunk.trim();
                     if trimmed.len() > 3
@@ -239,9 +259,22 @@ fn looks_like_general_knowledge_question(content: &str) -> bool {
         return false;
     }
     let prefixes = [
-        "who is ", "who was ", "what is ", "what was ", "when did ", "when was ",
-        "where is ", "where did ", "why did ", "why is ", "how did ", "how does ",
-        "who are ", "what are ", "define ", "explain ",
+        "who is ",
+        "who was ",
+        "what is ",
+        "what was ",
+        "when did ",
+        "when was ",
+        "where is ",
+        "where did ",
+        "why did ",
+        "why is ",
+        "how did ",
+        "how does ",
+        "who are ",
+        "what are ",
+        "define ",
+        "explain ",
     ];
     prefixes.iter().any(|p| lower.starts_with(p))
 }
@@ -253,16 +286,13 @@ fn to_fts5_query(text: &str) -> String {
         .filter(|w| w.len() > 1 && !STOP_WORDS.contains(&w.to_lowercase().as_str()))
         .collect();
     if keywords.is_empty() {
-        text.split_whitespace()
-            .next()
-            .unwrap_or("*")
-            .to_string()
+        text.split_whitespace().next().unwrap_or("*").to_string()
     } else {
         keywords.join(" OR ")
     }
 }
-use node_trainer::{ModelRegistry, Trainer, TrainingJob, JobStatus};
 use node_federated::{FederatedConfig, FederatedCoordinator};
+use node_trainer::{JobStatus, ModelRegistry, Trainer, TrainingJob};
 
 /// Returns a default rate limiter for /ask and chat (120/min, burst 10). Use in production.
 pub fn default_ask_chat_limiter() -> Arc<governor::DefaultDirectRateLimiter> {
@@ -310,7 +340,10 @@ async fn admin_auth(
 
     match token {
         Some(t) if t == state.admin_token => Ok(next.run(request).await),
-        _ => Err(ApiError::from_status(StatusCode::UNAUTHORIZED, "missing or invalid authorization")),
+        _ => Err(ApiError::from_status(
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid authorization",
+        )),
     }
 }
 
@@ -361,14 +394,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/models", get(handle_admin_models))
         .route("/admin/models/rollback", post(handle_admin_rollback_model))
         .route("/admin/datasets", get(handle_admin_datasets))
-        .route("/admin/federated/status", get(handle_admin_federated_status))
+        .route(
+            "/admin/federated/status",
+            get(handle_admin_federated_status),
+        )
         .route("/admin/research", post(handle_admin_research))
         .route("/admin/scan", post(handle_admin_scan))
         .route("/admin/ingest", post(handle_admin_ingest))
         .route("/admin/sources/approve-all", post(handle_admin_approve_all))
         .route("/admin/ingest-all", post(handle_admin_ingest_all))
-        .route("/admin/config/onedrive", get(handle_admin_config_onedrive_get))
-        .route("/admin/config/onedrive", post(handle_admin_config_onedrive_save))
+        .route(
+            "/admin/config/onedrive",
+            get(handle_admin_config_onedrive_get),
+        )
+        .route(
+            "/admin/config/onedrive",
+            post(handle_admin_config_onedrive_save),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     let api_routes = Router::new()
@@ -376,12 +418,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(handle_peers))
         .route("/search", get(handle_search))
         .route("/ask", post(handle_ask))
-        .route("/conversations", get(handle_list_conversations).post(handle_create_conversation))
-        .route("/conversations/:id/messages", get(handle_get_messages).post(handle_send_message))
-        .route("/conversations/:id/messages/stream", post(handle_send_message_stream))
+        .route(
+            "/conversations",
+            get(handle_list_conversations).post(handle_create_conversation),
+        )
+        .route(
+            "/conversations/:id/messages",
+            get(handle_get_messages).post(handle_send_message),
+        )
+        .route(
+            "/conversations/:id/messages/stream",
+            post(handle_send_message_stream),
+        )
         .route("/conversations/:id", delete(handle_delete_conversation))
         .route("/ws", get(handle_ws))
-        .route_layer(middleware::from_fn_with_state(state.clone(), rate_limit_ask_chat))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_ask_chat,
+        ))
         .merge(admin_routes)
         .layer(cors);
 
@@ -392,17 +446,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     if let Some(ref ui_dir) = state.ui_dir {
         if ui_dir.exists() {
-            let serve = tower_http::services::ServeDir::new(ui_dir)
-                .fallback(tower_http::services::ServeFile::new(ui_dir.join("index.html")));
+            let serve = tower_http::services::ServeDir::new(ui_dir).fallback(
+                tower_http::services::ServeFile::new(ui_dir.join("index.html")),
+            );
             app = app.fallback_service(serve);
             tracing::info!("serving UI from {}", ui_dir.display());
         }
     }
-    let has_ui = state
-        .ui_dir
-        .as_ref()
-        .map(|d| d.exists())
-        .unwrap_or(false);
+    let has_ui = state.ui_dir.as_ref().map(|d| d.exists()).unwrap_or(false);
     if !has_ui {
         app = app.fallback(serve_fallback_landing);
         tracing::info!("serving fallback landing page (build UI: cd ui && npm run build)");
@@ -422,13 +473,22 @@ struct ApiError {
 #[allow(dead_code)]
 impl ApiError {
     fn bad_request(msg: impl Into<String>) -> Self {
-        Self { error: msg.into(), code: 400 }
+        Self {
+            error: msg.into(),
+            code: 400,
+        }
     }
     fn not_found(msg: impl Into<String>) -> Self {
-        Self { error: msg.into(), code: 404 }
+        Self {
+            error: msg.into(),
+            code: 404,
+        }
     }
     fn internal(msg: impl Into<String>) -> Self {
-        Self { error: msg.into(), code: 500 }
+        Self {
+            error: msg.into(),
+            code: 500,
+        }
     }
 }
 
@@ -441,13 +501,19 @@ impl axum::response::IntoResponse for ApiError {
 
 impl From<(StatusCode, String)> for ApiError {
     fn from((status, msg): (StatusCode, String)) -> Self {
-        Self { error: msg, code: status.as_u16() }
+        Self {
+            error: msg,
+            code: status.as_u16(),
+        }
     }
 }
 
 impl ApiError {
     fn from_status(status: StatusCode, msg: impl Into<String>) -> Self {
-        Self { error: msg.into(), code: status.as_u16() }
+        Self {
+            error: msg.into(),
+            code: status.as_u16(),
+        }
     }
 }
 
@@ -687,8 +753,8 @@ async fn handle_ask(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let fts_query = to_fts5_query(&req.question);
-    let context_hits = search::search_all(&conn, &fts_query, 10)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let context_hits =
+        search::search_all(&conn, &fts_query, 10).map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut web_search_context = String::new();
     let do_web_search = wants_web_search(&req.question)
@@ -698,13 +764,12 @@ async fn handle_ask(
             .or_else(|| Some(req.question.trim().to_string()))
             .filter(|q| q.len() > 3);
         if let Some(q) = query {
-            if let Some((ctx, summary, url)) =
-                node_research::search_and_summarize_with_details(
-                    &q,
-                    &state.research_policy,
-                    &state.backend,
-                )
-                .await
+            if let Some((ctx, summary, url)) = node_research::search_and_summarize_with_details(
+                &q,
+                &state.research_policy,
+                &state.backend,
+            )
+            .await
             {
                 web_search_context = ctx.clone();
                 let mut log = state.event_log.write().await;
@@ -713,7 +778,7 @@ async fn handle_ask(
                     &summary,
                     &url,
                     &state.cas,
-                    &mut *log,
+                    &mut log,
                     &state.node_id,
                     &state.db_path,
                 );
@@ -733,7 +798,10 @@ async fn handle_ask(
         let kb = if context_bullets.is_empty() {
             String::new()
         } else {
-            format!("Context from local knowledge base:\n{}\n\n", context_bullets.join("\n"))
+            format!(
+                "Context from local knowledge base:\n{}\n\n",
+                context_bullets.join("\n")
+            )
         };
         format!(
             "{}{}\nQuestion: {}\n\nAnswer based on the web search results above. {} Be concise and specific.",
@@ -943,8 +1011,7 @@ async fn handle_get_messages(
     let msgs = stmt
         .query_map(rusqlite::params![conv_id], |row| {
             let ctx_json: String = row.get(4)?;
-            let context_used: Vec<String> =
-                serde_json::from_str(&ctx_json).unwrap_or_default();
+            let context_used: Vec<String> = serde_json::from_str(&ctx_json).unwrap_or_default();
             Ok(MessageResponse {
                 message_id: row.get(0)?,
                 conversation_id: row.get(1)?,
@@ -982,7 +1049,10 @@ async fn handle_delete_conversation(
         .unwrap_or_default();
 
     for mid in &msg_ids {
-        let _ = conn.execute("DELETE FROM messages_fts WHERE message_id = ?1", rusqlite::params![mid]);
+        let _ = conn.execute(
+            "DELETE FROM messages_fts WHERE message_id = ?1",
+            rusqlite::params![mid],
+        );
     }
     let _ = conn.execute(
         "DELETE FROM messages_view WHERE conversation_id = ?1",
@@ -1043,8 +1113,7 @@ async fn handle_send_message(
 
     // 3. RAG search on knowledge base
     let fts_query = to_fts5_query(&req.content);
-    let context_hits = search::search_all(&conn, &fts_query, 10)
-        .unwrap_or_default();
+    let context_hits = search::search_all(&conn, &fts_query, 10).unwrap_or_default();
 
     let context_bullets: Vec<String> = context_hits
         .iter()
@@ -1104,10 +1173,7 @@ async fn handle_send_message(
             let preview: String = content.chars().take(400).collect();
             hist_lines.push(format!("{}: {}", label, preview));
         }
-        prompt_parts.push(format!(
-            "Conversation history:\n{}",
-            hist_lines.join("\n")
-        ));
+        prompt_parts.push(format!("Conversation history:\n{}", hist_lines.join("\n")));
     }
 
     prompt_parts.push(format!("User: {}", req.content));
@@ -1147,7 +1213,10 @@ async fn handle_send_message(
     let asst_msg_id = uuid::Uuid::new_v4().to_string();
     let asst_ts = now_ms();
     let ctx_json = serde_json::to_string(
-        &context_hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>(),
+        &context_hits
+            .iter()
+            .map(|h| h.id.clone())
+            .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".into());
 
@@ -1210,7 +1279,10 @@ async fn handle_send_message_stream(
     State(state): State<Arc<AppState>>,
     Path(conv_id): Path<String>,
     Json(req): Json<SendMessageRequest>,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send>, ApiError> {
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send>,
+    ApiError,
+> {
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1276,13 +1348,12 @@ async fn handle_send_message_stream(
             .or_else(|| Some(req.content.trim().to_string()))
             .filter(|q| q.len() > 3);
         if let Some(q) = query {
-            if let Some((ctx, summary, url)) =
-                node_research::search_and_summarize_with_details(
-                    &q,
-                    &state.research_policy,
-                    &state.backend,
-                )
-                .await
+            if let Some((ctx, summary, url)) = node_research::search_and_summarize_with_details(
+                &q,
+                &state.research_policy,
+                &state.backend,
+            )
+            .await
             {
                 web_search_context = ctx.clone();
                 let mut log = state.event_log.write().await;
@@ -1291,7 +1362,7 @@ async fn handle_send_message_stream(
                     &summary,
                     &url,
                     &state.cas,
-                    &mut *log,
+                    &mut log,
                     &state.node_id,
                     &state.db_path,
                 );
@@ -1323,7 +1394,8 @@ async fn handle_send_message_stream(
         })
         .unwrap_or_default();
 
-    let has_context = !context_bullets.is_empty() || !cross_session.is_empty() || !web_search_context.is_empty();
+    let has_context =
+        !context_bullets.is_empty() || !cross_session.is_empty() || !web_search_context.is_empty();
     let mut peer_insights = Vec::new();
     let would_have_low_confidence = context_bullets.is_empty() && web_search_context.is_empty();
     if would_have_low_confidence {
@@ -1388,10 +1460,7 @@ async fn handle_send_message_stream(
             let preview: String = content.chars().take(400).collect();
             hist_lines.push(format!("{}: {}", label, preview));
         }
-        prompt_parts.push(format!(
-            "Conversation history:\n{}",
-            hist_lines.join("\n")
-        ));
+        prompt_parts.push(format!("Conversation history:\n{}", hist_lines.join("\n")));
     }
     prompt_parts.push(format!("User: {}", req.content));
     if !has_context && hist_len <= 1 {
@@ -1814,22 +1883,27 @@ async fn handle_admin_ingest(
 
     if status != "approved" {
         return Err(ApiError::bad_request(format!(
-            "source {} is not approved (status: {})", req.source_id, status
+            "source {} is not approved (status: {})",
+            req.source_id, status
         )));
     }
 
     let (connector, connector_str) = if connector_type == 9 {
         connector_for_onedrive(&state.data_dir)
     } else {
-        connector_for_type(connector_type)
-            .ok_or_else(|| ApiError::bad_request(format!("unsupported connector type: {connector_type}")))?
+        connector_for_type(connector_type).ok_or_else(|| {
+            ApiError::bad_request(format!("unsupported connector type: {connector_type}"))
+        })?
     };
 
     let source_path = std::path::PathBuf::from(&path_or_uri);
 
-    let tables = connector
-        .inspect_schema(&source_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("schema inspect failed: {e}")))?;
+    let tables = connector.inspect_schema(&source_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("schema inspect failed: {e}"),
+        )
+    })?;
 
     let table_names: Vec<String> = tables.iter().map(|t| t.table_name.clone()).collect();
 
@@ -1857,7 +1931,12 @@ async fn handle_admin_ingest(
         &db_path,
         &node_id,
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ingest failed: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("ingest failed: {e}"),
+        )
+    })?;
 
     tracing::info!(
         source_id = %req.source_id,
@@ -1917,7 +1996,9 @@ async fn handle_admin_approve_all(
                 rusqlite::params![ts, sid],
             )
             .is_ok();
-        if ok { approved += 1; }
+        if ok {
+            approved += 1;
+        }
     }
 
     Ok(Json(BulkApproveResponse {
@@ -2002,14 +2083,20 @@ async fn handle_admin_ingest_all(
         } else {
             match connector_for_type(*connector_type) {
                 Some(p) => p,
-                None => { failed += 1; continue; }
+                None => {
+                    failed += 1;
+                    continue;
+                }
             }
         };
 
         let source_path = std::path::PathBuf::from(path_or_uri);
         let tables = match connector.inspect_schema(&source_path) {
             Ok(t) => t,
-            Err(_) => { failed += 1; continue; }
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
         };
         let table_names: Vec<String> = tables.iter().map(|t| t.table_name.clone()).collect();
 
@@ -2026,19 +2113,33 @@ async fn handle_admin_ingest_all(
 
         let mut log = state.event_log.write().await;
         match node_ingest::run_ingest(
-            &job, connector.as_ref(), &source_path, &table_names,
-            &config, &state.cas, &mut log, &db_path, &node_id,
+            &job,
+            connector.as_ref(),
+            &source_path,
+            &table_names,
+            &config,
+            &state.cas,
+            &mut log,
+            &db_path,
+            &node_id,
         ) {
             Ok(result) => {
                 total_rows += result.rows_ingested;
                 total_docs += result.documents_created;
                 ingested += 1;
             }
-            Err(_) => { failed += 1; }
+            Err(_) => {
+                failed += 1;
+            }
         }
     }
 
-    Ok(Json(BulkIngestResponse { ingested, failed, total_rows, total_docs }))
+    Ok(Json(BulkIngestResponse {
+        ingested,
+        failed,
+        total_rows,
+        total_docs,
+    }))
 }
 
 async fn handle_admin_train(
@@ -2067,15 +2168,23 @@ async fn handle_admin_train(
     };
 
     let event_log = state.event_log.read().await;
-    let manifest_result = node_datasets::build_dataset(&ds_config, &event_log, &state.cas, &state.node_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("dataset build failed: {e}")))?;
+    let manifest_result =
+        node_datasets::build_dataset(&ds_config, &event_log, &state.cas, &state.node_id).map_err(
+            |e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("dataset build failed: {e}"),
+                )
+            },
+        )?;
     drop(event_log);
 
     let dataset_items = manifest_result.total_items;
     let dataset_manifest_id = manifest_result.manifest_id.clone();
 
     // 2. Record dataset manifest event
-    let manifest_event = node_datasets::build_manifest_event(&manifest_result, &ds_config, &state.node_id);
+    let manifest_event =
+        node_datasets::build_manifest_event(&manifest_result, &ds_config, &state.node_id);
     {
         let mut log = state.event_log.write().await;
         let conn = rusqlite::Connection::open(&state.db_path)
@@ -2089,13 +2198,19 @@ async fn handle_admin_train(
     let started_event = EventEnvelope {
         event_id: format!("evt-train-start-{}", uuid::Uuid::new_v4()),
         r#type: EventType::TrainJobStarted as i32,
-        node_id: Some(NodeId { value: state.node_id.clone() }),
-        tenant_id: Some(TenantId { value: "public".into() }),
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
         sensitivity: Sensitivity::Public as i32,
         payload: Some(event_envelope::Payload::TrainJobStarted(TrainJobStarted {
             job_id: job_id.clone(),
             target: req.target.clone(),
-            dataset_manifest_ref: Some(HashRef { sha256: manifest_result.cas_hash.clone() }),
+            dataset_manifest_ref: Some(HashRef {
+                sha256: manifest_result.cas_hash.clone(),
+            }),
             max_steps: 1000,
             max_minutes: 10,
         })),
@@ -2115,7 +2230,11 @@ async fn handle_admin_train(
     // 4. Create and submit the training job
     let training_manifest = node_trainer::DatasetManifest {
         name: manifest_result.manifest_id.clone(),
-        cas_refs: manifest_result.items.iter().map(|i| i.cas_hash.clone()).collect(),
+        cas_refs: manifest_result
+            .items
+            .iter()
+            .map(|i| i.cas_hash.clone())
+            .collect(),
         sample_count: manifest_result.total_items as usize,
     };
 
@@ -2155,9 +2274,7 @@ async fn handle_admin_train(
             let ver = reg.active_version(&req.target).map(|v| v.version.clone());
             ("completed".to_string(), Some(*score), ver)
         }
-        JobStatus::Failed { reason } => {
-            (format!("failed: {reason}"), None, None)
-        }
+        JobStatus::Failed { reason } => (format!("failed: {reason}"), None, None),
         other => (format!("{other:?}"), None, None),
     };
 
@@ -2165,21 +2282,27 @@ async fn handle_admin_train(
     let completed_event = EventEnvelope {
         event_id: format!("evt-train-done-{}", uuid::Uuid::new_v4()),
         r#type: EventType::TrainJobCompleted as i32,
-        node_id: Some(NodeId { value: state.node_id.clone() }),
-        tenant_id: Some(TenantId { value: "public".into() }),
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
         sensitivity: Sensitivity::Public as i32,
-        payload: Some(event_envelope::Payload::TrainJobCompleted(TrainJobCompleted {
-            job_id: job_id.clone(),
-            success: score.is_some(),
-            notes: status_str.clone(),
-            metrics: vec![TrainMetric {
-                name: "score".into(),
-                value: score.unwrap_or(0.0),
-            }],
-            model_bundle_ref: Some(HashRef {
-                sha256: format!("model-{}", job_id),
-            }),
-        })),
+        payload: Some(event_envelope::Payload::TrainJobCompleted(
+            TrainJobCompleted {
+                job_id: job_id.clone(),
+                success: score.is_some(),
+                notes: status_str.clone(),
+                metrics: vec![TrainMetric {
+                    name: "score".into(),
+                    value: score.unwrap_or(0.0),
+                }],
+                model_bundle_ref: Some(HashRef {
+                    sha256: format!("model-{}", job_id),
+                }),
+            },
+        )),
         ..Default::default()
     };
 
@@ -2193,15 +2316,17 @@ async fn handle_admin_train(
 
         // 7. If training succeeded, emit ModelPromoted event for the projector
         if let Some(ref ver) = model_version {
-            let version_num: u32 = ver.trim_start_matches('v')
-                .parse()
-                .unwrap_or(1);
+            let version_num: u32 = ver.trim_start_matches('v').parse().unwrap_or(1);
 
             let promote_event = EventEnvelope {
                 event_id: format!("evt-promote-{}", uuid::Uuid::new_v4()),
                 r#type: EventType::ModelPromoted as i32,
-                node_id: Some(NodeId { value: state.node_id.clone() }),
-                tenant_id: Some(TenantId { value: "public".into() }),
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
                 sensitivity: Sensitivity::Public as i32,
                 payload: Some(event_envelope::Payload::ModelPromoted(ModelPromoted {
                     model_id: req.target.clone(),
@@ -2484,8 +2609,7 @@ struct FederatedStatusResponse {
     max_participants: u32,
 }
 
-async fn handle_admin_federated_status(
-) -> Result<Json<FederatedStatusResponse>, ApiError> {
+async fn handle_admin_federated_status() -> Result<Json<FederatedStatusResponse>, ApiError> {
     let config = FederatedConfig::new("router");
     let _coordinator = FederatedCoordinator::new(config.clone());
     Ok(Json(FederatedStatusResponse {
@@ -2498,7 +2622,10 @@ async fn handle_admin_federated_status(
 
 // ---------- WebSocket (real-time status) ----------
 
-async fn handle_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> axum::response::Response {
+async fn handle_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
     ws.on_upgrade(move |socket| handle_ws_socket(socket, state))
 }
 
@@ -2518,7 +2645,11 @@ async fn handle_ws_socket(mut socket: WebSocket, state: Arc<AppState>) {
             "backend": state.backend.name(),
             "last_train": last_train,
         });
-        if socket.send(Message::Text(payload.to_string())).await.is_err() {
+        if socket
+            .send(Message::Text(payload.to_string()))
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -2527,8 +2658,8 @@ async fn handle_ws_socket(mut socket: WebSocket, state: Arc<AppState>) {
 // ---------- Replication endpoints ----------
 
 use node_proto::repl::{
-    GossipMeta as ProtoGossipMeta, SegmentId as ProtoSegmentId, PullSegmentsRequest,
-    PullCasObjectsRequest,
+    GossipMeta as ProtoGossipMeta, PullCasObjectsRequest, PullSegmentsRequest,
+    SegmentId as ProtoSegmentId,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -2552,17 +2683,17 @@ async fn handle_repl_gossip(
         .map_err(|e| ApiError::bad_request(format!("invalid gossip: {e}")))?;
 
     let event_log = state.event_log.read().await;
-    let local_gossip = node_repl::build_gossip_meta(
-        &state.node_id, "public", &event_log, &state.cas, &[],
-    )
-    .map_err(|e| ApiError::internal(format!("gossip build failed: {e}")))?;
+    let local_gossip =
+        node_repl::build_gossip_meta(&state.node_id, "public", &event_log, &state.cas, &[])
+            .map_err(|e| ApiError::internal(format!("gossip build failed: {e}")))?;
 
     let missing_segs = node_repl::find_missing_segments(&local_gossip, &remote_gossip);
     let missing_cas = node_repl::find_missing_objects(&state.cas, &remote_gossip);
     drop(event_log);
 
     let mut local_bytes = Vec::new();
-    local_gossip.encode(&mut local_bytes)
+    local_gossip
+        .encode(&mut local_bytes)
         .map_err(|e| ApiError::internal(format!("encode gossip: {e}")))?;
 
     Ok(Json(GossipExchangeResponse {
@@ -2595,7 +2726,11 @@ async fn handle_repl_pull(
     let seg_req = PullSegmentsRequest {
         requester: None,
         tenant_id: None,
-        want_segments: req.segment_ids.iter().map(|s| ProtoSegmentId { value: s.clone() }).collect(),
+        want_segments: req
+            .segment_ids
+            .iter()
+            .map(|s| ProtoSegmentId { value: s.clone() })
+            .collect(),
         budget: None,
     };
     let seg_resp = node_repl::serve_pull_segments(&seg_req, &event_log, &state.node_id)
@@ -2604,7 +2739,11 @@ async fn handle_repl_pull(
 
     let cas_req = PullCasObjectsRequest {
         requester: None,
-        want_hashes: req.cas_hashes.iter().map(|h| node_proto::common::HashRef { sha256: h.clone() }).collect(),
+        want_hashes: req
+            .cas_hashes
+            .iter()
+            .map(|h| node_proto::common::HashRef { sha256: h.clone() })
+            .collect(),
         budget: None,
     };
     let cas_resp = node_repl::serve_pull_cas_objects(&cas_req, &state.cas, &state.node_id)
@@ -2617,7 +2756,12 @@ async fn handle_repl_pull(
     let segment_chunks: Vec<Vec<u8>> = seg_resp.chunks.iter().map(|c| c.encode_to_vec()).collect();
     let cas_chunks: Vec<Vec<u8>> = cas_resp.chunks.iter().map(|c| c.encode_to_vec()).collect();
 
-    Ok(Json(PullResponse { segments_sent, cas_sent, segment_chunks, cas_chunks }))
+    Ok(Json(PullResponse {
+        segments_sent,
+        cas_sent,
+        segment_chunks,
+        cas_chunks,
+    }))
 }
 
 #[cfg(test)]
@@ -2648,7 +2792,11 @@ mod tests {
         let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
         let trainer = Arc::new(Trainer::new(policy, model_registry.clone()));
 
-        let data_dir = db_path.parent().and_then(|p| p.parent()).unwrap_or(&db_path).to_path_buf();
+        let data_dir = db_path
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(&db_path)
+            .to_path_buf();
         Arc::new(AppState {
             event_log: RwLock::new(event_log),
             cas,
@@ -2720,7 +2868,11 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/v1/search?q=test").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/v1/search?q=test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -2766,7 +2918,11 @@ mod tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::get("/v1/admin/sources").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/v1/admin/sources")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -2939,7 +3095,11 @@ mod tests {
         }));
         let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
         let trainer = Arc::new(Trainer::new(policy, model_registry.clone()));
-        let data_dir = db_path.parent().and_then(|p| p.parent()).unwrap_or(&db_path).to_path_buf();
+        let data_dir = db_path
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(&db_path)
+            .to_path_buf();
         let state = Arc::new(AppState {
             event_log: RwLock::new(event_log),
             cas,

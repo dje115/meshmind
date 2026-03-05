@@ -132,7 +132,11 @@ impl RelayDirectory {
     }
 
     pub fn discover(&self, requester: &str, tenant_id: &str, max_results: u32) -> DiscoverResponse {
-        let max = if max_results == 0 { 30 } else { max_results as usize };
+        let max = if max_results == 0 {
+            30
+        } else {
+            max_results as usize
+        };
 
         let peers: Vec<PeerInfo> = self
             .peers
@@ -180,10 +184,7 @@ fn generate_token() -> String {
 }
 
 /// Handle a single relay wire frame from a connected node.
-pub fn handle_frame(
-    dir: &mut RelayDirectory,
-    wire: &RelayWireFrame,
-) -> Result<RelayWireFrame> {
+pub fn handle_frame(dir: &mut RelayDirectory, wire: &RelayWireFrame) -> Result<RelayWireFrame> {
     let msg_type = RelayMsgType::try_from(wire.msg_type).unwrap_or(RelayMsgType::Unspecified);
 
     match msg_type {
@@ -219,10 +220,17 @@ pub fn handle_frame(
             })
         }
         RelayMsgType::Relay => {
-            let frame = RelayFrame::decode(wire.payload.as_slice())
-                .context("decode RelayFrame")?;
-            let from_id = frame.from_node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
-            let to_id = frame.to_node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
+            let frame = RelayFrame::decode(wire.payload.as_slice()).context("decode RelayFrame")?;
+            let from_id = frame
+                .from_node_id
+                .as_ref()
+                .map(|n| n.value.as_str())
+                .unwrap_or("");
+            let to_id = frame
+                .to_node_id
+                .as_ref()
+                .map(|n| n.value.as_str())
+                .unwrap_or("");
 
             if !dir.validate_token(from_id, &frame.relay_token) {
                 return Ok(RelayWireFrame {
@@ -248,7 +256,11 @@ pub fn handle_frame(
                 payload: RelayAck {
                     sequence: frame.sequence,
                     delivered,
-                    error: if delivered { String::new() } else { "peer not connected".into() },
+                    error: if delivered {
+                        String::new()
+                    } else {
+                        "peer not connected".into()
+                    },
                 }
                 .encode_to_vec(),
             })
@@ -329,8 +341,13 @@ pub async fn run_relay_server(
                                     let mut dir = directory.write().await;
                                     let resp = handle_frame(&mut dir, &wire);
                                     if is_register {
-                                        if let Ok(reg_req) = RegisterRequest::decode(wire.payload.as_slice()) {
-                                            let nid = reg_req.node_id.map(|n| n.value).unwrap_or_default();
+                                        if let Ok(reg_req) =
+                                            RegisterRequest::decode(wire.payload.as_slice())
+                                        {
+                                            let nid = reg_req
+                                                .node_id
+                                                .map(|n| n.value)
+                                                .unwrap_or_default();
                                             if !nid.is_empty() {
                                                 dir.set_relay_tx(&nid, fwd_tx.clone());
                                                 registered_node_id = Some(nid.clone());

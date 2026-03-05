@@ -4,7 +4,7 @@
 //! Validates: DocumentConnector -> IngestJob -> ArtifactPublished -> artifacts_fts -> search
 
 use node_connectors::{Connector, DocumentConnector};
-use node_ingest::{IngestConfig, IngestJob, run_ingest};
+use node_ingest::{run_ingest, IngestConfig, IngestJob};
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
 use node_storage::search;
@@ -19,8 +19,8 @@ fn document_ingest_and_search_invoices() {
     // Create invoice fixtures (same content as seed/public/documents)
     for i in 1..=3 {
         let content = format!(
-            "INVOICE #{}\nDate: 2024-01-15\nVendor: Acme Supplies\nClient: Widget Corp\nTotal: $187.00",
-            format!("{:03}", i)
+            "INVOICE #{:03}\nDate: 2024-01-15\nVendor: Acme Supplies\nClient: Widget Corp\nTotal: $187.00",
+            i
         );
         std::fs::write(doc_dir.join(format!("invoice_{:03}.txt", i)), content).unwrap();
     }
@@ -64,7 +64,10 @@ fn document_ingest_and_search_invoices() {
     .unwrap();
 
     assert!(result.success);
-    assert_eq!(result.documents_created, 4, "expected 4 documents (3 invoices + report)");
+    assert_eq!(
+        result.documents_created, 4,
+        "expected 4 documents (3 invoices + report)"
+    );
 
     // Search for "invoice" - should return 3 hits
     let search_conn = rusqlite::Connection::open(&db_path).unwrap();

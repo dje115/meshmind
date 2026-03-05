@@ -462,9 +462,7 @@ impl Connector for JsonFolderConnector {
 
 // ── ImageConnector ──────────────────────────────────────────────────────────
 
-const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "webp",
-];
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "webp"];
 
 fn is_image_file(path: &Path) -> bool {
     path.extension()
@@ -520,9 +518,20 @@ fn exif_field_string(exif_data: &exif::Exif, tag: exif::Tag) -> String {
 
 fn extract_image_metadata(path: &Path) -> BTreeMap<String, String> {
     let mut cols = BTreeMap::new();
-    cols.insert("filename".into(), path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string());
+    cols.insert(
+        "filename".into(),
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string(),
+    );
     cols.insert("file_path".into(), path.to_string_lossy().into_owned());
-    cols.insert("file_size_bytes".into(), fs::metadata(path).map(|m| m.len().to_string()).unwrap_or_default());
+    cols.insert(
+        "file_size_bytes".into(),
+        fs::metadata(path)
+            .map(|m| m.len().to_string())
+            .unwrap_or_default(),
+    );
 
     let file = match fs::File::open(path) {
         Ok(f) => f,
@@ -551,15 +560,42 @@ fn extract_image_metadata(path: &Path) -> BTreeMap<String, String> {
         cols.insert("gps_altitude".into(), f.display_value().to_string());
     }
 
-    cols.insert("date_taken".into(), exif_field_string(&exif_data, exif::Tag::DateTimeOriginal));
-    cols.insert("camera_make".into(), exif_field_string(&exif_data, exif::Tag::Make));
-    cols.insert("camera_model".into(), exif_field_string(&exif_data, exif::Tag::Model));
-    cols.insert("image_width".into(), exif_field_string(&exif_data, exif::Tag::PixelXDimension));
-    cols.insert("image_height".into(), exif_field_string(&exif_data, exif::Tag::PixelYDimension));
-    cols.insert("orientation".into(), exif_field_string(&exif_data, exif::Tag::Orientation));
-    cols.insert("exposure_time".into(), exif_field_string(&exif_data, exif::Tag::ExposureTime));
-    cols.insert("f_number".into(), exif_field_string(&exif_data, exif::Tag::FNumber));
-    cols.insert("iso_speed".into(), exif_field_string(&exif_data, exif::Tag::PhotographicSensitivity));
+    cols.insert(
+        "date_taken".into(),
+        exif_field_string(&exif_data, exif::Tag::DateTimeOriginal),
+    );
+    cols.insert(
+        "camera_make".into(),
+        exif_field_string(&exif_data, exif::Tag::Make),
+    );
+    cols.insert(
+        "camera_model".into(),
+        exif_field_string(&exif_data, exif::Tag::Model),
+    );
+    cols.insert(
+        "image_width".into(),
+        exif_field_string(&exif_data, exif::Tag::PixelXDimension),
+    );
+    cols.insert(
+        "image_height".into(),
+        exif_field_string(&exif_data, exif::Tag::PixelYDimension),
+    );
+    cols.insert(
+        "orientation".into(),
+        exif_field_string(&exif_data, exif::Tag::Orientation),
+    );
+    cols.insert(
+        "exposure_time".into(),
+        exif_field_string(&exif_data, exif::Tag::ExposureTime),
+    );
+    cols.insert(
+        "f_number".into(),
+        exif_field_string(&exif_data, exif::Tag::FNumber),
+    );
+    cols.insert(
+        "iso_speed".into(),
+        exif_field_string(&exif_data, exif::Tag::PhotographicSensitivity),
+    );
 
     cols
 }
@@ -695,21 +731,15 @@ fn extract_text_from_file(path: &Path) -> (String, String, u64) {
     let page_count = 0u64;
 
     let text = match ext.as_str() {
-        "txt" | "md" | "rtf" => {
-            fs::read_to_string(path).unwrap_or_default()
-        }
+        "txt" | "md" | "rtf" => fs::read_to_string(path).unwrap_or_default(),
         "pdf" => extract_pdf_text(path),
-        "docx" => {
-            match docx_rust::DocxFile::from_file(path) {
-                Ok(docx_file) => {
-                    match docx_file.parse() {
-                        Ok(docx) => extract_docx_text(&docx.document),
-                        Err(_) => String::new(),
-                    }
-                }
+        "docx" => match docx_rust::DocxFile::from_file(path) {
+            Ok(docx_file) => match docx_file.parse() {
+                Ok(docx) => extract_docx_text(&docx.document),
                 Err(_) => String::new(),
-            }
-        }
+            },
+            Err(_) => String::new(),
+        },
         _ => String::new(),
     };
 
@@ -767,12 +797,42 @@ impl Connector for DocumentConnector {
         }
 
         let columns = vec![
-            SchemaColumn { name: "filename".into(), data_type: "TEXT".into(), nullable: false, is_primary_key: true },
-            SchemaColumn { name: "file_path".into(), data_type: "TEXT".into(), nullable: false, is_primary_key: false },
-            SchemaColumn { name: "file_type".into(), data_type: "TEXT".into(), nullable: false, is_primary_key: false },
-            SchemaColumn { name: "file_size_bytes".into(), data_type: "INTEGER".into(), nullable: false, is_primary_key: false },
-            SchemaColumn { name: "page_count".into(), data_type: "INTEGER".into(), nullable: true, is_primary_key: false },
-            SchemaColumn { name: "content_text".into(), data_type: "TEXT".into(), nullable: true, is_primary_key: false },
+            SchemaColumn {
+                name: "filename".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: true,
+            },
+            SchemaColumn {
+                name: "file_path".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "file_type".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "file_size_bytes".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "page_count".into(),
+                data_type: "INTEGER".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "content_text".into(),
+                data_type: "TEXT".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
         ];
 
         Ok(vec![TableInfo {
@@ -806,7 +866,14 @@ impl Connector for DocumentConnector {
             let file_size = fs::metadata(&fpath).map(|m| m.len()).unwrap_or(0);
 
             let mut columns = BTreeMap::new();
-            columns.insert("filename".into(), fpath.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string());
+            columns.insert(
+                "filename".into(),
+                fpath
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            );
             columns.insert("file_path".into(), fpath.to_string_lossy().into_owned());
             columns.insert("file_type".into(), file_type);
             columns.insert("file_size_bytes".into(), file_size.to_string());
@@ -1104,13 +1171,22 @@ mod tests {
         assert_eq!(batch.rows[0].columns["filename"], "hello.txt");
         assert_eq!(batch.rows[0].columns["file_type"], "txt");
         assert_eq!(batch.rows[0].columns["content_text"], "Hello, world!");
-        assert!(batch.rows[0].columns["file_size_bytes"].parse::<u64>().unwrap() > 0);
+        assert!(
+            batch.rows[0].columns["file_size_bytes"]
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
     }
 
     #[test]
     fn test_document_ingest_markdown() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("readme.md"), b"# Title\n\nSome content here.").unwrap();
+        fs::write(
+            dir.path().join("readme.md"),
+            b"# Title\n\nSome content here.",
+        )
+        .unwrap();
 
         let c = DocumentConnector::new("doc-test");
         let batch = c.ingest_batch(dir.path(), "documents", 0, 10).unwrap();

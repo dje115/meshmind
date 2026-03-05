@@ -329,21 +329,38 @@ async fn replication_loop(state: Arc<AppState>, policy: Arc<PolicyEngine>, inter
                 .await;
 
             let resp = match gossip_resp {
-                Ok(r) if r.status().is_success() => {
-                    match r.json::<serde_json::Value>().await {
-                        Ok(v) => v,
-                        Err(e) => { tracing::debug!("repl gossip parse {peer_id}: {e}"); continue; }
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("repl gossip parse {peer_id}: {e}");
+                        continue;
                     }
+                },
+                Ok(r) => {
+                    tracing::debug!("repl gossip {peer_id}: {}", r.status());
+                    continue;
                 }
-                Ok(r) => { tracing::debug!("repl gossip {peer_id}: {}", r.status()); continue; }
-                Err(e) => { tracing::debug!("repl gossip {peer_id}: {e}"); continue; }
+                Err(e) => {
+                    tracing::debug!("repl gossip {peer_id}: {e}");
+                    continue;
+                }
             };
 
             let missing_segs: Vec<String> = resp["missing_segment_ids"]
-                .as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let missing_cas: Vec<String> = resp["missing_cas_hashes"]
-                .as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             if missing_segs.is_empty() && missing_cas.is_empty() {
@@ -396,7 +413,9 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("generating new identity in {}", identity_dir.display());
         let ca = DevCa::generate().context("generate dev CA")?;
-        let id = ca.generate_node_cert("meshmind-node").context("generate node cert")?;
+        let id = ca
+            .generate_node_cert("meshmind-node")
+            .context("generate node cert")?;
         node_crypto::save_identity_bundle(&ca, &id, &identity_dir)
             .context("save identity bundle")?;
         (ca.cert_pem, id)
@@ -452,9 +471,7 @@ async fn main() -> Result<()> {
         std::path::PathBuf::from("seed/public/runbooks"),
     ];
 
-    if let Some(home) = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-    {
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         let home = std::path::PathBuf::from(home);
         for subdir in &["Documents", "Pictures", "Desktop", "Downloads", "OneDrive"] {
             let p = home.join(subdir);
@@ -545,7 +562,11 @@ async fn main() -> Result<()> {
                 let relay_reg = relay.clone();
                 tokio::spawn(async move {
                     match relay_reg
-                        .register(vec!["inference".into(), "storage".into()], &public_addr, config.relay_only)
+                        .register(
+                            vec!["inference".into(), "storage".into()],
+                            &public_addr,
+                            config.relay_only,
+                        )
                         .await
                     {
                         Ok(resp) if resp.success => {
@@ -563,7 +584,10 @@ async fn main() -> Result<()> {
                     loop {
                         interval.tick().await;
                         match relay_hb.heartbeat().await {
-                            Ok(resp) if resp.alive => tracing::debug!("relay heartbeat ok ({} peers)", resp.connected_peers),
+                            Ok(resp) if resp.alive => tracing::debug!(
+                                "relay heartbeat ok ({} peers)",
+                                resp.connected_peers
+                            ),
                             Ok(_) => tracing::warn!("relay heartbeat: not alive"),
                             Err(e) => tracing::debug!("relay heartbeat failed: {e}"),
                         }
@@ -581,11 +605,23 @@ async fn main() -> Result<()> {
                             Ok(resp) => {
                                 let mut dir = wan_peer_dir.write().await;
                                 for peer in &resp.peers {
-                                    let pid = peer.node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
-                                    if pid.is_empty() || pid == wan_node_id { continue; }
-                                    let addr = if peer.public_addr.is_empty() { "relay".to_string() } else { peer.public_addr.clone() };
+                                    let pid = peer
+                                        .node_id
+                                        .as_ref()
+                                        .map(|n| n.value.as_str())
+                                        .unwrap_or("");
+                                    if pid.is_empty() || pid == wan_node_id {
+                                        continue;
+                                    }
+                                    let addr = if peer.public_addr.is_empty() {
+                                        "relay".to_string()
+                                    } else {
+                                        peer.public_addr.clone()
+                                    };
                                     let is_new = dir.upsert(pid, &addr, peer.mesh_port as u16);
-                                    if is_new { tracing::info!("WAN: discovered peer {pid} at {addr}"); }
+                                    if is_new {
+                                        tracing::info!("WAN: discovered peer {pid} at {addr}");
+                                    }
                                 }
                             }
                             Err(e) => tracing::debug!("WAN discovery failed: {e}"),

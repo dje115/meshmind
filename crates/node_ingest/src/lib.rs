@@ -81,7 +81,11 @@ fn now_ms() -> i64 {
 
 const TITLE_KEYS: &[&str] = &["filename", "file_name", "name", "title", "file_path"];
 
-fn build_artifact_title(table: &str, entity_id: &str, columns: &BTreeMap<String, String>) -> String {
+fn build_artifact_title(
+    table: &str,
+    entity_id: &str,
+    columns: &BTreeMap<String, String>,
+) -> String {
     for key in TITLE_KEYS {
         if let Some(val) = columns.get(*key) {
             if !val.is_empty() {

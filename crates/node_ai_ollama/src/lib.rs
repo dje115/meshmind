@@ -182,12 +182,7 @@ impl InferenceBackend for OllamaBackend {
             },
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.client.post(&url).json(&body).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

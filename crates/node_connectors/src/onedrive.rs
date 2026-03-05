@@ -67,16 +67,25 @@ pub fn save_onedrive_config(path: &Path, cfg: &OneDriveConfig) -> anyhow::Result
 fn onedrive_config_from_env() -> anyhow::Result<(String, String, String, Option<String>)> {
     let client_id = std::env::var("MESHMIND_ONEDRIVE_CLIENT_ID")
         .context("MESHMIND_ONEDRIVE_CLIENT_ID not set")?;
-    let tenant_id = std::env::var("MESHMIND_ONEDRIVE_TENANT_ID")
-        .unwrap_or_else(|_| "common".to_string());
+    let tenant_id =
+        std::env::var("MESHMIND_ONEDRIVE_TENANT_ID").unwrap_or_else(|_| "common".to_string());
     let refresh_token = std::env::var("MESHMIND_ONEDRIVE_REFRESH_TOKEN")
         .context("MESHMIND_ONEDRIVE_REFRESH_TOKEN not set")?;
     let client_secret = std::env::var("MESHMIND_ONEDRIVE_CLIENT_SECRET").ok();
     Ok((client_id, tenant_id, refresh_token, client_secret))
 }
 
-fn refresh_access_token(client: &Client, client_id: &str, tenant: &str, refresh_token: &str, client_secret: Option<&str>) -> anyhow::Result<String> {
-    let url = format!("https://login.microsoftonline.com/{}/oauth2/v2.0/token", tenant);
+fn refresh_access_token(
+    client: &Client,
+    client_id: &str,
+    tenant: &str,
+    refresh_token: &str,
+    client_secret: Option<&str>,
+) -> anyhow::Result<String> {
+    let url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        tenant
+    );
     let mut form = vec![
         ("client_id", client_id),
         ("grant_type", "refresh_token"),
@@ -85,7 +94,11 @@ fn refresh_access_token(client: &Client, client_id: &str, tenant: &str, refresh_
     if let Some(secret) = client_secret {
         form.push(("client_secret", secret));
     }
-    let resp = client.post(&url).form(&form).send().context("token refresh request")?;
+    let resp = client
+        .post(&url)
+        .form(&form)
+        .send()
+        .context("token refresh request")?;
     let status = resp.status();
     let body = resp.text().context("token response body")?;
     if !status.is_success() {
@@ -187,21 +200,46 @@ impl Connector for OneDriveConnector {
             .bearer_auth(&access_token)
             .send()
             .context("list root children")?;
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().unwrap_or_default();
-                bail!("Graph API error: {} - {}", status, body);
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            bail!("Graph API error: {} - {}", status, body);
         }
         let data: DriveItemResponse = resp.json().context("parse drive items")?;
         let items = data.value.unwrap_or_default();
 
         let mut tables = Vec::new();
         let columns = vec![
-            SchemaColumn { name: "id".into(), data_type: "TEXT".into(), nullable: false, is_primary_key: true },
-            SchemaColumn { name: "name".into(), data_type: "TEXT".into(), nullable: false, is_primary_key: false },
-            SchemaColumn { name: "web_url".into(), data_type: "TEXT".into(), nullable: true, is_primary_key: false },
-            SchemaColumn { name: "size_bytes".into(), data_type: "INTEGER".into(), nullable: true, is_primary_key: false },
-            SchemaColumn { name: "content_text".into(), data_type: "TEXT".into(), nullable: true, is_primary_key: false },
+            SchemaColumn {
+                name: "id".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: true,
+            },
+            SchemaColumn {
+                name: "name".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "web_url".into(),
+                data_type: "TEXT".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "size_bytes".into(),
+                data_type: "INTEGER".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "content_text".into(),
+                data_type: "TEXT".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
         ];
 
         for item in &items {
@@ -316,7 +354,8 @@ impl Connector for OneDriveConnector {
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 if DOC_EXTS.contains(&ext.as_str()) && size > 0 && size < 10 * 1024 * 1024 {
-                    let content_url = format!("{}/me/drive/items/{}/content", GRAPH_BASE, entity_id);
+                    let content_url =
+                        format!("{}/me/drive/items/{}/content", GRAPH_BASE, entity_id);
                     match client.get(&content_url).bearer_auth(&access_token).send() {
                         Ok(r) if r.status().is_success() => {
                             if let Ok(bytes) = r.bytes() {
@@ -349,7 +388,9 @@ fn extract_onedrive_text(bytes: &[u8], ext: &str) -> String {
         _ => String::new(),
     };
     if text.len() > MAX_ONEDRIVE_TEXT_BYTES {
-        text.chars().take(MAX_ONEDRIVE_TEXT_BYTES).collect::<String>()
+        text.chars()
+            .take(MAX_ONEDRIVE_TEXT_BYTES)
+            .collect::<String>()
     } else {
         text
     }

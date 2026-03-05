@@ -110,7 +110,11 @@ pub fn read_identity(dir: &Path) -> Result<NodeIdentity> {
     let cert_pem = std::fs::read_to_string(dir.join("cert.pem")).context("read cert.pem")?;
     let key_pem = std::fs::read_to_string(dir.join("key.pem")).context("read key.pem")?;
     let node_id = node_id_from_cert(&cert_pem);
-    Ok(NodeIdentity { node_id, cert_pem, key_pem })
+    Ok(NodeIdentity {
+        node_id,
+        cert_pem,
+        key_pem,
+    })
 }
 
 /// Save a full identity bundle (CA + node identity) to a directory.
@@ -132,9 +136,7 @@ pub fn load_identity_bundle(dir: &Path) -> Result<(String, NodeIdentity)> {
 
 /// Check if an identity bundle exists in the directory.
 pub fn identity_bundle_exists(dir: &Path) -> bool {
-    dir.join("ca.pem").exists()
-        && dir.join("cert.pem").exists()
-        && dir.join("key.pem").exists()
+    dir.join("ca.pem").exists() && dir.join("cert.pem").exists() && dir.join("key.pem").exists()
 }
 
 fn ensure_crypto_provider() {

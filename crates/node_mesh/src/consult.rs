@@ -186,11 +186,8 @@ pub async fn consult_peers(
             let ask = ask.clone();
             tokio::spawn(async move {
                 let start = Instant::now();
-                let result = tokio::time::timeout(
-                    deadline,
-                    transport.request(&address, port, &ask),
-                )
-                .await;
+                let result =
+                    tokio::time::timeout(deadline, transport.request(&address, port, &ask)).await;
                 (peer_id, start, result)
             })
         })
@@ -240,7 +237,11 @@ pub async fn consult_peers(
     let best_answer = answers
         .iter()
         .filter(|a| a.confidence >= config.min_confidence)
-        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .cloned();
 
     ConsultResult {

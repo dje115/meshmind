@@ -112,7 +112,11 @@ pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
         });
     }
 
-    all.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+    all.sort_by(|a, b| {
+        a.rank
+            .partial_cmp(&b.rank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     all.truncate(limit);
     Ok(all)
 }
@@ -188,9 +192,24 @@ mod tests {
         }
 
         let artifacts = vec![
-            ("a1", "K8s rollback playbook", "Step-by-step guide to rolling back Kubernetes deployments safely", ArtifactType::Runbook),
-            ("a2", "SSL renewal template", "Template for renewing SSL/TLS certificates using certbot and ACME", ArtifactType::Template),
-            ("a3", "Database failover recipe", "Automated PostgreSQL failover with pgbouncer connection pooling", ArtifactType::Recipe),
+            (
+                "a1",
+                "K8s rollback playbook",
+                "Step-by-step guide to rolling back Kubernetes deployments safely",
+                ArtifactType::Runbook,
+            ),
+            (
+                "a2",
+                "SSL renewal template",
+                "Template for renewing SSL/TLS certificates using certbot and ACME",
+                ArtifactType::Template,
+            ),
+            (
+                "a3",
+                "Database failover recipe",
+                "Automated PostgreSQL failover with pgbouncer connection pooling",
+                ArtifactType::Recipe,
+            ),
         ];
 
         for (id, title, summary, atype) in artifacts {

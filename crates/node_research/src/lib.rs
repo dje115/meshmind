@@ -52,7 +52,10 @@ pub enum ResearchError {
 }
 
 /// Perform a DuckDuckGo web search and return (title, url) pairs.
-pub async fn web_search(query: &str, limit: usize) -> std::result::Result<Vec<(String, String)>, ResearchError> {
+pub async fn web_search(
+    query: &str,
+    limit: usize,
+) -> std::result::Result<Vec<(String, String)>, ResearchError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0")
@@ -78,7 +81,10 @@ pub async fn web_search(query: &str, limit: usize) -> std::result::Result<Vec<(S
     parse_ddg_html_results(&html, limit)
 }
 
-fn parse_ddg_html_results(html: &str, limit: usize) -> std::result::Result<Vec<(String, String)>, ResearchError> {
+fn parse_ddg_html_results(
+    html: &str,
+    limit: usize,
+) -> std::result::Result<Vec<(String, String)>, ResearchError> {
     let mut results = Vec::new();
     let mut pos = 0;
     while results.len() < limit {
@@ -112,7 +118,9 @@ fn parse_ddg_html_results(html: &str, limit: usize) -> std::result::Result<Vec<(
                 pos = href_end + 1;
                 continue;
             }
-        } else if raw_url.starts_with("https://duckduckgo.com/") || raw_url.starts_with("//duckduckgo.com") {
+        } else if raw_url.starts_with("https://duckduckgo.com/")
+            || raw_url.starts_with("//duckduckgo.com")
+        {
             pos = href_end + 1;
             continue;
         } else if raw_url.starts_with("//") {
@@ -120,7 +128,10 @@ fn parse_ddg_html_results(html: &str, limit: usize) -> std::result::Result<Vec<(
         } else {
             raw_url.to_string()
         };
-        let title_start = html[href_end..].find('>').map(|i| href_end + i + 1).unwrap_or(href_end);
+        let title_start = html[href_end..]
+            .find('>')
+            .map(|i| href_end + i + 1)
+            .unwrap_or(href_end);
         let title_end = match html[title_start..].find("</a>") {
             Some(i) => title_start + i,
             None => break,
@@ -340,7 +351,8 @@ async fn summarize(
     body: &str,
 ) -> std::result::Result<String, ResearchError> {
     let truncated = if body.len() > 4000 {
-        &body[..4000]
+        let end = body.floor_char_boundary(4000);
+        &body[..end]
     } else {
         body
     };
