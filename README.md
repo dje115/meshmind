@@ -115,7 +115,7 @@ You need **one of** these C toolchains:
   # In MSYS2 UCRT64 terminal:
   pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-protobuf
 
-  # Add to PATH (PowerShell):
+  # Add to PATH (PowerShell) — required so dlltool and linker are found:
   $env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"
   $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
   $env:PROTOC = "C:\msys64\mingw64\bin\protoc.exe"

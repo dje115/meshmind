@@ -147,12 +147,32 @@ pub async fn search_and_summarize_for_chat(
     policy: &PolicyEngine,
     backend: &Arc<dyn InferenceBackend>,
 ) -> Option<String> {
+    search_and_summarize_with_details(query, policy, backend)
+        .await
+        .map(|r| r.0)
+}
+
+/// Like search_and_summarize_for_chat but returns (context, summary, source_url) for optional storage.
+pub async fn search_and_summarize_with_details(
+    query: &str,
+    policy: &PolicyEngine,
+    backend: &Arc<dyn InferenceBackend>,
+) -> Option<(String, String, String)> {
+    search_and_summarize_inner(query, policy, backend).await
+}
+
+/// Inner helper returning (context, summary, first_url) for optional storage.
+async fn search_and_summarize_inner(
+    query: &str,
+    policy: &PolicyEngine,
+    backend: &Arc<dyn InferenceBackend>,
+) -> Option<(String, String, String)> {
     if !policy.can_research_web(true, true).is_allowed() {
         return None;
     }
     let results = web_search(query, 3).await.ok()?;
-    let (_, first_url) = results.first()?;
-    let body = fetch_url(first_url).await.ok()?;
+    let (_first_title, first_url) = results.first()?.clone();
+    let body = fetch_url(&first_url).await.ok()?;
     let summary = summarize(backend, query, &body).await.ok()?;
     let mut out = format!("Web search result for \"{query}\":\n{summary}");
     if results.len() > 1 {
@@ -166,7 +186,57 @@ pub async fn search_and_summarize_for_chat(
                 .join("; "),
         );
     }
-    Some(out)
+    Some((out, summary, first_url))
+}
+
+/// Store a web search result as a WebBrief in the knowledge base.
+pub fn store_web_brief_from_search(
+    query: &str,
+    summary: &str,
+    source_url: &str,
+    cas: &CasStore,
+    event_log: &mut EventLog,
+    node_id: &str,
+    db_path: &Path,
+) -> bool {
+    let sources = vec![WebSource {
+        url: source_url.to_string(),
+        retrieved_at: None,
+        publisher: String::new(),
+        snippet: String::new(),
+    }];
+    let artifact_id = format!("wb-{}", uuid::Uuid::new_v4());
+    if cas.put_bytes("text/plain", summary.as_bytes()).is_err() {
+        return false;
+    }
+    let event = EventEnvelope {
+        event_id: artifact_id.clone(),
+        r#type: EventType::WebBriefCreated as i32,
+        node_id: Some(NodeId {
+            value: node_id.into(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::WebBriefCreated(WebBriefCreated {
+            artifact_id: artifact_id.clone(),
+            question: query.into(),
+            summary: summary.into(),
+            sources,
+            confidence: 0.7,
+            expires_unix_ms: 0,
+        })),
+        ..Default::default()
+    };
+    let stored = match event_log.append(event) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let Ok(conn) = node_storage::sqlite_views::open_db(db_path) else {
+        return false;
+    };
+    node_storage::projector::apply_event(&conn, &stored).is_ok()
 }
 
 /// Perform web research: fetch, summarize, store WebBrief.

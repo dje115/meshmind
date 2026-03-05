@@ -52,6 +52,7 @@ function renderPage(page) {
     case 'federated': renderFederated(content); break;
     case 'peers': renderPeers(content); break;
     case 'audit': renderAudit(content); break;
+    case 'settings': renderSettings(content); break;
     default: content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">?</div><div class="empty-state-text">Page not found</div></div>';
   }
 }
@@ -778,6 +779,96 @@ async function renderPeers(el) {
   }
 }
 
+// --- Settings ---
+async function renderSettings(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <h1>Settings</h1>
+      <p>Configure MeshMind and connected services</p>
+    </div>
+    <div class="settings-tabs">
+      <button class="settings-tab active" data-tab="onedrive">OneDrive</button>
+      <button class="settings-tab" data-tab="general">General</button>
+    </div>
+    <div id="settings-onedrive" class="settings-panel">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">OneDrive Connector</span>
+        </div>
+        <p class="settings-desc">Connect to Microsoft OneDrive to ingest documents and files. You need an Azure AD app registration and OAuth tokens.</p>
+        <div class="form-group">
+          <label class="form-label">Client ID</label>
+          <input type="text" id="onedrive-client-id" class="form-input" placeholder="Your Azure app (client) ID" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Tenant ID</label>
+          <input type="text" id="onedrive-tenant-id" class="form-input" placeholder="common (default) or your tenant ID" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Refresh Token</label>
+          <input type="password" id="onedrive-refresh-token" class="form-input" placeholder="OAuth refresh token" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Client Secret (optional)</label>
+          <input type="password" id="onedrive-client-secret" class="form-input" placeholder="For confidential client apps only" autocomplete="off" />
+        </div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="onedrive-save">Save OneDrive Config</button>
+        </div>
+      </div>
+    </div>
+    <div id="settings-general" class="settings-panel" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">General</span>
+        </div>
+        <p class="settings-desc">General MeshMind settings. Edit meshmind.toml for data_dir, backend, and other options.</p>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll('.settings-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('settings-onedrive').style.display = tab.dataset.tab === 'onedrive' ? 'block' : 'none';
+      document.getElementById('settings-general').style.display = tab.dataset.tab === 'general' ? 'block' : 'none';
+    });
+  });
+
+  try {
+    const cfg = await api.getConfigOnedrive();
+    document.getElementById('onedrive-client-id').value = cfg.client_id || '';
+    document.getElementById('onedrive-tenant-id').value = cfg.tenant_id || 'common';
+    document.getElementById('onedrive-refresh-token').value = cfg.refresh_token || '';
+    document.getElementById('onedrive-client-secret').value = cfg.client_secret || '';
+  } catch (e) {
+    document.getElementById('onedrive-client-id').value = '';
+    document.getElementById('onedrive-tenant-id').value = 'common';
+    document.getElementById('onedrive-refresh-token').value = '';
+    document.getElementById('onedrive-client-secret').value = '';
+  }
+
+  document.getElementById('onedrive-save').addEventListener('click', async () => {
+    const btn = document.getElementById('onedrive-save');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+      await api.saveConfigOnedrive({
+        client_id: document.getElementById('onedrive-client-id').value.trim(),
+        tenant_id: document.getElementById('onedrive-tenant-id').value.trim() || 'common',
+        refresh_token: document.getElementById('onedrive-refresh-token').value,
+        client_secret: document.getElementById('onedrive-client-secret').value || undefined,
+      });
+      toast('OneDrive configuration saved', 'success');
+    } catch (e) {
+      toast(`Save failed: ${e.message}`, 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Save OneDrive Config';
+  });
+}
+
 // --- Audit ---
 async function renderAudit(el) {
   el.innerHTML = `
@@ -904,7 +995,7 @@ function formatBytes(bytes) {
 }
 
 function connectorLabel(type) {
-  const labels = { 1: 'SQLite', 2: 'CSV', 3: 'JSON', 7: 'Images', 8: 'Documents' };
+  const labels = { 1: 'SQLite', 2: 'CSV', 3: 'JSON', 7: 'Images', 8: 'Documents', 9: 'OneDrive' };
   return labels[type] || `Type ${type}`;
 }
 

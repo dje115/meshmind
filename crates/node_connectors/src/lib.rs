@@ -827,6 +827,12 @@ impl Connector for DocumentConnector {
     }
 }
 
+// ── OneDriveConnector ───────────────────────────────────────────────────────
+
+mod onedrive;
+
+pub use onedrive::{load_onedrive_config, save_onedrive_config, OneDriveConfig, OneDriveConnector};
+
 // ── Column classifier ───────────────────────────────────────────────────────
 
 const PII_PATTERNS: &[&str] = &[

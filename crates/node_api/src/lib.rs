@@ -30,7 +30,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
-use axum::response::{Json, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use futures_util::StreamExt;
@@ -42,9 +42,26 @@ use tower_http::cors::CorsLayer;
 
 use node_ai::InferenceBackend;
 use node_connectors::{
-    Connector, CsvFolderConnector, DocumentConnector, ImageConnector, JsonFolderConnector,
-    SQLiteConnector,
+    load_onedrive_config, save_onedrive_config, Connector, CsvFolderConnector, DocumentConnector,
+    ImageConnector, JsonFolderConnector, OneDriveConfig, OneDriveConnector, SQLiteConnector,
 };
+
+async fn serve_fallback_landing() -> impl IntoResponse {
+    let html = r##"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>MeshMind</title></head>
+<body style="font-family:sans-serif;max-width:600px;margin:60px auto;padding:20px">
+<h1>MeshMind</h1>
+<p>API is running. To use the full UI:</p>
+<ol>
+<li>From the project root: <code>cd ui && npm run build</code></li>
+<li>Restart MeshMind</li>
+</ol>
+<p>API endpoints: <a href="/v1/status">/v1/status</a></p>
+</body>
+</html>"##;
+    Html(html)
+}
 
 fn connector_for_type(connector_type: i32) -> Option<(Box<dyn Connector>, &'static str)> {
     let (connector, name) = match connector_type {
@@ -53,9 +70,20 @@ fn connector_for_type(connector_type: i32) -> Option<(Box<dyn Connector>, &'stat
         3 => (Box::new(JsonFolderConnector::new("json")) as Box<dyn Connector>, "json"),
         7 => (Box::new(ImageConnector::new("image")) as Box<dyn Connector>, "image"),
         8 => (Box::new(DocumentConnector::new("document")) as Box<dyn Connector>, "document"),
+        9 => (Box::new(OneDriveConnector::new("onedrive")) as Box<dyn Connector>, "onedrive"),
         _ => return None,
     };
     Some((connector, name))
+}
+
+fn connector_for_onedrive(data_dir: &std::path::Path) -> (Box<dyn Connector>, &'static str) {
+    let config_path = data_dir.join("config").join("onedrive.json");
+    let connector: Box<dyn Connector> = if let Some(cfg) = load_onedrive_config(&config_path) {
+        Box::new(OneDriveConnector::new_with_config("onedrive", cfg))
+    } else {
+        Box::new(OneDriveConnector::new("onedrive"))
+    };
+    (connector, "onedrive")
 }
 use node_datasets::{DatasetBuildConfig, DatasetPreset};
 use node_discovery::{DiscoveryConfig, scan_directory, build_discovered_event};
@@ -81,12 +109,19 @@ const STOP_WORDS: &[&str] = &[
 const WEB_SEARCH_TRIGGERS: &[&str] = &[
     "search the web",
     "search the internet",
+    "search the net",
+    "check the internet",
+    "check the web",
+    "check online",
     "look it up online",
     "look it up on the web",
+    "look up online",
+    "look up on the internet",
     "google it",
     "search online",
     "find it online",
-    "look up online",
+    "find online",
+    "look up",
     "search for it",
 ];
 
@@ -110,26 +145,71 @@ fn wants_web_search(content: &str) -> bool {
     WEB_SEARCH_TRIGGERS.iter().any(|t| lower.contains(t))
 }
 
+/// Generic words that are too vague to use as a search query.
+const VAGUE_QUERY_WORDS: &[&str] = &["it", "that", "this", "information", "info", "something", "things"];
+
 fn extract_search_query(content: &str, history: &[(String, String)]) -> Option<String> {
     let lower = content.to_lowercase();
+
+    // Try "about X" anywhere in the message first (e.g. "what can you find about scooby doo")
+    for pattern in ["about ", "on ", "regarding "] {
+        if let Some(pos) = lower.find(pattern) {
+            let after = content[pos + pattern.len()..].trim();
+            // Take up to next sentence/clause boundary
+            let end = after
+                .find(|c: char| c == '.' || c == ',' || c == '?' || c == '!')
+                .unwrap_or(after.len());
+            let chunk: String = after.chars().take(end.min(80)).collect();
+            let trimmed = chunk.trim();
+            if trimmed.len() > 3
+                && !VAGUE_QUERY_WORDS.contains(&trimmed.to_lowercase().as_str())
+                && !trimmed.chars().all(|c| !c.is_alphanumeric())
+            {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
     for trigger in WEB_SEARCH_TRIGGERS {
         if let Some(pos) = lower.find(trigger) {
             let mut rest = content[pos + trigger.len()..].trim().to_string();
-            for prefix in ["for ", "about ", "regarding "] {
+            for prefix in ["for ", "about ", "regarding ", "on "] {
                 if rest.to_lowercase().starts_with(prefix) {
                     rest = rest[prefix.len()..].trim().to_string();
                     break;
                 }
             }
-            if !rest.is_empty() && rest.len() > 2 {
+            if !rest.is_empty() && rest.len() > 3 {
                 let query: String = rest.chars().take(100).collect();
-                return Some(query.trim().to_string());
+                let q = query.trim().to_string();
+                let q_lower = q.to_lowercase();
+                if !VAGUE_QUERY_WORDS.contains(&q_lower.as_str()) {
+                    return Some(q);
+                }
             }
         }
     }
+
     // Fallback: use the last user question from history as the topic
     for (role, content) in history.iter().rev() {
         if role == "user" && content.len() > 5 && !content.chars().all(|c| c.is_whitespace()) {
+            // Prefer extracting "about X" from history if present
+            let h_lower = content.to_lowercase();
+            for pattern in ["about ", "on ", "regarding "] {
+                if let Some(pos) = h_lower.find(pattern) {
+                    let after = content[pos + pattern.len()..].trim();
+                    let end = after
+                        .find(|c: char| c == '.' || c == ',' || c == '?' || c == '!')
+                        .unwrap_or(after.len());
+                    let chunk: String = after.chars().take(end.min(80)).collect();
+                    let trimmed = chunk.trim();
+                    if trimmed.len() > 3
+                        && !VAGUE_QUERY_WORDS.contains(&trimmed.to_lowercase().as_str())
+                    {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
             let q: String = content.chars().take(80).collect();
             return Some(q.trim().to_string());
         }
@@ -150,6 +230,20 @@ fn is_follow_up_message(content: &str, history: &[(String, String)]) -> bool {
     }
     // Very short messages after a multi-turn conversation are likely follow-ups
     trimmed.len() <= 15 && history.len() >= 4
+}
+
+/// True if the question looks like a general-knowledge query (who/what/when/where) that would benefit from web search.
+fn looks_like_general_knowledge_question(content: &str) -> bool {
+    let lower = content.trim().to_lowercase();
+    if lower.len() < 8 || lower.len() > 120 {
+        return false;
+    }
+    let prefixes = [
+        "who is ", "who was ", "what is ", "what was ", "when did ", "when was ",
+        "where is ", "where did ", "why did ", "why is ", "how did ", "how does ",
+        "who are ", "what are ", "define ", "explain ",
+    ];
+    prefixes.iter().any(|p| lower.starts_with(p))
 }
 
 fn to_fts5_query(text: &str) -> String {
@@ -181,6 +275,8 @@ pub struct AppState {
     pub event_log: RwLock<EventLog>,
     pub cas: CasStore,
     pub db_path: std::path::PathBuf,
+    /// Base data directory (e.g. ./data). Config files live under data/config/.
+    pub data_dir: std::path::PathBuf,
     pub peer_dir: Arc<RwLock<PeerDirectory>>,
     pub backend: Arc<dyn InferenceBackend>,
     pub transport: Option<Arc<dyn Transport>>,
@@ -271,6 +367,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/ingest", post(handle_admin_ingest))
         .route("/admin/sources/approve-all", post(handle_admin_approve_all))
         .route("/admin/ingest-all", post(handle_admin_ingest_all))
+        .route("/admin/config/onedrive", get(handle_admin_config_onedrive_get))
+        .route("/admin/config/onedrive", post(handle_admin_config_onedrive_save))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     let api_routes = Router::new()
@@ -299,6 +397,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             app = app.fallback_service(serve);
             tracing::info!("serving UI from {}", ui_dir.display());
         }
+    }
+    let has_ui = state
+        .ui_dir
+        .as_ref()
+        .map(|d| d.exists())
+        .unwrap_or(false);
+    if !has_ui {
+        app = app.fallback(serve_fallback_landing);
+        tracing::info!("serving fallback landing page (build UI: cd ui && npm run build)");
     }
 
     app.with_state(state)
@@ -579,24 +686,40 @@ async fn handle_ask(
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut web_search_context = String::new();
-    if wants_web_search(&req.question) {
-        if let Some(query) = extract_search_query(&req.question, &[]) {
-            if let Some(ctx) = node_research::search_and_summarize_for_chat(
-                &query,
-                &state.research_policy,
-                &state.backend,
-            )
-            .await
-            {
-                web_search_context = ctx;
-            }
-        }
-    }
-
     let fts_query = to_fts5_query(&req.question);
     let context_hits = search::search_all(&conn, &fts_query, 10)
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut web_search_context = String::new();
+    let do_web_search = wants_web_search(&req.question)
+        || (context_hits.is_empty() && looks_like_general_knowledge_question(&req.question));
+    if do_web_search {
+        let query = extract_search_query(&req.question, &[])
+            .or_else(|| Some(req.question.trim().to_string()))
+            .filter(|q| q.len() > 3);
+        if let Some(q) = query {
+            if let Some((ctx, summary, url)) =
+                node_research::search_and_summarize_with_details(
+                    &q,
+                    &state.research_policy,
+                    &state.backend,
+                )
+                .await
+            {
+                web_search_context = ctx.clone();
+                let mut log = state.event_log.write().await;
+                node_research::store_web_brief_from_search(
+                    &q,
+                    &summary,
+                    &url,
+                    &state.cas,
+                    &mut *log,
+                    &state.node_id,
+                    &state.db_path,
+                );
+            }
+        }
+    }
 
     let context_bullets: Vec<String> = context_hits
         .iter()
@@ -634,14 +757,7 @@ async fn handle_ask(
         )
     };
 
-    let system_prompt = "\
-You are MeshMind, a local-first AI assistant running on the user's own machine. \
-You have access to the user's local knowledge base containing their ingested documents, \
-images (with EXIF/GPS metadata), CSV data, SQLite databases, and other files they have scanned. \
-When context is provided, answer based on that data. \
-Never say you cannot access the user's files -- you CAN, through the knowledge base. \
-If no context was found, explain that the knowledge base doesn't have matching data yet \
-and suggest they scan and ingest more sources.";
+    let system_prompt = MESHMIND_SYSTEM_PROMPT;
 
     let gen_req = node_ai::GenerateRequest {
         prompt,
@@ -739,12 +855,13 @@ struct SendMessageRequest {
 
 const MESHMIND_SYSTEM_PROMPT: &str = "\
 You are MeshMind, a local-first AI assistant running on the user's own machine. \
-You have access to the user's local knowledge base containing their ingested documents, \
-images (with EXIF/GPS metadata), CSV data, SQLite databases, and other files they have scanned. \
-When context is provided, answer based on that data. \
-Never say you cannot access the user's files -- you CAN, through the knowledge base. \
-If no context was found, explain that the knowledge base doesn't have matching data yet \
-and suggest they scan and ingest more sources. \
+You have access to the user's local knowledge base and can also search the web when the user asks. \
+When web search results are provided, use them to answer the question. \
+When knowledge base context is provided, use it ONLY if it directly answers the user's question. \
+If the context is unrelated (e.g. a document about a different topic that happened to match a keyword), \
+ignore it and say you don't have relevant information — do NOT reference unrelated documents. \
+Never say you cannot access the user's files — you CAN, through the knowledge base. \
+If no relevant context was found, say so and suggest they scan more sources or ask you to search the web. \
 When conversation history is provided, use it to maintain continuity and give contextual follow-up answers.";
 
 fn now_ms() -> i64 {
@@ -1152,16 +1269,32 @@ async fn handle_send_message_stream(
     };
 
     let mut web_search_context = String::new();
-    if wants_web_search(&req.content) {
-        if let Some(query) = extract_search_query(&req.content, &history) {
-            if let Some(ctx) = node_research::search_and_summarize_for_chat(
-                &query,
-                &state.research_policy,
-                &state.backend,
-            )
-            .await
+    let do_web_search = wants_web_search(&req.content)
+        || (context_hits.is_empty() && looks_like_general_knowledge_question(&req.content));
+    if do_web_search {
+        let query = extract_search_query(&req.content, &history)
+            .or_else(|| Some(req.content.trim().to_string()))
+            .filter(|q| q.len() > 3);
+        if let Some(q) = query {
+            if let Some((ctx, summary, url)) =
+                node_research::search_and_summarize_with_details(
+                    &q,
+                    &state.research_policy,
+                    &state.backend,
+                )
+                .await
             {
-                web_search_context = ctx;
+                web_search_context = ctx.clone();
+                let mut log = state.event_log.write().await;
+                node_research::store_web_brief_from_search(
+                    &q,
+                    &summary,
+                    &url,
+                    &state.cas,
+                    &mut *log,
+                    &state.node_id,
+                    &state.db_path,
+                );
             }
         }
     }
@@ -1191,7 +1324,33 @@ async fn handle_send_message_stream(
         .unwrap_or_default();
 
     let has_context = !context_bullets.is_empty() || !cross_session.is_empty() || !web_search_context.is_empty();
+    let mut peer_insights = Vec::new();
+    let would_have_low_confidence = context_bullets.is_empty() && web_search_context.is_empty();
+    if would_have_low_confidence {
+        if let Some(ref transport) = state.transport {
+            let result = node_mesh::consult::consult_peers(
+                transport,
+                &state.peer_dir,
+                &state.consult_config,
+                &state.node_id,
+                "public",
+                &req.content,
+                &context_bullets,
+            )
+            .await;
+            for pa in &result.answers {
+                peer_insights.push(format!("[Peer {}] {}", pa.peer_id, pa.answer));
+            }
+        }
+    }
+
     let mut prompt_parts = Vec::new();
+    if !peer_insights.is_empty() {
+        prompt_parts.push(format!(
+            "Insights from other MeshMind nodes on the network:\n{}",
+            peer_insights.join("\n\n")
+        ));
+    }
     if is_follow_up {
         prompt_parts.push(
             "The user is asking a follow-up question. Stay on the topic of your previous answer. \
@@ -1659,8 +1818,12 @@ async fn handle_admin_ingest(
         )));
     }
 
-    let (connector, connector_str) = connector_for_type(connector_type)
-        .ok_or_else(|| ApiError::bad_request(format!("unsupported connector type: {connector_type}")))?;
+    let (connector, connector_str) = if connector_type == 9 {
+        connector_for_onedrive(&state.data_dir)
+    } else {
+        connector_for_type(connector_type)
+            .ok_or_else(|| ApiError::bad_request(format!("unsupported connector type: {connector_type}")))?
+    };
 
     let source_path = std::path::PathBuf::from(&path_or_uri);
 
@@ -1763,6 +1926,44 @@ async fn handle_admin_approve_all(
     }))
 }
 
+async fn handle_admin_config_onedrive_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OneDriveConfig>, ApiError> {
+    let path = state.data_dir.join("config").join("onedrive.json");
+    match load_onedrive_config(&path) {
+        Some(cfg) => Ok(Json(cfg)),
+        None => Ok(Json(OneDriveConfig {
+            client_id: String::new(),
+            tenant_id: "common".into(),
+            refresh_token: String::new(),
+            client_secret: None,
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+struct OneDriveConfigSaveRequest {
+    client_id: String,
+    tenant_id: Option<String>,
+    refresh_token: String,
+    client_secret: Option<String>,
+}
+
+async fn handle_admin_config_onedrive_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OneDriveConfigSaveRequest>,
+) -> Result<StatusCode, ApiError> {
+    let cfg = OneDriveConfig {
+        client_id: req.client_id,
+        tenant_id: req.tenant_id.unwrap_or_else(|| "common".into()),
+        refresh_token: req.refresh_token,
+        client_secret: req.client_secret.filter(|s| !s.is_empty()),
+    };
+    let path = state.data_dir.join("config").join("onedrive.json");
+    save_onedrive_config(&path, &cfg).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Serialize)]
 struct BulkIngestResponse {
     ingested: u64,
@@ -1796,9 +1997,13 @@ async fn handle_admin_ingest_all(
     let mut total_docs = 0u64;
 
     for (source_id, connector_type, path_or_uri) in &sources {
-        let (connector, connector_str) = match connector_for_type(*connector_type) {
-            Some(p) => p,
-            None => { failed += 1; continue; }
+        let (connector, connector_str) = if *connector_type == 9 {
+            connector_for_onedrive(&state.data_dir)
+        } else {
+            match connector_for_type(*connector_type) {
+                Some(p) => p,
+                None => { failed += 1; continue; }
+            }
         };
 
         let source_path = std::path::PathBuf::from(path_or_uri);
@@ -2443,10 +2648,12 @@ mod tests {
         let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
         let trainer = Arc::new(Trainer::new(policy, model_registry.clone()));
 
+        let data_dir = db_path.parent().and_then(|p| p.parent()).unwrap_or(&db_path).to_path_buf();
         Arc::new(AppState {
             event_log: RwLock::new(event_log),
             cas,
             db_path,
+            data_dir,
             peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
             backend: Arc::new(MockBackend::new()),
             transport: None,
@@ -2732,10 +2939,12 @@ mod tests {
         }));
         let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
         let trainer = Arc::new(Trainer::new(policy, model_registry.clone()));
+        let data_dir = db_path.parent().and_then(|p| p.parent()).unwrap_or(&db_path).to_path_buf();
         let state = Arc::new(AppState {
             event_log: RwLock::new(event_log),
             cas,
             db_path,
+            data_dir,
             peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
             backend: Arc::new(MockBackend::new()),
             transport: None,

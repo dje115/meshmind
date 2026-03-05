@@ -97,6 +97,25 @@ impl Default for NodeConfig {
     }
 }
 
+/// Resolve ui/dist path: try cwd-relative, then exe-relative (for when running from target/...).
+fn resolve_ui_dir() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let p = cwd.join("ui").join("dist");
+    if p.exists() {
+        return Some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..5 {
+        let candidate = dir.join("ui").join("dist");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
 fn load_config() -> Result<NodeConfig> {
     let config_path = PathBuf::from("meshmind.toml");
     if config_path.exists() {
@@ -453,10 +472,12 @@ async fn main() -> Result<()> {
     let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
     let trainer = Arc::new(Trainer::new(train_policy, model_registry.clone()));
 
+    let data_dir = config.data_dir.clone();
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
         cas,
         db_path,
+        data_dir,
         peer_dir: peer_dir.clone(),
         backend: backend.clone(),
         transport: Some(transport),
@@ -467,10 +488,7 @@ async fn main() -> Result<()> {
         scan_dirs,
         trainer,
         model_registry,
-        ui_dir: {
-            let ui_path = std::path::Path::new("ui/dist");
-            if ui_path.exists() { Some(ui_path.to_path_buf()) } else { None }
-        },
+        ui_dir: resolve_ui_dir(),
         last_train_status: Arc::new(RwLock::new(None)),
         ask_chat_limiter: Some(node_api::default_ask_chat_limiter()),
         research_policy: Arc::new(PolicyEngine::new(PolicyConfig {

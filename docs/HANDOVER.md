@@ -49,11 +49,22 @@ cargo test --workspace --target x86_64-pc-windows-gnu
 
 ### Run App
 
+**Important**: Run from the **project root** so `ui/dist` is found. Build the UI first:
+
 ```powershell
+cd c:\Users\david\Documents\meshmind
+cd ui && npm run build && cd ..
 .\target\x86_64-pc-windows-gnu\debug\meshmind.exe
-# Or: cargo run -p node_app --target x86_64-pc-windows-gnu
+```
+
+Or with cargo:
+
+```powershell
+cargo run -p node_app --target x86_64-pc-windows-gnu
 # Open http://127.0.0.1:9900
 ```
+
+If `ui/dist` is missing, a fallback landing page is served at / with instructions. The exe now resolves `ui/dist` from cwd or from the executable's path.
 
 ---
 

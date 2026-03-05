@@ -197,6 +197,7 @@ enum ConnectorType {
   ODBC = 6;
   IMAGE_FOLDER = 7;
   DOCUMENT_FOLDER = 8;
+  ONEDRIVE = 9;
 }
 
 message DataSourceDiscovered {
