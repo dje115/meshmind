@@ -25,6 +25,7 @@ enum EventType {
   DATA_SOURCE_DISCOVERED = 70;
   DATA_SOURCE_CLASSIFIED = 71;
   DATA_SOURCE_APPROVED = 72;
+  DATA_SOURCE_REMOVED = 73;
   INGEST_STARTED = 80;
   INGEST_COMPLETED = 81;
   DATASET_MANIFEST_CREATED = 82;
@@ -88,6 +89,7 @@ message EventEnvelope {
     DataSourceDiscovered data_source_discovered = 160;
     DataSourceClassified data_source_classified = 161;
     DataSourceApproved data_source_approved = 162;
+    DataSourceRemoved data_source_removed = 163;
     IngestStarted ingest_started = 170;
     IngestCompleted ingest_completed = 171;
     DatasetManifestCreated dataset_manifest_created = 172;
@@ -228,6 +230,10 @@ message DataSourceApproved {
   meshmind.common.Timestamp approved_at = 4;
   repeated string allowed_tables = 5;
   uint32 row_limit = 6;
+}
+
+message DataSourceRemoved {
+  string source_id = 1;
 }
 
 message IngestStarted {

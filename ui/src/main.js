@@ -578,26 +578,127 @@ async function renderSources(el) {
       container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⊟</div><div class="empty-state-text">No data sources discovered yet.<br/>Sources will appear here after running a discovery scan.</div></div>`;
       return;
     }
+
+    // Build folder tree from path_or_uri
+    function buildTree(sources) {
+      const root = { name: '', children: new Map(), sources: [] };
+      for (const s of sources) {
+        const path = (s.path_or_uri || '').replace(/\\/g, '/');
+        const isFile = /^[A-Za-z]:\//.test(path) || path.startsWith('/');
+        let parts;
+        if (isFile && path) {
+          parts = path.split('/').filter(Boolean);
+        } else {
+          // URI (onedrive://, etc) or unknown - put in "Other"
+          parts = ['Other'];
+        }
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const key = parts[i];
+          if (!node.children.has(key)) node.children.set(key, { name: key, children: new Map(), sources: [] });
+          node = node.children.get(key);
+        }
+        if (parts.length === 1) {
+          root.sources.push(s);
+        } else {
+          node.sources.push(s);
+        }
+      }
+      return root;
+    }
+
+    function renderTreeNode(node, depth, folderId) {
+      const indent = depth * 20;
+      let html = '';
+      const hasChildren = node.children.size > 0 || node.sources.length > 0;
+      const childCount = node.children.size + node.sources.length;
+
+      if (node.name) {
+        const id = folderId || `folder-${Math.random().toString(36).slice(2, 9)}`;
+        html += `<div class="sources-tree-folder" data-folder-id="${id}" style="padding-left:${indent}px">
+          <button type="button" class="sources-tree-toggle" aria-expanded="true" title="Collapse folder">
+            <span class="sources-tree-chevron">▾</span>
+          </button>
+          <span class="sources-tree-folder-icon">📁</span>
+          <span class="sources-tree-folder-name">${escapeHtml(node.name)}</span>
+          <span class="sources-tree-folder-count">(${childCount})</span>
+        </div>`;
+        html += `<div class="sources-tree-folder-children" data-folder-children="${id}">`;
+      }
+
+      for (const [name, child] of [...node.children.entries()].sort()) {
+        html += renderTreeNode(child, depth + 1, null);
+      }
+      for (const s of [...node.sources].sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''))) {
+        html += renderSourceRow(s, indent + (node.name ? 20 : 0));
+      }
+
+      if (node.name) html += '</div>';
+      return html;
+    }
+
+    function renderSourceRow(s, indent) {
+      const isIngested = s.last_ingest_status === 'completed';
+      const ingestLabel = isIngested ? 'Re-ingest' : 'Ingest';
+      const ingestClass = isIngested ? 'btn btn-sm btn-secondary' : 'btn btn-sm btn-primary';
+      const primaryAction = s.status !== 'approved'
+        ? `<button class="${ingestClass}" type="button" data-action="approve-source" data-source-id="${escapeHtml(s.source_id)}">Approve</button>`
+        : `<button class="${ingestClass}" type="button" data-action="ingest-source" data-source-id="${escapeHtml(s.source_id)}" title="${isIngested ? `Ingested ${s.last_ingest_rows ?? 0} rows. Click to re-ingest.` : 'Ingest'}">${ingestLabel}</button>`;
+      const removeBtn = `<button class="btn btn-sm btn-danger" type="button" data-action="remove-source" data-source-id="${escapeHtml(s.source_id)}" title="Remove">Remove</button>`;
+      return `
+        <div class="sources-tree-row" style="padding-left:${indent + 20}px" data-source-id="${escapeHtml(s.source_id)}">
+          <span class="sources-tree-row-name-wrap">
+            <span class="sources-tree-row-icon">📄</span>
+            <span class="sources-tree-row-name">${escapeHtml(s.display_name)}</span>
+          </span>
+          <span class="sources-tree-row-badges">
+            <span class="badge badge-blue">${connectorLabel(s.connector_type)}</span>
+            ${statusBadge(s.status)}
+            ${isIngested ? '<span class="badge badge-green" title="Ingested">✓</span>' : ''}
+            ${s.pii_detected ? '<span class="badge badge-red">PII</span>' : ''}
+          </span>
+          <span class="sources-tree-row-size">${formatBytes(s.estimated_size_bytes)}</span>
+          <span class="sources-tree-row-actions">
+            ${primaryAction}
+            ${removeBtn}
+          </span>
+        </div>
+      `;
+    }
+
+    const tree = buildTree(sources);
     container.innerHTML = `
-      <div class="card"><div class="table-container"><table>
-        <thead><tr><th>Source</th><th>Name</th><th>Type</th><th>Status</th><th>PII</th><th>Size</th><th>Actions</th></tr></thead>
-        <tbody>${sources.map(s => `
-          <tr>
-            <td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(s.source_id)}</td>
-            <td>${escapeHtml(s.display_name)}</td>
-            <td><span class="badge badge-blue">${connectorLabel(s.connector_type)}</span></td>
-            <td>${statusBadge(s.status)}</td>
-            <td>${s.pii_detected ? '<span class="badge badge-red">PII</span>' : '<span class="badge badge-green">Clean</span>'}</td>
-            <td>${formatBytes(s.estimated_size_bytes)}</td>
-            <td>${s.status !== 'approved'
-              ? `<button class="btn btn-sm btn-primary" type="button" data-action="approve-source" data-source-id="${escapeHtml(s.source_id)}">Approve</button>`
-              : `<button class="btn btn-sm btn-primary" type="button" data-action="ingest-source" data-source-id="${escapeHtml(s.source_id)}">Ingest</button>`}</td>
-          </tr>
-        `).join('')}</tbody>
-      </table></div></div>
+      <div class="card sources-card">
+        <div class="sources-tree">
+          <div class="sources-tree-header">
+            <span class="sources-tree-col-name">Source</span>
+            <span class="sources-tree-col-badges">Type / Status</span>
+            <span class="sources-tree-col-size">Size</span>
+            <span class="sources-tree-col-actions">Actions</span>
+          </div>
+          <div class="sources-tree-body">
+            ${renderTreeNode(tree, 0)}
+          </div>
+        </div>
+      </div>
     `;
 
-    document.getElementById('sources-content').addEventListener('click', async (e) => {
+    // Folder toggle
+    container.querySelectorAll('.sources-tree-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const folder = btn.closest('.sources-tree-folder');
+        const id = folder?.dataset.folderId;
+        if (!id) return;
+        const children = container.querySelector(`[data-folder-children="${id}"]`);
+        if (!children) return;
+        const expanded = children.style.display !== 'none';
+        children.style.display = expanded ? 'none' : '';
+        btn.setAttribute('aria-expanded', !expanded);
+        btn.querySelector('.sources-tree-chevron').textContent = expanded ? '▸' : '▾';
+      });
+    });
+
+    container.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-action][data-source-id]');
       if (!btn) return;
       const id = btn.dataset.sourceId;
@@ -612,6 +713,7 @@ async function renderSources(el) {
         }
       } else if (action === 'ingest-source') {
         btn.disabled = true;
+        const origText = btn.textContent;
         btn.textContent = 'Ingesting...';
         toast('Ingestion started...', 'info');
         try {
@@ -621,7 +723,16 @@ async function renderSources(el) {
         } catch (err) {
           toast(`Ingest error: ${err.message}`, 'error');
           btn.disabled = false;
-          btn.textContent = 'Ingest';
+          btn.textContent = origText;
+        }
+      } else if (action === 'remove-source') {
+        if (!confirm('Remove this source from the list? Ingested data will remain in the knowledge base.')) return;
+        try {
+          await api.removeSource(id);
+          toast('Source removed', 'success');
+          renderSources(el);
+        } catch (err) {
+          toast(`Error: ${err.message}`, 'error');
         }
       }
     });

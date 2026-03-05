@@ -294,6 +294,129 @@ fn to_fts5_query(text: &str) -> String {
         keywords.join(" OR ")
     }
 }
+
+/// Build context bullets for the LLM prompt. For artifacts with content_hash, fetches
+/// full content from CAS. Uses adaptive sizing: document-specific questions get full
+/// content for referenced docs; broad/trend questions get generous excerpts per doc.
+const CONTEXT_CONTENT_DEFAULT_CHARS: usize = 8000;  // Per-doc for broad queries (trends, summarize)
+const CONTEXT_CONTENT_DOC_SPECIFIC_CHARS: usize = 60_000;  // Full doc when question targets it
+const CONTEXT_SUMMARY_MAX_CHARS: usize = 500;
+const CONTEXT_TOTAL_BUDGET_CHARS: usize = 95_000;  // Stay under ~100K for LLM context
+
+/// True if the question asks about a specific document (e.g. "read IT3000.docx", "content of this doc").
+fn looks_like_document_specific_question(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    // Explicit document requests
+    if lower.contains("read the content") || lower.contains("read the document")
+        || lower.contains("contents of this") || lower.contains("content of this")
+        || (lower.contains("what does ") && (lower.contains("say") || lower.contains("contain")))
+        || lower.contains("in this document") || lower.contains("in that document")
+    {
+        return true;
+    }
+    // Filename patterns (e.g. "IT3000", "report.docx", "invoice.pdf")
+    let has_doc_extension = lower.contains(".docx") || lower.contains(".pdf")
+        || lower.contains(".txt") || lower.contains(".md");
+    let has_quoted_filename = (lower.contains('"') || lower.contains('\''))
+        && (lower.contains('.') || question.chars().filter(|c| c.is_alphanumeric()).count() > 5);
+    has_doc_extension || has_quoted_filename
+}
+
+/// Extract potential document title substrings from the question for matching.
+fn extract_document_refs_from_question(question: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    // Words that look like doc names (alphanumeric, possibly with dots)
+    for word in question.split_whitespace() {
+        let clean: String = word
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '_' || *c == '-')
+            .collect();
+        if clean.len() >= 3 && (clean.contains('.') || clean.chars().all(|c| c.is_alphanumeric()))
+        {
+            refs.push(clean.to_lowercase());
+        }
+    }
+    refs
+}
+
+fn title_matches_refs(title: &str, refs: &[String]) -> bool {
+    let title_lower = title.to_lowercase();
+    refs.iter()
+        .any(|r| title_lower.contains(r) || r.contains(&title_lower))
+}
+
+fn build_context_bullets(
+    hits: &[search::SearchHit],
+    cas: &CasStore,
+    question: &str,
+) -> Vec<String> {
+    let is_doc_specific = looks_like_document_specific_question(question);
+    let refs = extract_document_refs_from_question(question);
+    // When doc-specific but no refs (e.g. "read this document"), treat first artifact as focused
+
+    let mut total_chars = 0usize;
+    let mut bullets = Vec::with_capacity(hits.len());
+    let mut seen_first_artifact = false;
+
+    for h in hits {
+        let is_focused_doc = if is_doc_specific {
+            !refs.is_empty() && title_matches_refs(&h.title, &refs)
+                || (refs.is_empty() && h.hit_type == "artifact" && !seen_first_artifact)
+        } else {
+            false
+        };
+        if h.hit_type == "artifact" {
+            seen_first_artifact = true;
+        }
+
+        let content: String = if h.hit_type == "artifact" {
+            if let Some(ref hash) = h.content_hash {
+                match cas.get_bytes(hash) {
+                    Ok(bytes) => {
+                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            json.get("content_text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Err(_) => String::new(),
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let max_per_doc = if is_focused_doc {
+            CONTEXT_CONTENT_DOC_SPECIFIC_CHARS
+        } else if is_doc_specific {
+            CONTEXT_SUMMARY_MAX_CHARS
+        } else {
+            CONTEXT_CONTENT_DEFAULT_CHARS
+        };
+
+        let text = if !content.is_empty() {
+            let take = (CONTEXT_TOTAL_BUDGET_CHARS - total_chars).min(max_per_doc);
+            let excerpt: String = content.chars().take(take).collect();
+            total_chars += excerpt.len();
+            excerpt
+        } else {
+            h.summary.chars().take(CONTEXT_SUMMARY_MAX_CHARS).collect()
+        };
+
+        bullets.push(format!("- [{}] {}:\n{}", h.hit_type, h.title, text));
+
+        if total_chars >= CONTEXT_TOTAL_BUDGET_CHARS && !is_doc_specific {
+            break;
+        }
+    }
+
+    bullets
+}
 use node_federated::{FederatedConfig, FederatedCoordinator};
 use node_trainer::{JobStatus, ModelRegistry, Trainer, TrainingJob};
 
@@ -394,6 +517,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/logs", get(handle_admin_logs))
         .route("/admin/sources", get(handle_admin_sources))
         .route("/admin/sources/approve", post(handle_admin_approve_source))
+        .route("/admin/sources/remove", post(handle_admin_remove_source))
         .route("/admin/train", post(handle_admin_train))
         .route("/admin/train/status", get(handle_admin_train_status))
         .route("/admin/train/export", post(handle_admin_train_export))
@@ -646,6 +770,13 @@ struct SourceRow {
     status: String,
     pii_detected: bool,
     estimated_size_bytes: i64,
+    /// "completed" | "failed" | "started" | null if never ingested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ingest_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ingest_rows: Option<i64>,
+    /// Path or URI (for tree grouping)
+    path_or_uri: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -660,6 +791,11 @@ struct ApproveSourceRequest {
 #[derive(Serialize, Deserialize)]
 struct ApproveSourceResponse {
     event_id: String,
+}
+
+#[derive(Deserialize)]
+struct RemoveSourceRequest {
+    source_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -779,8 +915,23 @@ async fn handle_ask(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let fts_query = to_fts5_query(&req.question);
-    let context_hits =
-        search::search_all(&conn, &fts_query, 10).map_err(|e| ApiError::internal(e.to_string()))?;
+    let search_limit = 100; // More documents for trends, summaries, cross-doc analysis
+    let mut context_hits = search::search_all(&conn, &fts_query, search_limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Fallback: for broad questions (summarize, trends, all docs) with no/few hits, retry with wider match
+    let lower_q = req.question.to_lowercase();
+    let is_broad_request = lower_q.contains("summarize") || lower_q.contains("trends")
+        || lower_q.contains("across all") || lower_q.contains("all documents")
+        || (lower_q.contains("document") && (lower_q.contains("list") || lower_q.contains("show")));
+    if context_hits.len() < 3 && is_broad_request {
+        if let Ok(fallback_hits) = search::search_all(&conn, "document OR file OR content", search_limit)
+        {
+            if !fallback_hits.is_empty() {
+                context_hits = fallback_hits;
+            }
+        }
+    }
 
     let mut web_search_context = String::new();
     let do_web_search = wants_web_search(&req.question)
@@ -812,13 +963,8 @@ async fn handle_ask(
         }
     }
 
-    let context_bullets: Vec<String> = context_hits
-        .iter()
-        .map(|h| {
-            let preview: String = h.summary.chars().take(300).collect();
-            format!("- [{}] {}: {}", h.hit_type, h.title, preview)
-        })
-        .collect();
+    let context_bullets: Vec<String> =
+        build_context_bullets(&context_hits, &state.cas, &req.question);
 
     let prompt = if !web_search_context.is_empty() {
         let kb = if context_bullets.is_empty() {
@@ -856,7 +1002,7 @@ async fn handle_ask(
     let gen_req = node_ai::GenerateRequest {
         prompt,
         system: Some(system_prompt.into()),
-        max_tokens: req.max_tokens.unwrap_or(1024),
+        max_tokens: req.max_tokens.unwrap_or(2048), // Higher for document summaries and trend analysis
         ..Default::default()
     };
 
@@ -951,10 +1097,11 @@ const MESHMIND_SYSTEM_PROMPT: &str = "\
 You are MeshMind, a local-first AI assistant running on the user's own machine. \
 You have access to the user's local knowledge base and can also search the web when the user asks. \
 When web search results are provided, use them to answer the question. \
-When knowledge base context is provided, use it ONLY if it directly answers the user's question. \
-If the context is unrelated (e.g. a document about a different topic that happened to match a keyword), \
-ignore it and say you don't have relevant information — do NOT reference unrelated documents. \
-Never say you cannot access the user's files — you CAN, through the knowledge base. \
+When knowledge base context is provided, use it to answer — you receive document titles and full or excerpted content. \
+Use the FULL content when provided: synthesize trends across documents, summarize, compare, and extract specific information. \
+For document-specific questions (e.g. 'what does X say about Y'), base your answer on the full document content given. \
+If the context is unrelated to the question, say so — do NOT reference unrelated documents. \
+Never say you cannot access or read the user's files — you CAN, through the knowledge base. \
 If no relevant context was found, say so and suggest they scan more sources or ask you to search the web. \
 When conversation history is provided, use it to maintain continuity and give contextual follow-up answers.";
 
@@ -1139,15 +1286,8 @@ async fn handle_send_message(
 
     // 3. RAG search on knowledge base
     let fts_query = to_fts5_query(&req.content);
-    let context_hits = search::search_all(&conn, &fts_query, 10).unwrap_or_default();
-
-    let context_bullets: Vec<String> = context_hits
-        .iter()
-        .map(|h| {
-            let preview: String = h.summary.chars().take(300).collect();
-            format!("- [{}] {}: {}", h.hit_type, h.title, preview)
-        })
-        .collect();
+    let context_hits = search::search_all(&conn, &fts_query, 100).unwrap_or_default();
+    let context_bullets = build_context_bullets(&context_hits, &state.cas, &req.content);
 
     // 4. Cross-session search (past assistant answers from OTHER conversations)
     let cross_session: Vec<String> = conn
@@ -1363,7 +1503,7 @@ async fn handle_send_message_stream(
     let context_hits = if is_follow_up && fts_query_text.trim().len() < 10 {
         Vec::new()
     } else {
-        search::search_all(&conn, &fts_query, 10).unwrap_or_default()
+        search::search_all(&conn, &fts_query, 100).unwrap_or_default()
     };
 
     let mut web_search_context = String::new();
@@ -1396,13 +1536,8 @@ async fn handle_send_message_stream(
         }
     }
 
-    let context_bullets: Vec<String> = context_hits
-        .iter()
-        .map(|h| {
-            let preview: String = h.summary.chars().take(300).collect();
-            format!("- [{}] {}: {}", h.hit_type, h.title, preview)
-        })
-        .collect();
+    let context_bullets: Vec<String> =
+        build_context_bullets(&context_hits, &state.cas, &req.content);
 
     let cross_session: Vec<String> = conn
         .prepare(
@@ -1685,15 +1820,24 @@ async fn handle_admin_sources(
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    // Get latest ingest per source (by completed_at_ms or started_at_ms)
     let mut stmt = conn
         .prepare(
-            "SELECT source_id, display_name, connector_type, status, pii_detected, estimated_size_bytes
-             FROM sources_view
-             ORDER BY source_id",
+            "WITH latest_ingest AS (
+                SELECT source_id, status, rows_ingested,
+                       ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY COALESCE(completed_at_ms, 0) DESC, started_at_ms DESC) AS rn
+                FROM ingests_view
+            )
+            SELECT sv.source_id, sv.display_name, sv.connector_type, sv.status, sv.pii_detected, sv.estimated_size_bytes,
+                   li.status AS last_ingest_status, li.rows_ingested AS last_ingest_rows, sv.path_or_uri
+            FROM sources_view sv
+            LEFT JOIN (SELECT source_id, status, rows_ingested FROM latest_ingest WHERE rn = 1) li ON sv.source_id = li.source_id
+            WHERE sv.status != 'removed'
+            ORDER BY sv.source_id",
         )
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let rows = stmt
+    let rows: Vec<SourceRow> = stmt
         .query_map([], |row| {
             Ok(SourceRow {
                 source_id: row.get(0)?,
@@ -1702,6 +1846,9 @@ async fn handle_admin_sources(
                 status: row.get(3)?,
                 pii_detected: row.get::<_, i32>(4)? != 0,
                 estimated_size_bytes: row.get(5)?,
+                last_ingest_status: row.get::<_, Option<String>>(6).ok().flatten(),
+                last_ingest_rows: row.get::<_, Option<i64>>(7).ok().flatten(),
+                path_or_uri: row.get(8)?,
             })
         })
         .map_err(|e| ApiError::internal(e.to_string()))?
@@ -1740,6 +1887,44 @@ async fn handle_admin_approve_source(
                 row_limit: req.row_limit,
             },
         )),
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(ApproveSourceResponse { event_id }))
+}
+
+async fn handle_admin_remove_source(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RemoveSourceRequest>,
+) -> Result<Json<ApproveSourceResponse>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let event_id = format!("evt-remove-{}", uuid::Uuid::new_v4());
+
+    let event = EventEnvelope {
+        event_id: event_id.clone(),
+        r#type: EventType::DataSourceRemoved as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
+            source_id: req.source_id,
+        })),
         ..Default::default()
     };
 

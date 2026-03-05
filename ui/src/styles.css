@@ -876,6 +876,151 @@ textarea {
   border-top: 1px solid var(--border);
 }
 
+/* Sources tree */
+.sources-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.sources-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.sources-tree-header {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr) 80px 180px;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.sources-tree-body {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.sources-tree-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 20px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition);
+  user-select: none;
+}
+
+.sources-tree-folder:hover {
+  background: var(--bg-hover);
+}
+
+.sources-tree-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.sources-tree-toggle:hover {
+  color: var(--text-primary);
+}
+
+.sources-tree-folder-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.sources-tree-folder-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.sources-tree-folder-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.sources-tree-folder-children {
+  /* Children container - toggled via JS */
+}
+
+.sources-tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr) 80px 180px;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 20px;
+  font-size: 13px;
+  transition: background var(--transition);
+}
+
+.sources-tree-row:hover {
+  background: var(--bg-hover);
+}
+
+.sources-tree-row-name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sources-tree-row-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.sources-tree-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.sources-tree-row-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.sources-tree-row-size {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sources-tree-row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sources-tree-row-actions .btn {
+  white-space: nowrap;
+}
+
 /* Keyframes */
 @keyframes fadeIn {
   from { opacity: 0; }

@@ -287,6 +287,12 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::DataSourceRemoved(r) => {
+                conn.execute(
+                    "UPDATE sources_view SET status = 'removed' WHERE source_id = ?1",
+                    params![r.source_id],
+                )?;
+            }
             Payload::IngestStarted(i) => {
                 conn.execute(
                     "INSERT OR REPLACE INTO ingests_view
@@ -444,6 +450,7 @@ fn event_summary(event: &EventEnvelope) -> String {
         Some(Payload::DataSourceClassified(c)) => {
             format!("data source classified: {}", c.source_id)
         }
+        Some(Payload::DataSourceRemoved(r)) => format!("data source removed: {}", r.source_id),
         Some(Payload::DataSourceApproved(a)) => {
             format!("data source approved: {}", a.source_id)
         }

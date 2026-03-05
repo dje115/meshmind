@@ -40,6 +40,8 @@ export const api = {
   getSources: () => request('GET', '/admin/sources'),
   approveSource: (sourceId, allowedTables = [], rowLimit = 0) =>
     request('POST', '/admin/sources/approve', { source_id: sourceId, allowed_tables: allowedTables, row_limit: rowLimit }),
+  removeSource: (sourceId) =>
+    request('POST', '/admin/sources/remove', { source_id: sourceId }),
   train: (target, datasetPreset) =>
     request('POST', '/admin/train', { target, dataset_preset: datasetPreset }),
   getModels: () => request('GET', '/admin/models'),

@@ -462,23 +462,22 @@ async fn main() -> Result<()> {
 
     let peer_dir = Arc::new(RwLock::new(PeerDirectory::new()));
 
-    let data_path = std::path::Path::new(&config.data_dir).to_path_buf();
-    let mut scan_dirs = vec![
-        data_path.clone(),
-        std::path::PathBuf::from("seed"),
-        std::path::PathBuf::from("seed/public"),
-        std::path::PathBuf::from("seed/public/cases"),
-        std::path::PathBuf::from("seed/public/runbooks"),
-    ];
-
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        let home = std::path::PathBuf::from(home);
-        for subdir in &["Documents", "Pictures", "Desktop", "Downloads", "OneDrive"] {
-            let p = home.join(subdir);
-            if p.is_dir() {
-                scan_dirs.push(p);
+    // Single scan folder and all subfolders (already ingested data remains in the knowledge base)
+    fn collect_subdirs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    out.push(p.clone());
+                    collect_subdirs(&p, out);
+                }
             }
         }
+    }
+    let meshtest_root = std::path::PathBuf::from(r"C:\Users\david\Documents\Meshtest");
+    let mut scan_dirs = vec![meshtest_root.clone()];
+    if meshtest_root.is_dir() {
+        collect_subdirs(&meshtest_root, &mut scan_dirs);
     }
 
     // Training subsystem: policy allows training, model registry shared with trainer

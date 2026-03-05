@@ -24,6 +24,7 @@ pub struct ArtifactHit {
     pub artifact_id: String,
     pub title: String,
     pub summary: String,
+    pub content_hash: Option<String>,
     pub rank: f64,
 }
 
@@ -33,6 +34,7 @@ pub struct SearchHit {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub content_hash: Option<String>,
     pub rank: f64,
 }
 
@@ -62,9 +64,12 @@ pub fn search_cases(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
 }
 
 /// Search artifacts by FTS5 query.
+/// Returns content_hash so callers can fetch full content from CAS.
 pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<ArtifactHit>> {
     let mut stmt = conn.prepare(
-        "SELECT artifact_id, title, summary, rank
+        "SELECT artifacts_fts.artifact_id, artifacts_fts.title, artifacts_fts.summary,
+                (SELECT content_hash FROM artifacts_view av WHERE av.artifact_id = artifacts_fts.artifact_id ORDER BY av.version DESC LIMIT 1) AS content_hash,
+                rank
          FROM artifacts_fts
          WHERE artifacts_fts MATCH ?1
          ORDER BY rank
@@ -77,7 +82,8 @@ pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<
                 artifact_id: row.get(0)?,
                 title: row.get(1)?,
                 summary: row.get(2)?,
-                rank: row.get(3)?,
+                content_hash: row.get(3).ok().flatten(),
+                rank: row.get(4)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -99,6 +105,7 @@ pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
             id: c.case_id,
             title: c.title,
             summary: c.summary,
+            content_hash: None,
             rank: c.rank,
         });
     }
@@ -108,6 +115,7 @@ pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
             id: a.artifact_id,
             title: a.title,
             summary: a.summary,
+            content_hash: a.content_hash,
             rank: a.rank,
         });
     }
