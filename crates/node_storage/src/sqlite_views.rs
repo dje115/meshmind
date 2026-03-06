@@ -132,7 +132,8 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             allow_raw_retention INTEGER NOT NULL DEFAULT 0,
             allow_training  INTEGER NOT NULL DEFAULT 0,
             max_sensitivity INTEGER NOT NULL DEFAULT 2,
-            redaction_policy_json TEXT NOT NULL DEFAULT '{}'
+            redaction_policy_json TEXT NOT NULL DEFAULT '{}',
+            mapping_rules_json   TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE TABLE IF NOT EXISTS ingests_view (
@@ -263,6 +264,7 @@ pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     migrate_artifacts_summary(&conn)?;
+    migrate_source_profiles_mapping(&conn)?;
     create_schema(&conn)?;
     Ok(conn)
 }
@@ -285,6 +287,41 @@ fn migrate_artifacts_summary(conn: &Connection) -> Result<()> {
         let _ = conn.execute_batch(
             "ALTER TABLE artifacts_view ADD COLUMN summary TEXT NOT NULL DEFAULT '';
              DROP TABLE IF EXISTS artifacts_fts;",
+        );
+    }
+    Ok(())
+}
+
+/// Migrate source_profiles_view: add mapping_rules_json if missing.
+fn migrate_source_profiles_mapping(conn: &Connection) -> Result<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_profiles_view'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|_| true)
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_mapping: bool = conn
+        .prepare("PRAGMA table_info(source_profiles_view)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(names.contains(&"mapping_rules_json".to_string()))
+        })
+        .unwrap_or(false);
+
+    if !has_mapping {
+        let _ = conn.execute(
+            "ALTER TABLE source_profiles_view ADD COLUMN mapping_rules_json TEXT NOT NULL DEFAULT '{}'",
+            [],
         );
     }
     Ok(())

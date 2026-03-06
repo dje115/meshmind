@@ -98,6 +98,34 @@ Admin approves a source with a `SourceProfile` (or defaults). Emits `DATA_SOURCE
 - `allow_training`: Whether data can be used for training
 - `max_sensitivity`
 - `redaction_policy_json`
+- `mapping_rules_json`: Per-table mapping hints (see Mapping rules below)
+
+### Mapping Rules
+
+`mapping_rules_json` format:
+
+```json
+{
+  "tables": {
+    "invoices": {
+      "entity_type": "invoice",
+      "entity_key_col": "invoice_id",
+      "timestamp_col": "created_at",
+      "include_cols": ["invoice_id", "customer_id", "amount", "due_date"],
+      "exclude_cols": ["internal_notes"]
+    },
+    "customers": {
+      "entity_type": "customer",
+      "entity_key_col": "id"
+    }
+  }
+}
+```
+
+- `entity_type`: Override inferred entity type (e.g. customer, invoice).
+- `entity_key_col`: Column to use as entity_key (stable business ID).
+- `timestamp_col`: Column for time-window facts (optional).
+- `include_cols` / `exclude_cols`: Column filter (optional). If absent, all columns are used.
 
 **Projection**: `sources_view` (status = `approved`), `source_profiles_view`
 

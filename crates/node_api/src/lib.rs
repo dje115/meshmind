@@ -298,25 +298,30 @@ fn to_fts5_query(text: &str) -> String {
 /// Build context bullets for the LLM prompt. For artifacts with content_hash, fetches
 /// full content from CAS. Uses adaptive sizing: document-specific questions get full
 /// content for referenced docs; broad/trend questions get generous excerpts per doc.
-const CONTEXT_CONTENT_DEFAULT_CHARS: usize = 8000;  // Per-doc for broad queries (trends, summarize)
-const CONTEXT_CONTENT_DOC_SPECIFIC_CHARS: usize = 60_000;  // Full doc when question targets it
+const CONTEXT_CONTENT_DEFAULT_CHARS: usize = 8000; // Per-doc for broad queries (trends, summarize)
+const CONTEXT_CONTENT_DOC_SPECIFIC_CHARS: usize = 60_000; // Full doc when question targets it
 const CONTEXT_SUMMARY_MAX_CHARS: usize = 500;
-const CONTEXT_TOTAL_BUDGET_CHARS: usize = 95_000;  // Stay under ~100K for LLM context
+const CONTEXT_TOTAL_BUDGET_CHARS: usize = 95_000; // Stay under ~100K for LLM context
 
 /// True if the question asks about a specific document (e.g. "read IT3000.docx", "content of this doc").
 fn looks_like_document_specific_question(question: &str) -> bool {
     let lower = question.to_lowercase();
     // Explicit document requests
-    if lower.contains("read the content") || lower.contains("read the document")
-        || lower.contains("contents of this") || lower.contains("content of this")
+    if lower.contains("read the content")
+        || lower.contains("read the document")
+        || lower.contains("contents of this")
+        || lower.contains("content of this")
         || (lower.contains("what does ") && (lower.contains("say") || lower.contains("contain")))
-        || lower.contains("in this document") || lower.contains("in that document")
+        || lower.contains("in this document")
+        || lower.contains("in that document")
     {
         return true;
     }
     // Filename patterns (e.g. "IT3000", "report.docx", "invoice.pdf")
-    let has_doc_extension = lower.contains(".docx") || lower.contains(".pdf")
-        || lower.contains(".txt") || lower.contains(".md");
+    let has_doc_extension = lower.contains(".docx")
+        || lower.contains(".pdf")
+        || lower.contains(".txt")
+        || lower.contains(".md");
     let has_quoted_filename = (lower.contains('"') || lower.contains('\''))
         && (lower.contains('.') || question.chars().filter(|c| c.is_alphanumeric()).count() > 5);
     has_doc_extension || has_quoted_filename
@@ -331,8 +336,7 @@ fn extract_document_refs_from_question(question: &str) -> Vec<String> {
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '_' || *c == '-')
             .collect();
-        if clean.len() >= 3 && (clean.contains('.') || clean.chars().all(|c| c.is_alphanumeric()))
-        {
+        if clean.len() >= 3 && (clean.contains('.') || clean.chars().all(|c| c.is_alphanumeric())) {
             refs.push(clean.to_lowercase());
         }
     }
@@ -441,7 +445,9 @@ pub struct AppState {
     pub admin_token: String,
     /// If false, /status omits admin_token.
     pub expose_admin_token: bool,
-    pub scan_dirs: Vec<std::path::PathBuf>,
+    /// Root folders to scan (user-configurable, persisted to scan_roots_path).
+    pub scan_roots: Arc<tokio::sync::RwLock<Vec<std::path::PathBuf>>>,
+    pub scan_roots_path: std::path::PathBuf,
     pub trainer: Arc<Trainer>,
     pub model_registry: Arc<tokio::sync::Mutex<ModelRegistry>>,
     pub ui_dir: Option<std::path::PathBuf>,
@@ -531,6 +537,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/admin/research", post(handle_admin_research))
         .route("/admin/scan", post(handle_admin_scan))
+        .route("/admin/scan-dirs", get(handle_admin_scan_dirs_get))
+        .route("/admin/scan-dirs/add", post(handle_admin_scan_dirs_add))
+        .route(
+            "/admin/scan-dirs/remove",
+            post(handle_admin_scan_dirs_remove),
+        )
         .route("/admin/ingest", post(handle_admin_ingest))
         .route("/admin/sources/approve-all", post(handle_admin_approve_all))
         .route("/admin/ingest-all", post(handle_admin_ingest_all))
@@ -677,6 +689,8 @@ struct StatusResponse {
     peer_count: usize,
     backend: String,
     admin_token: String,
+    #[serde(default)]
+    scan_dirs: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -855,6 +869,13 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRespons
     } else {
         String::new()
     };
+    let scan_dirs: Vec<String> = state
+        .scan_roots
+        .read()
+        .await
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
 
     Json(StatusResponse {
         node_id: state.node_id.clone(),
@@ -863,6 +884,7 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRespons
         peer_count,
         backend: state.backend.name().to_string(),
         admin_token,
+        scan_dirs,
     })
 }
 
@@ -921,11 +943,14 @@ async fn handle_ask(
 
     // Fallback: for broad questions (summarize, trends, all docs) with no/few hits, retry with wider match
     let lower_q = req.question.to_lowercase();
-    let is_broad_request = lower_q.contains("summarize") || lower_q.contains("trends")
-        || lower_q.contains("across all") || lower_q.contains("all documents")
+    let is_broad_request = lower_q.contains("summarize")
+        || lower_q.contains("trends")
+        || lower_q.contains("across all")
+        || lower_q.contains("all documents")
         || (lower_q.contains("document") && (lower_q.contains("list") || lower_q.contains("show")));
     if context_hits.len() < 3 && is_broad_request {
-        if let Ok(fallback_hits) = search::search_all(&conn, "document OR file OR content", search_limit)
+        if let Ok(fallback_hits) =
+            search::search_all(&conn, "document OR file OR content", search_limit)
         {
             if !fallback_hits.is_empty() {
                 context_hits = fallback_hits;
@@ -1922,9 +1947,11 @@ async fn handle_admin_remove_source(
             value: "public".into(),
         }),
         sensitivity: Sensitivity::Public as i32,
-        payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
-            source_id: req.source_id,
-        })),
+        payload: Some(event_envelope::Payload::DataSourceRemoved(
+            DataSourceRemoved {
+                source_id: req.source_id,
+            },
+        )),
         ..Default::default()
     };
 
@@ -2011,11 +2038,34 @@ async fn handle_admin_research(
     }))
 }
 
+fn expand_scan_roots(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        out.push(dir.to_path_buf());
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    collect(&p, out);
+                }
+            }
+        }
+    }
+    for root in roots {
+        if root.is_dir() {
+            collect(root, &mut out);
+        }
+    }
+    out
+}
+
 async fn handle_admin_scan(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ScanResponse>, ApiError> {
+    let roots = state.scan_roots.read().await.clone();
+    let scan_dirs = expand_scan_roots(&roots);
     let config = DiscoveryConfig {
-        scan_dirs: state.scan_dirs.clone(),
+        scan_dirs: scan_dirs.clone(),
         scan_sqlite: true,
         scan_csv: true,
         scan_json: true,
@@ -2048,11 +2098,107 @@ async fn handle_admin_scan(
         });
     }
 
-    tracing::info!(dirs = ?state.scan_dirs, found = all_sources.len(), "source scan completed");
+    tracing::info!(dirs = ?roots, found = all_sources.len(), "source scan completed");
 
     Ok(Json(ScanResponse {
         sources_found: all_sources.len(),
         sources: result_sources,
+    }))
+}
+
+#[derive(Serialize)]
+struct ScanDirsResponse {
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ScanDirsAddRequest {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct ScanDirsRemoveRequest {
+    path: String,
+}
+
+async fn handle_admin_scan_dirs_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ScanDirsResponse>, ApiError> {
+    let paths: Vec<String> = state
+        .scan_roots
+        .read()
+        .await
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Ok(Json(ScanDirsResponse { paths }))
+}
+
+async fn handle_admin_scan_dirs_add(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ScanDirsAddRequest>,
+) -> Result<Json<ScanDirsResponse>, ApiError> {
+    let path = std::path::PathBuf::from(req.path.trim());
+    if path.as_os_str().is_empty() {
+        return Err(ApiError::bad_request("path cannot be empty"));
+    }
+    let canonical = path.canonicalize().map_err(|e| {
+        ApiError::bad_request(format!("path does not exist or is not accessible: {e}"))
+    })?;
+    if !canonical.is_dir() {
+        return Err(ApiError::bad_request("path is not a directory"));
+    }
+    let mut roots = state.scan_roots.write().await;
+    let s = canonical.to_string_lossy();
+    if roots.iter().any(|r| r.to_string_lossy() == s) {
+        return Ok(Json(ScanDirsResponse {
+            paths: roots
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        }));
+    }
+    roots.push(canonical);
+    // Persist
+    if let Ok(json) = serde_json::to_string_pretty(
+        &roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    ) {
+        let _ = std::fs::write(&state.scan_roots_path, json);
+    }
+    Ok(Json(ScanDirsResponse {
+        paths: roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+    }))
+}
+
+async fn handle_admin_scan_dirs_remove(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ScanDirsRemoveRequest>,
+) -> Result<Json<ScanDirsResponse>, ApiError> {
+    let path = std::path::PathBuf::from(req.path.trim());
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let key = canonical.to_string_lossy();
+    let mut roots = state.scan_roots.write().await;
+    roots.retain(|r| r.to_string_lossy() != key);
+    // Persist
+    if let Ok(json) = serde_json::to_string_pretty(
+        &roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    ) {
+        let _ = std::fs::write(&state.scan_roots_path, json);
+    }
+    Ok(Json(ScanDirsResponse {
+        paths: roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
     }))
 }
 
@@ -2125,6 +2271,20 @@ async fn handle_admin_ingest(
         connector_type: connector_str.to_string(),
     };
 
+    let mapping_json: String = conn
+        .query_row(
+            "SELECT mapping_rules_json FROM source_profiles_view WHERE source_id = ?1",
+            [&req.source_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "{}".to_string());
+
+    let mapping_hints = if mapping_json.is_empty() || mapping_json == "{}" {
+        None
+    } else {
+        Some(node_ingest::parse_mapping_hints(&mapping_json))
+    };
+
     let config = IngestConfig::default();
     let node_id = state.node_id.clone();
     let db_path = state.db_path.clone();
@@ -2141,6 +2301,7 @@ async fn handle_admin_ingest(
         &mut log,
         &db_path,
         &node_id,
+        mapping_hints.as_ref(),
     )
     .map_err(|e| {
         (
@@ -2331,7 +2492,11 @@ async fn handle_oauth_onedrive_callback(
     let redirect_base = format!("{}/", base);
     if let Some(err) = q.error {
         let desc = q.error_description.as_deref().unwrap_or(&err);
-        let redirect = format!("{}?onedrive_error={}#settings", redirect_base, urlencoding::encode(desc));
+        let redirect = format!(
+            "{}?onedrive_error={}#settings",
+            redirect_base,
+            urlencoding::encode(desc)
+        );
         return Ok(axum::response::Redirect::temporary(&redirect));
     }
     let code = q
@@ -2639,6 +2804,23 @@ async fn handle_admin_ingest_all(
         let db_path = state.db_path.clone();
 
         let mut log = state.event_log.write().await;
+        let mapping_json: String = rusqlite::Connection::open(&state.db_path)
+            .ok()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT mapping_rules_json FROM source_profiles_view WHERE source_id = ?1",
+                    [source_id],
+                    |row| row.get(0),
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| "{}".to_string());
+        let mapping_hints = if mapping_json.is_empty() || mapping_json == "{}" {
+            None
+        } else {
+            Some(node_ingest::parse_mapping_hints(&mapping_json))
+        };
+
         match node_ingest::run_ingest(
             &job,
             connector.as_ref(),
@@ -2649,6 +2831,7 @@ async fn handle_admin_ingest_all(
             &mut log,
             &db_path,
             &node_id,
+            mapping_hints.as_ref(),
         ) {
             Ok(result) => {
                 total_rows += result.rows_ingested;
@@ -3328,7 +3511,7 @@ mod tests {
             event_log: RwLock::new(event_log),
             cas,
             db_path,
-            data_dir,
+            data_dir: data_dir.clone(),
             peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
             backend: Arc::new(MockBackend::new()),
             transport: None,
@@ -3336,7 +3519,8 @@ mod tests {
             node_id: "test-node-001".into(),
             admin_token: "test-token".into(),
             expose_admin_token: true,
-            scan_dirs: vec![],
+            scan_roots: Arc::new(tokio::sync::RwLock::new(vec![])),
+            scan_roots_path: data_dir.join("scan_roots.json"),
             trainer,
             model_registry,
             ui_dir: None,
@@ -3633,7 +3817,7 @@ mod tests {
             event_log: RwLock::new(event_log),
             cas,
             db_path,
-            data_dir,
+            data_dir: data_dir.clone(),
             peer_dir: Arc::new(RwLock::new(PeerDirectory::new())),
             backend: Arc::new(MockBackend::new()),
             transport: None,
@@ -3641,7 +3825,8 @@ mod tests {
             node_id: "test-node".into(),
             admin_token: "test-token".into(),
             expose_admin_token: true,
-            scan_dirs: vec![],
+            scan_roots: Arc::new(tokio::sync::RwLock::new(vec![])),
+            scan_roots_path: data_dir.join("scan_roots.json"),
             trainer,
             model_registry,
             ui_dir: None,

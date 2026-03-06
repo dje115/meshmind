@@ -331,8 +331,8 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                 conn.execute(
                     "INSERT OR REPLACE INTO source_profiles_view
                      (profile_id, source_id, approved_by, approved_at_ms,
-                      profile_hash, allowed_tables_json, row_limit)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                      profile_hash, allowed_tables_json, row_limit, mapping_rules_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}')",
                     params![
                         format!("prof-{}", a.source_id),
                         a.source_id,

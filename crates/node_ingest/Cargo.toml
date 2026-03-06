@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 node_proto = { workspace = true }
 node_storage = { workspace = true }
+rusqlite = { workspace = true }
 node_policy = { workspace = true }
 node_connectors = { path = "../node_connectors" }
 tokio = { workspace = true }

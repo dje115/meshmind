@@ -60,6 +60,7 @@ fn document_ingest_and_search_invoices() {
         &mut event_log,
         &db_path,
         "test-node",
+        None,
     )
     .unwrap();
 
