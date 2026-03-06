@@ -257,6 +257,7 @@ pub fn run_ingest(
                             shareable: false,
                             expires_unix_ms: 0,
                             summary,
+                            ..Default::default()
                         },
                     )),
                     ..Default::default()

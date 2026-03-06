@@ -249,6 +249,7 @@ mod tests {
                         }),
                         shareable: true,
                         expires_unix_ms: 0,
+                        ..Default::default()
                     },
                 )),
                 ..Default::default()

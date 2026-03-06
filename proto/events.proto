@@ -125,6 +125,18 @@ message ArtifactPublished {
   bool shareable = 6;
   int64 expires_unix_ms = 7;
   string summary = 8;
+  // Document metadata (for DOCUMENT artifact_type)
+  string document_subtype = 9;  // entity_card, fact_record, runbook, case
+  string entity_type = 10;      // customer, invoice, order, etc.
+  string entity_key = 11;       // stable identifier
+  string source_ref = 12;       // source_id
+  string table_name = 13;       // source table name
+  // Fact metadata (for FACT artifact_type)
+  string metric = 14;           // e.g. row_count, sum_amount
+  string value_json = 15;       // JSON value
+  string dimensions_json = 16;  // e.g. {"table":"invoices"}
+  string time_window = 17;      // e.g. 2025-Q1, 2025-03
+  string ingest_id = 18;        // ingest run that produced this fact
 }
 message ArtifactDeprecated { string artifact_id = 1; uint32 version = 2; string reason = 3; }
 

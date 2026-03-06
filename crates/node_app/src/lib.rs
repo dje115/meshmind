@@ -125,6 +125,7 @@ pub fn load_seed_data(
                         content_ref: Some(content_ref),
                         shareable: true,
                         expires_unix_ms: 0,
+                        ..Default::default()
                     },
                 )),
                 tags: runbook.tags,

@@ -117,6 +117,63 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
                 update_artifacts_fts(conn, &ap.artifact_id, ap.version)?;
+                // Populate documents_view for DOCUMENT type; facts_view for FACT type
+                const ARTIFACT_TYPE_DOCUMENT: i32 = 6;
+                const ARTIFACT_TYPE_FACT: i32 = 7;
+                if ap.artifact_type == ARTIFACT_TYPE_DOCUMENT {
+                    let doc_type = if ap.document_subtype.is_empty() {
+                        "entity_card"
+                    } else {
+                        &ap.document_subtype
+                    };
+                    conn.execute(
+                        "INSERT OR REPLACE INTO documents_view
+                         (document_id, version, document_type, entity_type, entity_key,
+                          content_hash, source_id, table_name, title, summary, created_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            ap.artifact_id,
+                            ap.version,
+                            doc_type,
+                            ap.entity_type,
+                            ap.entity_key,
+                            ap.content_ref.as_ref().map(|h| &h.sha256),
+                            ap.source_ref,
+                            ap.table_name,
+                            ap.title,
+                            ap.summary,
+                            ts,
+                        ],
+                    )?;
+                }
+                if ap.artifact_type == ARTIFACT_TYPE_FACT && !ap.metric.is_empty() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO facts_view
+                         (fact_id, version, source_id, ingest_id, metric,
+                          dimensions_json, value_json, time_window, content_hash, created_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![
+                            ap.artifact_id,
+                            ap.version,
+                            ap.source_ref,
+                            ap.ingest_id,
+                            ap.metric,
+                            if ap.dimensions_json.is_empty() {
+                                "{}"
+                            } else {
+                                &ap.dimensions_json
+                            },
+                            if ap.value_json.is_empty() {
+                                "{}"
+                            } else {
+                                &ap.value_json
+                            },
+                            ap.time_window,
+                            ap.content_ref.as_ref().map(|h| &h.sha256),
+                            ts,
+                        ],
+                    )?;
+                }
             }
             Payload::ArtifactDeprecated(ad) => {
                 conn.execute(
@@ -661,6 +718,7 @@ mod tests {
                     }),
                     shareable: true,
                     expires_unix_ms: 0,
+                    ..Default::default()
                 }),
             ),
         )

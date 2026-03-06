@@ -193,6 +193,37 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             confidence      REAL NOT NULL DEFAULT 0.0,
             created_at_ms   INTEGER NOT NULL
         );
+
+        -- Normalized documents (entity cards, runbooks, etc.) from artifacts
+        CREATE TABLE IF NOT EXISTS documents_view (
+            document_id     TEXT NOT NULL,
+            version         INTEGER NOT NULL,
+            document_type   TEXT NOT NULL DEFAULT 'entity_card',
+            entity_type     TEXT NOT NULL DEFAULT '',
+            entity_key      TEXT NOT NULL DEFAULT '',
+            content_hash    TEXT,
+            source_id       TEXT NOT NULL DEFAULT '',
+            table_name      TEXT NOT NULL DEFAULT '',
+            title           TEXT NOT NULL DEFAULT '',
+            summary         TEXT NOT NULL DEFAULT '',
+            created_at_ms   INTEGER NOT NULL,
+            PRIMARY KEY (document_id, version)
+        );
+
+        -- Fact aggregates (counts, sums, etc.) from ingest runs
+        CREATE TABLE IF NOT EXISTS facts_view (
+            fact_id         TEXT NOT NULL,
+            version         INTEGER NOT NULL,
+            source_id       TEXT NOT NULL DEFAULT '',
+            ingest_id       TEXT NOT NULL DEFAULT '',
+            metric          TEXT NOT NULL DEFAULT '',
+            dimensions_json TEXT NOT NULL DEFAULT '{}',
+            value_json      TEXT NOT NULL DEFAULT '{}',
+            time_window     TEXT NOT NULL DEFAULT '',
+            content_hash    TEXT,
+            created_at_ms   INTEGER NOT NULL,
+            PRIMARY KEY (fact_id, version)
+        );
         ",
     )?;
 
@@ -290,6 +321,8 @@ mod tests {
         assert!(tables.contains(&"federated_view".to_string()));
         assert!(tables.contains(&"conversations_view".to_string()));
         assert!(tables.contains(&"messages_view".to_string()));
+        assert!(tables.contains(&"documents_view".to_string()));
+        assert!(tables.contains(&"facts_view".to_string()));
     }
 
     #[test]

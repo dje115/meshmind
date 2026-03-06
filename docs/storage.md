@@ -130,6 +130,8 @@ Deduplication is automatic: identical content maps to the same hash.
 | `federated_view` | Federated learning rounds |
 | `conversations_view` | Chat conversations |
 | `messages_view` | Chat messages |
+| `documents_view` | Normalized documents (entity cards, runbooks) from artifacts |
+| `facts_view` | Fact aggregates (counts, sums, time-window metrics) from ingest runs |
 
 ### FTS5 Tables
 
