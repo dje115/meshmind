@@ -1,12 +1,19 @@
 const DEFAULT_BASE = 'http://127.0.0.1:9900';
 const API_PREFIX = '/v1';
+// In dev (Vite), use relative URL so proxy works; otherwise use explicit base.
+const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV;
 let baseUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
   ? import.meta.env.VITE_API_BASE_URL
-  : DEFAULT_BASE;
+  : (isDev ? '' : DEFAULT_BASE);
 let adminToken = null;
 
 export function getApiBase() { return baseUrl; }
 export function setApiBase(url) { baseUrl = url || DEFAULT_BASE; }
+
+function getRequestUrl(path) {
+  const base = baseUrl || '';
+  return base ? `${base}${API_PREFIX}${path}` : `${API_PREFIX}${path}`;
+}
 
 async function request(method, path, body) {
   const opts = { method, headers: {} };
@@ -17,16 +24,31 @@ async function request(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${baseUrl}${API_PREFIX}${path}`, opts);
+  const url = getRequestUrl(path);
+  const res = await fetch(url, opts);
+  const contentType = res.headers.get('content-type') || '';
+  const isJson = contentType.includes('application/json');
+
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
-    try {
-      const err = await res.json();
-      if (err && typeof err.error === 'string') message = err.error;
-    } catch (_) {}
+    if (isJson) {
+      try {
+        const err = await res.json();
+        if (err && typeof err.error === 'string') message = err.error;
+      } catch (_) {}
+    } else if (contentType.includes('text/html')) {
+      message = 'Server returned HTML instead of JSON. Is the MeshMind API running on ' + (baseUrl || 'the configured host') + '?';
+    }
     throw new Error(message);
   }
   if (res.status === 204) return null;
+  if (!isJson) {
+    const text = await res.text();
+    if (text.trimStart().startsWith('<')) {
+      throw new Error('Server returned HTML instead of JSON. Is the MeshMind API running?');
+    }
+    throw new Error('Invalid response: expected JSON');
+  }
   return res.json();
 }
 
@@ -51,6 +73,9 @@ export const api = {
   getFederatedStatus: () => request('GET', '/admin/federated/status'),
   getLogs: (n = 50) => request('GET', `/admin/logs?n=${n}`),
   scanSources: () => request('POST', '/admin/scan'),
+  getScanDirs: () => request('GET', '/admin/scan-dirs'),
+  addScanDir: (path) => request('POST', '/admin/scan-dirs/add', { path }),
+  removeScanDir: (path) => request('POST', '/admin/scan-dirs/remove', { path }),
   ingestSource: (sourceId) => request('POST', '/admin/ingest', { source_id: sourceId }),
   approveAll: () => request('POST', '/admin/sources/approve-all'),
   ingestAll: () => request('POST', '/admin/ingest-all'),

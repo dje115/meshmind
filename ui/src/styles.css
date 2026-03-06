@@ -1021,6 +1021,30 @@ textarea {
   white-space: nowrap;
 }
 
+.scan-folder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.scan-folder-row:last-child {
+  border-bottom: none;
+}
+
+.scan-folder-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 /* Keyframes */
 @keyframes fadeIn {
   from { opacity: 0; }

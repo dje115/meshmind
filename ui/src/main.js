@@ -536,10 +536,20 @@ async function renderSources(el) {
     <div class="page-header">
       <h1>Data Sources</h1>
       <p>Discovered data sources and their approval status</p>
-      <div style="display:flex;gap:8px;margin-top:8px">
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
         <button class="btn btn-sm btn-primary" id="btn-approve-all">Approve All</button>
         <button class="btn btn-sm btn-primary" id="btn-ingest-all">Ingest All</button>
       </div>
+    </div>
+    <div id="scan-folders-card" class="card" style="margin-bottom:16px">
+      <div class="card-header" style="margin-bottom:12px">
+        <span class="card-title">Scan folders</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-sm btn-primary" id="btn-add-folder" type="button">+ Add folder</button>
+          <button class="btn btn-sm btn-secondary" id="btn-scan-sources" type="button">Scan</button>
+        </div>
+      </div>
+      <div id="scan-folders-list" style="min-height:36px"><div class="spinner"></div></div>
     </div>
     <div id="sources-content"><div class="empty-state"><div class="spinner"></div></div></div>
   `;
@@ -571,7 +581,72 @@ async function renderSources(el) {
     }
   };
 
+  async function pickFolder() {
+    // Tauri dialog unavailable in web build; use path prompt.
+    return null;
+  }
+
+  async function refreshScanFoldersList() {
+    const listEl = document.getElementById('scan-folders-list');
+    try {
+      const r = await api.getScanDirs();
+      if (r.paths && r.paths.length > 0) {
+        listEl.innerHTML = r.paths.map(p => `
+          <div class="scan-folder-row">
+            <span class="scan-folder-path">${escapeHtml(p)}</span>
+            <button class="btn btn-sm btn-danger" type="button" data-remove-path="${escapeHtml(p)}">Remove</button>
+          </div>
+        `).join('');
+        listEl.querySelectorAll('[data-remove-path]').forEach(btn => {
+          btn.onclick = async () => {
+            try {
+              await api.removeScanDir(btn.dataset.removePath);
+              toast('Folder removed', 'success');
+              await refreshScanFoldersList();
+            } catch (e) {
+              toast(`Error: ${e.message}`, 'error');
+            }
+          };
+        });
+      } else {
+        listEl.innerHTML = '<div class="text-muted" style="font-size:13px;color:var(--text-muted)">No folders added. Click "Add folder" to select directories to scan.</div>';
+      }
+    } catch (e) {
+      listEl.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  document.getElementById('btn-add-folder').onclick = async () => {
+    let path = await pickFolder();
+    if (!path) {
+      path = prompt('Enter folder path (e.g. C:\\Users\\you\\Documents):', '');
+      if (!path || !path.trim()) return;
+    }
+    try {
+      await api.addScanDir(path);
+      toast('Folder added', 'success');
+      await refreshScanFoldersList();
+    } catch (e) {
+      toast(`Error: ${e.message}`, 'error');
+    }
+  };
+
+  document.getElementById('btn-scan-sources').onclick = async () => {
+    const btn = document.getElementById('btn-scan-sources');
+    btn.disabled = true; btn.textContent = 'Scanning...';
+    toast('Scanning folders...', 'info');
+    try {
+      const r = await api.scanSources();
+      toast(`Found ${r.sources_found} source(s)`, 'success');
+      renderSources(el);
+    } catch (e) {
+      toast(`Scan failed: ${e.message}`, 'error');
+    }
+    btn.disabled = false; btn.textContent = 'Scan';
+  };
+
   try {
+    refreshScanFoldersList();
     const sources = await api.getSources();
     const container = document.getElementById('sources-content');
     if (sources.length === 0) {

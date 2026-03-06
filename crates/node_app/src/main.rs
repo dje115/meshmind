@@ -462,23 +462,24 @@ async fn main() -> Result<()> {
 
     let peer_dir = Arc::new(RwLock::new(PeerDirectory::new()));
 
-    // Single scan folder and all subfolders (already ingested data remains in the knowledge base)
-    fn collect_subdirs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    out.push(p.clone());
-                    collect_subdirs(&p, out);
-                }
-            }
+    // Scan roots: load from data/scan_roots.json or default. Expanded with subdirs when scanning.
+    let scan_roots_path = config.data_dir.join("scan_roots.json");
+    let mut scan_roots: Vec<PathBuf> = if scan_roots_path.exists() {
+        if let Ok(bytes) = std::fs::read(&scan_roots_path) {
+            serde_json::from_slice(&bytes).unwrap_or_default()
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+    if scan_roots.is_empty() {
+        let default = PathBuf::from(r"C:\Users\david\Documents\Meshtest");
+        if default.is_dir() {
+            scan_roots = vec![default];
         }
     }
-    let meshtest_root = std::path::PathBuf::from(r"C:\Users\david\Documents\Meshtest");
-    let mut scan_dirs = vec![meshtest_root.clone()];
-    if meshtest_root.is_dir() {
-        collect_subdirs(&meshtest_root, &mut scan_dirs);
-    }
+    let scan_roots = Arc::new(RwLock::new(scan_roots));
 
     // Training subsystem: policy allows training, model registry shared with trainer
     let train_policy = Arc::new(PolicyEngine::new(PolicyConfig {
@@ -510,7 +511,8 @@ async fn main() -> Result<()> {
         node_id: node_id.clone(),
         admin_token: config.admin_token,
         expose_admin_token: config.expose_admin_token,
-        scan_dirs,
+        scan_roots,
+        scan_roots_path,
         trainer,
         model_registry,
         ui_dir: resolve_ui_dir(),

@@ -834,7 +834,10 @@ mod tests {
         let fact_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM facts_view", [], |row| row.get(0))
             .unwrap();
-        assert!(fact_count >= 2, "expect at least row_count + 1 numeric fact");
+        assert!(
+            fact_count >= 2,
+            "expect at least row_count + 1 numeric fact"
+        );
 
         let row_count_facts: i64 = conn
             .query_row(
