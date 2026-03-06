@@ -1,14 +1,26 @@
 const DEFAULT_BASE = 'http://127.0.0.1:9900';
 const API_PREFIX = '/v1';
-// In dev (Vite), use relative URL so proxy works; otherwise use explicit base.
-const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV;
-let baseUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
-  ? import.meta.env.VITE_API_BASE_URL
-  : (isDev ? '' : DEFAULT_BASE);
+// Use relative URL when: (a) Vite dev (proxy), or (b) page is already on API origin (e.g. backend-serving UI)
+function resolveBaseUrl() {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
+    return ''; // Vite dev - proxy forwards /v1
+  }
+  try {
+    const host = typeof window !== 'undefined' ? window.location.host : '';
+    if (host.includes('9900')) return ''; // Same-origin: backend serving UI on :9900
+  } catch (_) {}
+  return DEFAULT_BASE;
+}
+let baseUrl = resolveBaseUrl();
 let adminToken = null;
 
 export function getApiBase() { return baseUrl; }
-export function setApiBase(url) { baseUrl = url || DEFAULT_BASE; }
+export function setApiBase(url) {
+  baseUrl = url || DEFAULT_BASE;
+}
 
 function getRequestUrl(path) {
   const base = baseUrl || '';

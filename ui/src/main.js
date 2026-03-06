@@ -589,12 +589,14 @@ async function renderSources(el) {
   async function refreshScanFoldersList() {
     const listEl = document.getElementById('scan-folders-list');
     try {
-      const r = await api.getScanDirs();
-      if (r.paths && r.paths.length > 0) {
-        listEl.innerHTML = r.paths.map(p => `
+      // Use /status (public) instead of /admin/scan-dirs (requires auth) to avoid HTML/JSON errors
+      const status = await api.getStatus();
+      const paths = status.scan_dirs || [];
+      if (paths.length > 0) {
+        listEl.innerHTML = paths.map(p => `
           <div class="scan-folder-row">
-            <span class="scan-folder-path">${escapeHtml(p)}</span>
-            <button class="btn btn-sm btn-danger" type="button" data-remove-path="${escapeHtml(p)}">Remove</button>
+            <span class="scan-folder-path">${escapeHtml(String(p))}</span>
+            <button class="btn btn-sm btn-danger" type="button" data-remove-path="${escapeHtml(String(p))}">Remove</button>
           </div>
         `).join('');
         listEl.querySelectorAll('[data-remove-path]').forEach(btn => {
@@ -612,7 +614,11 @@ async function renderSources(el) {
         listEl.innerHTML = '<div class="text-muted" style="font-size:13px;color:var(--text-muted)">No folders added. Click "Add folder" to select directories to scan.</div>';
       }
     } catch (e) {
-      listEl.innerHTML = `<div style="color:var(--red);font-size:13px">Failed to load: ${escapeHtml(e.message)}</div>`;
+      listEl.innerHTML = `<div style="font-size:13px">
+        <span style="color:var(--red)">Failed to load: ${escapeHtml(e.message)}</span>
+        <button class="btn btn-sm btn-secondary" type="button" style="margin-left:8px">Retry</button>
+      </div>`;
+      listEl.querySelector('button')?.addEventListener('click', () => refreshScanFoldersList());
     }
   }
 
@@ -654,6 +660,14 @@ async function renderSources(el) {
       return;
     }
 
+    function collectSourcesUnder(node) {
+      let list = [...node.sources];
+      for (const child of node.children.values()) {
+        list = list.concat(collectSourcesUnder(child));
+      }
+      return list;
+    }
+
     // Build folder tree from path_or_uri
     function buildTree(sources) {
       const root = { name: '', children: new Map(), sources: [] };
@@ -690,13 +704,28 @@ async function renderSources(el) {
 
       if (node.name) {
         const id = folderId || `folder-${Math.random().toString(36).slice(2, 9)}`;
+        const underSources = collectSourcesUnder(node);
+        const underIds = underSources.map(s => s.source_id);
+        const totalSize = underSources.reduce((sum, s) => sum + (s.estimated_size_bytes || 0), 0);
+        const idsAttr = underIds.join(',');
+        const folderActions = underIds.length > 0
+          ? `<span class="sources-tree-folder-actions" onclick="event.stopPropagation()">
+              <button class="btn btn-sm btn-primary" type="button" data-action="approve-folder" data-folder-ids="${escapeHtml(idsAttr)}">Approve all</button>
+              <button class="btn btn-sm btn-secondary" type="button" data-action="ingest-folder" data-folder-ids="${escapeHtml(idsAttr)}">Ingest all</button>
+            </span>`
+          : '';
         html += `<div class="sources-tree-folder" data-folder-id="${id}" style="padding-left:${indent}px">
-          <button type="button" class="sources-tree-toggle" aria-expanded="true" title="Collapse folder">
-            <span class="sources-tree-chevron">▾</span>
-          </button>
-          <span class="sources-tree-folder-icon">📁</span>
-          <span class="sources-tree-folder-name">${escapeHtml(node.name)}</span>
-          <span class="sources-tree-folder-count">(${childCount})</span>
+          <div class="sources-tree-folder-name-cell">
+            <button type="button" class="sources-tree-toggle" aria-expanded="true" title="Collapse folder">
+              <span class="sources-tree-chevron">▾</span>
+            </button>
+            <span class="sources-tree-folder-icon">📁</span>
+            <span class="sources-tree-folder-name">${escapeHtml(node.name)}</span>
+            <span class="sources-tree-folder-count">(${childCount})</span>
+          </div>
+          <span class="sources-tree-folder-badges">Folder</span>
+          <span class="sources-tree-folder-size">${formatBytes(totalSize)}</span>
+          ${folderActions}
         </div>`;
         html += `<div class="sources-tree-folder-children" data-folder-children="${id}">`;
       }
@@ -723,7 +752,7 @@ async function renderSources(el) {
       return `
         <div class="sources-tree-row" style="padding-left:${indent + 20}px" data-source-id="${escapeHtml(s.source_id)}">
           <span class="sources-tree-row-name-wrap">
-            <span class="sources-tree-row-icon">📄</span>
+            <span class="sources-tree-row-icon">${connectorIcon(s.connector_type)}</span>
             <span class="sources-tree-row-name">${escapeHtml(s.display_name)}</span>
           </span>
           <span class="sources-tree-row-badges">
@@ -774,6 +803,53 @@ async function renderSources(el) {
     });
 
     container.addEventListener('click', async (e) => {
+      const folderBtn = e.target.closest('[data-action="approve-folder"], [data-action="ingest-folder"]');
+      if (folderBtn) {
+        const ids = (folderBtn.dataset.folderIds || '').split(',').filter(Boolean);
+        if (ids.length === 0) return;
+        if (folderBtn.dataset.action === 'approve-folder') {
+          folderBtn.disabled = true;
+          folderBtn.textContent = 'Approving...';
+          try {
+            let approved = 0;
+            for (const id of ids) {
+              try {
+                await api.approveSource(id);
+                approved++;
+              } catch (_) {}
+            }
+            toast(`Approved ${approved} of ${ids.length} sources`, 'success');
+            renderSources(el);
+          } catch (err) {
+            toast(`Error: ${err.message}`, 'error');
+            folderBtn.disabled = false;
+            folderBtn.textContent = 'Approve all';
+          }
+        } else {
+          folderBtn.disabled = true;
+          folderBtn.textContent = 'Ingesting...';
+          toast('Folder ingestion started...', 'info');
+          try {
+            let ingested = 0, rows = 0, docs = 0;
+            for (const id of ids) {
+              try {
+                const r = await api.ingestSource(id);
+                ingested++;
+                rows += r.rows_ingested || 0;
+                docs += r.documents_created || 0;
+              } catch (_) {}
+            }
+            toast(`Ingested ${ingested} sources: ${rows} rows, ${docs} docs`, 'success');
+            renderSources(el);
+          } catch (err) {
+            toast(`Error: ${err.message}`, 'error');
+          }
+          folderBtn.disabled = false;
+          folderBtn.textContent = 'Ingest all';
+        }
+        return;
+      }
+
       const btn = e.target.closest('[data-action][data-source-id]');
       if (!btn) return;
       const id = btn.dataset.sourceId;
@@ -1289,6 +1365,12 @@ function formatBytes(bytes) {
 function connectorLabel(type) {
   const labels = { 1: 'SQLite', 2: 'CSV', 3: 'JSON', 7: 'Images', 8: 'Documents', 9: 'OneDrive' };
   return labels[type] || `Type ${type}`;
+}
+
+// Folder-type connectors (CsvFolder, JsonFolder, ImageFolder, DocumentFolder, OneDrive) use folder icon
+function connectorIcon(type) {
+  const folderTypes = { 2: 1, 3: 1, 7: 1, 8: 1, 9: 1 };
+  return folderTypes[type] ? '📁' : '📄';
 }
 
 function statusBadge(status) {

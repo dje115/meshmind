@@ -909,14 +909,22 @@ textarea {
 }
 
 .sources-tree-folder {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr) 80px 180px;
+  gap: 16px;
   align-items: center;
-  gap: 8px;
   padding: 6px 20px;
   font-size: 13px;
   cursor: pointer;
   transition: background var(--transition);
   user-select: none;
+}
+
+.sources-tree-folder-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .sources-tree-folder:hover {
@@ -958,6 +966,11 @@ textarea {
   font-size: 11px;
   color: var(--text-muted);
   font-weight: 400;
+}
+
+.sources-tree-folder-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .sources-tree-folder-children {
