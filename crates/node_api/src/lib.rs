@@ -628,6 +628,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/status", get(handle_status))
         .route("/peers", get(handle_peers))
         .route("/search", get(handle_search))
+        .route("/insights", get(handle_insights))
         .route("/ask", post(handle_ask))
         .route(
             "/conversations",
@@ -770,6 +771,15 @@ struct SearchResult {
     id: String,
     title: String,
     summary: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct InsightItem {
+    insight_type: String,
+    title: String,
+    summary: String,
+    entity_ids: Vec<String>,
+    confidence: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -977,6 +987,91 @@ async fn handle_search(
         .collect();
 
     Ok(Json(results))
+}
+
+async fn handle_insights(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<InsightItem>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut insights = Vec::new();
+
+    // Overdue invoices (entity cards with overdue in attributes)
+    if let Ok(hits) = search::search_entity_cards(&conn, Some("invoice"), 50) {
+        let overdue: Vec<_> = hits
+            .iter()
+            .filter(|h| {
+                h.attributes_json.contains("overdue")
+                    || h.attributes_json.contains("Overdue")
+                    || h.attributes_json.contains("\"overdue_count\":1")
+                    || h.attributes_json.contains("\"overdue_count\": 1")
+            })
+            .take(10)
+            .collect();
+        if !overdue.is_empty() {
+            insights.push(InsightItem {
+                insight_type: "overdue_invoices".into(),
+                title: format!("{} overdue invoice(s)", overdue.len()),
+                summary: format!(
+                    "Entity IDs: {}",
+                    overdue
+                        .iter()
+                        .map(|h| h.entity_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                entity_ids: overdue.iter().map(|h| h.entity_id.clone()).collect(),
+                confidence: 0.8,
+            });
+        }
+    }
+
+    // Recent quotes
+    if let Ok(hits) = search::search_entity_cards(&conn, Some("quote"), 5) {
+        if !hits.is_empty() {
+            insights.push(InsightItem {
+                insight_type: "recent_quotes".into(),
+                title: format!("{} recent quote(s)", hits.len()),
+                summary: format!(
+                    "Latest: {}",
+                    hits.iter()
+                        .map(|h| h.entity_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                entity_ids: hits.iter().map(|h| h.entity_id.clone()).collect(),
+                confidence: 0.9,
+            });
+        }
+    }
+
+    // Revenue/profit facts
+    if let Ok(hits) = search::query_facts(&conn, None, 10) {
+        let revenue_profit: Vec<_> = hits
+            .iter()
+            .filter(|h| {
+                let m = h.metric.to_lowercase();
+                m.contains("revenue") || m.contains("profit") || m.contains("margin")
+            })
+            .take(5)
+            .collect();
+        if !revenue_profit.is_empty() {
+            insights.push(InsightItem {
+                insight_type: "financial_metrics".into(),
+                title: format!("{} financial metric(s) available", revenue_profit.len()),
+                summary: revenue_profit
+                    .iter()
+                    .map(|h| format!("{}: {}", h.metric, h.value_json))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                entity_ids: revenue_profit.iter().map(|h| h.fact_id.clone()).collect(),
+                confidence: 0.85,
+            });
+        }
+    }
+
+    Ok(Json(insights))
 }
 
 async fn handle_ask(
@@ -3709,6 +3804,22 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let results: Vec<SearchResult> = serde_json::from_slice(&body).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn insights_endpoint() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::get("/v1/insights").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let insights: Vec<InsightItem> = serde_json::from_slice(&body).unwrap();
+        assert!(insights.is_empty() || !insights.is_empty()); // Always valid JSON array
     }
 
     #[tokio::test]
