@@ -67,7 +67,18 @@ All views rebuild from the event log.
 - **ArtifactPublished** (DOCUMENT, document_subtype=entity_card): Creates entity card. Requires `entity_type`, `entity_key`, and optionally `entity_attributes_json`.
 - **ENTITY_RELATIONSHIP_RECORDED**: Records a relationship between two entities.
 
+## Distributed Memory Integration
+
+Entity cards and relationships participate in the distributed memory fabric:
+
+- **Shards**: Entity-type shards (e.g. `entity_type:customer`) enable targeted peer routing. Subscribe via `POST /v1/shards/subscribe`.
+- **Mergeable state**: Use mergeable tags, counters, and annotations on entities (`object_type: entity`, `object_id: customer:abc-ltd`).
+- **Outcomes**: Quote and case outcomes (QUOTE_ACCEPTED, QUOTE_LOST, CASE_FAILED) feed router/ranking training via `ThisTenantConfirmed` preset.
+
+See [distributed-memory.md](../distributed-memory.md).
+
 ## References
 
 - [docs/ingestion/entity-cards.md](../ingestion/entity-cards.md) — Schema and mapping rules
 - [docs/intelligence/business-intelligence.md](../intelligence/business-intelligence.md) — BI use cases
+- [distributed-memory.md](../distributed-memory.md) — Shards, mergeable state, outcomes

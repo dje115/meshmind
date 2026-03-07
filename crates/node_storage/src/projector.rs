@@ -59,12 +59,68 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
                 update_cases_fts(conn, &cc.case_id)?;
+                // Shard membership: tenant, public if shareable
+                let mut shards = vec![format!("tenant:{}", tenant_id)];
+                if cc.shareable {
+                    shards.push("public".into());
+                }
+                apply_shard_membership(conn, &shards, "case", &cc.case_id, node_id, ts)?;
             }
             Payload::CaseConfirmed(cf) => {
                 conn.execute(
                     "UPDATE cases_view SET outcome = ?1, confidence = ?2, updated_at_ms = ?3
                      WHERE case_id = ?4",
                     params![cf.outcome, cf.confidence, ts, cf.case_id],
+                )?;
+                let outcome_id = format!("out-cc-{}", event.event_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO outcomes_view
+                     (outcome_id, outcome_type, case_id, quote_id, outcome_value, reason, confidence, created_at_ms)
+                     VALUES (?1, 'case_confirmed', ?2, '', ?3, '', ?4, ?5)",
+                    params![outcome_id, cf.case_id, cf.outcome, cf.confidence, ts],
+                )?;
+            }
+            Payload::CaseFailed(cf) => {
+                let outcome_id = format!("out-cf-{}", event.event_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO outcomes_view
+                     (outcome_id, outcome_type, case_id, quote_id, outcome_value, reason, confidence, created_at_ms)
+                     VALUES (?1, 'case_failed', ?2, '', '', ?3, 0, ?4)",
+                    params![outcome_id, cf.case_id, cf.reason, ts],
+                )?;
+            }
+            Payload::QuoteAccepted(qa) => {
+                let outcome_id = format!("out-qa-{}", event.event_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO outcomes_view
+                     (outcome_id, outcome_type, case_id, quote_id, outcome_value, reason, confidence, created_at_ms)
+                     VALUES (?1, 'quote_accepted', ?2, ?3, ?4, '', ?5, ?6)",
+                    params![
+                        outcome_id,
+                        qa.case_id,
+                        qa.quote_id,
+                        qa.value_summary,
+                        qa.confidence,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::QuoteLost(ql) => {
+                let outcome_id = format!("out-ql-{}", event.event_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO outcomes_view
+                     (outcome_id, outcome_type, case_id, quote_id, outcome_value, reason, confidence, created_at_ms)
+                     VALUES (?1, 'quote_lost', ?2, ?3, '', ?4, 0, ?5)",
+                    params![outcome_id, ql.case_id, ql.quote_id, ql.reason, ts],
+                )?;
+            }
+            Payload::QuoteRevised(qr) => {
+                let outcome_id = format!("out-qr-{}", event.event_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO outcomes_view
+                     (outcome_id, outcome_type, case_id, quote_id, outcome_value, reason, confidence, created_at_ms)
+                     VALUES (?1, 'quote_revised', ?2, ?3, '', ?4, 0, ?5)",
+                    params![outcome_id, qr.case_id, qr.quote_id, qr.revision_reason, ts],
                 )?;
             }
             Payload::CaseTagged(ct) => {
@@ -169,6 +225,27 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                         )?;
                     }
                 }
+                // Shard membership: tenant, entity_type, artifact_class, public if shareable
+                let mut shards = vec![format!("tenant:{}", tenant_id)];
+                if ap.shareable {
+                    shards.push("public".into());
+                }
+                if !ap.entity_type.is_empty() {
+                    shards.push(format!("entity_type:{}", ap.entity_type));
+                }
+                let artifact_class = match ap.artifact_type {
+                    1 => "runbook",
+                    2 => "template",
+                    3 => "recipe",
+                    4 => "web_brief",
+                    5 => "model_bundle",
+                    6 => "document",
+                    7 => "fact",
+                    _ => "artifact",
+                };
+                shards.push(format!("artifact_class:{}", artifact_class));
+                apply_shard_membership(conn, &shards, "artifact", &ap.artifact_id, node_id, ts)?;
+
                 if ap.artifact_type == ARTIFACT_TYPE_FACT && !ap.metric.is_empty() {
                     conn.execute(
                         "INSERT OR REPLACE INTO facts_view
@@ -405,6 +482,98 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::ShardSubscriptionAdded(ss) => {
+                let sub_node = ss.node_id.as_ref().map(|n| n.value.as_str()).unwrap_or("");
+                let capability = if ss.capability.is_empty() {
+                    "query"
+                } else {
+                    &ss.capability
+                };
+                let last_seen = if ss.last_seen_ms > 0 {
+                    ss.last_seen_ms
+                } else {
+                    ts
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO shard_subscriptions_view
+                     (shard_key, node_id, capability, last_seen_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![ss.shard_key, sub_node, capability, last_seen],
+                )?;
+            }
+            Payload::MergeableTagUpdated(mt) => {
+                let event_id = event.event_id.as_str();
+                let object_type = if mt.object_type.is_empty() {
+                    "case"
+                } else {
+                    &mt.object_type
+                };
+                let op = if mt.op.is_empty() { "add" } else { &mt.op };
+                conn.execute(
+                    "INSERT OR REPLACE INTO mergeable_tag_events
+                     (event_id, object_type, object_id, tag, op, node_id, ts_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![event_id, object_type, mt.object_id, mt.tag, op, node_id, ts],
+                )?;
+            }
+            Payload::MergeableCounterUpdated(mc) => {
+                let event_id = event.event_id.as_str();
+                let object_type = if mc.object_type.is_empty() {
+                    "case"
+                } else {
+                    &mc.object_type
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO mergeable_counter_deltas
+                     (event_id, object_type, object_id, counter_key, node_id, delta, ts_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        event_id,
+                        object_type,
+                        mc.object_id,
+                        mc.counter_key,
+                        node_id,
+                        mc.delta,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::MergeableAnnotationUpdated(ma) => {
+                let object_type = if ma.object_type.is_empty() {
+                    "case"
+                } else {
+                    &ma.object_type
+                };
+                conn.execute(
+                    "INSERT OR IGNORE INTO mergeable_annotations_view
+                     (object_type, object_id, annotation_key, value, node_id, ts_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        object_type,
+                        ma.object_id,
+                        ma.annotation_key,
+                        ma.value,
+                        node_id,
+                        ts,
+                    ],
+                )?;
+                if conn.changes() == 0 {
+                    conn.execute(
+                        "UPDATE mergeable_annotations_view
+                         SET value = ?1, node_id = ?2, ts_ms = ?3
+                         WHERE object_type = ?4 AND object_id = ?5 AND annotation_key = ?6
+                           AND ?3 > ts_ms",
+                        params![
+                            ma.value,
+                            node_id,
+                            ts,
+                            object_type,
+                            ma.object_id,
+                            ma.annotation_key,
+                        ],
+                    )?;
+                }
+            }
             Payload::EntityRelationshipRecorded(err) => {
                 conn.execute(
                     "INSERT OR REPLACE INTO entity_relationships_view
@@ -471,6 +640,97 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::InsightGenerated(ig) => {
+                let entity_ids_json =
+                    serde_json::to_string(&ig.entity_ids).unwrap_or_else(|_| "[]".into());
+                let schedule = if ig.schedule.is_empty() {
+                    "manual"
+                } else {
+                    &ig.schedule
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO insights_view
+                     (insight_id, insight_type, title, summary, entity_ids_json, confidence, schedule, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        ig.insight_id,
+                        ig.insight_type,
+                        ig.title,
+                        ig.summary,
+                        entity_ids_json,
+                        ig.confidence,
+                        schedule,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::AnomalyDetected(ad) => {
+                let schedule = if ad.schedule.is_empty() {
+                    "manual"
+                } else {
+                    &ad.schedule
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO anomalies_view
+                     (anomaly_id, metric, dimension, expected_value, actual_value, deviation_pct, schedule, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        ad.anomaly_id,
+                        ad.metric,
+                        ad.dimension,
+                        ad.expected_value,
+                        ad.actual_value,
+                        ad.deviation_pct,
+                        schedule,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::AlertRaised(ar) => {
+                let entity_ids_json =
+                    serde_json::to_string(&ar.entity_ids).unwrap_or_else(|_| "[]".into());
+                let schedule = if ar.schedule.is_empty() {
+                    "manual"
+                } else {
+                    &ar.schedule
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO alerts_view
+                     (alert_id, alert_type, severity, title, message, entity_ids_json, schedule, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        ar.alert_id,
+                        ar.alert_type,
+                        if ar.severity.is_empty() { "info" } else { &ar.severity },
+                        ar.title,
+                        ar.message,
+                        entity_ids_json,
+                        schedule,
+                        ts,
+                    ],
+                )?;
+            }
+            Payload::BenchmarkUpdated(bu) => {
+                let schedule = if bu.schedule.is_empty() {
+                    "manual"
+                } else {
+                    &bu.schedule
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO benchmarks_view
+                     (benchmark_id, metric, dimension, value, time_window, schedule, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        bu.benchmark_id,
+                        bu.metric,
+                        bu.dimension,
+                        bu.value,
+                        bu.time_window,
+                        schedule,
+                        ts,
+                    ],
+                )?;
+            }
             Payload::TrainDeltaPublished(_) | Payload::TrainDeltaApplied(_) => {
                 // Audit entry already written above
             }
@@ -514,6 +774,18 @@ fn event_summary(event: &EventEnvelope) -> String {
         Some(Payload::CaseConfirmed(cf)) => {
             format!("case confirmed: {} ({})", cf.case_id, cf.outcome)
         }
+        Some(Payload::CaseFailed(cf)) => {
+            format!("case failed: {} {}", cf.case_id, cf.reason)
+        }
+        Some(Payload::QuoteAccepted(qa)) => {
+            format!("quote accepted: {} case {}", qa.quote_id, qa.case_id)
+        }
+        Some(Payload::QuoteLost(ql)) => {
+            format!("quote lost: {} case {}", ql.quote_id, ql.case_id)
+        }
+        Some(Payload::QuoteRevised(qr)) => {
+            format!("quote revised: {} case {}", qr.quote_id, qr.case_id)
+        }
         Some(Payload::CaseTagged(ct)) => format!("case tagged: {}", ct.case_id),
         Some(Payload::ArtifactPublished(ap)) => format!("artifact published: {}", ap.title),
         Some(Payload::ArtifactDeprecated(ad)) => format!("artifact deprecated: {}", ad.artifact_id),
@@ -549,6 +821,51 @@ fn event_summary(event: &EventEnvelope) -> String {
         Some(Payload::DataSourceApproved(a)) => {
             format!("data source approved: {}", a.source_id)
         }
+        Some(Payload::MergeableTagUpdated(mt)) => {
+            format!(
+                "mergeable tag: {} {} {}",
+                mt.object_type, mt.object_id, mt.tag
+            )
+        }
+        Some(Payload::MergeableCounterUpdated(mc)) => {
+            format!(
+                "mergeable counter: {} {} {}",
+                mc.object_type, mc.object_id, mc.counter_key
+            )
+        }
+        Some(Payload::MergeableAnnotationUpdated(ma)) => {
+            format!(
+                "mergeable annotation: {} {} {}",
+                ma.object_type, ma.object_id, ma.annotation_key
+            )
+        }
+        Some(Payload::InsightGenerated(ig)) => {
+            format!("insight: {} {}", ig.insight_type, ig.title)
+        }
+        Some(Payload::AnomalyDetected(ad)) => {
+            format!(
+                "anomaly: {} {} (expected {}, actual {})",
+                ad.metric, ad.dimension, ad.expected_value, ad.actual_value
+            )
+        }
+        Some(Payload::AlertRaised(ar)) => {
+            format!("alert: {} {}", ar.alert_type, ar.title)
+        }
+        Some(Payload::BenchmarkUpdated(bu)) => {
+            format!("benchmark: {} {} = {}", bu.metric, bu.dimension, bu.value)
+        }
+        Some(Payload::ShardSubscriptionAdded(ss)) => {
+            format!(
+                "shard subscription: {} <- {} ({})",
+                ss.shard_key,
+                ss.node_id.as_ref().map(|n| n.value.as_str()).unwrap_or(""),
+                if ss.capability.is_empty() {
+                    "query"
+                } else {
+                    &ss.capability
+                }
+            )
+        }
         Some(Payload::EntityRelationshipRecorded(err)) => {
             format!(
                 "entity relationship: {} -[{}]-> {}",
@@ -576,6 +893,47 @@ fn event_summary(event: &EventEnvelope) -> String {
         }
         None => "unknown event".to_string(),
     }
+}
+
+/// Insert shard metadata and membership. Upserts shards_view, inserts shard_membership_view.
+fn apply_shard_membership(
+    conn: &Connection,
+    shard_keys: &[String],
+    member_type: &str,
+    member_id: &str,
+    node_id: &str,
+    ts: i64,
+) -> Result<()> {
+    for key in shard_keys {
+        if key.is_empty() {
+            continue;
+        }
+        let kind = if key == "public" {
+            "public"
+        } else if key.starts_with("tenant:") {
+            "tenant"
+        } else if key.starts_with("entity_type:") {
+            "entity_type"
+        } else if key.starts_with("artifact_class:") {
+            "artifact_class"
+        } else if key.starts_with("site:") {
+            "site"
+        } else {
+            "tenant"
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO shards_view (shard_key, shard_kind, created_at_ms)
+             VALUES (?1, ?2, ?3)",
+            params![key, kind, ts],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO shard_membership_view
+             (shard_key, member_type, member_id, node_id, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![key, member_type, member_id, node_id, ts],
+        )?;
+    }
+    Ok(())
 }
 
 fn update_cases_fts(conn: &Connection, case_id: &str) -> Result<()> {
@@ -1146,5 +1504,299 @@ mod tests {
 
         let (_, evt_count) = get_checkpoint(&conn).unwrap().unwrap();
         assert_eq!(evt_count, 20);
+    }
+
+    #[test]
+    fn project_outcomes() {
+        let conn = setup();
+        apply_event(
+            &conn,
+            &make_event(
+                "o1",
+                Payload::CaseFailed(CaseFailed {
+                    case_id: "case-1".into(),
+                    reason: "Customer cancelled".into(),
+                }),
+            ),
+        )
+        .unwrap();
+        apply_event(
+            &conn,
+            &make_event(
+                "o2",
+                Payload::QuoteAccepted(QuoteAccepted {
+                    quote_id: "q-1".into(),
+                    case_id: "case-1".into(),
+                    value_summary: "Accepted at list price".into(),
+                    confidence: 0.95,
+                }),
+            ),
+        )
+        .unwrap();
+
+        let failed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes_view WHERE outcome_type = 'case_failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 1);
+
+        let accepted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes_view WHERE outcome_type = 'quote_accepted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(accepted, 1);
+    }
+
+    #[test]
+    fn project_shard_assignment() {
+        let conn = setup();
+        // CaseCreated -> tenant:public shard
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::CaseCreated(CaseCreated {
+                    case_id: "case-1".into(),
+                    title: "Test".into(),
+                    summary: "Summary".into(),
+                    content_ref: None,
+                    shareable: true,
+                }),
+            ),
+        )
+        .unwrap();
+
+        let case_members: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM shard_membership_view WHERE member_type = 'case' AND member_id = 'case-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(case_members >= 1, "case should have shard membership");
+        let has_public: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM shard_membership_view WHERE shard_key = 'public' AND member_id = 'case-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_public, 1);
+
+        // ArtifactPublished with entity_type -> entity_type:customer, artifact_class:document
+        apply_event(
+            &conn,
+            &make_event(
+                "e2",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "art-1".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Doc".into(),
+                    summary: "".into(),
+                    content_ref: None,
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "entity_card".into(),
+                    entity_type: "customer".into(),
+                    entity_key: "c1".into(),
+                    source_ref: "src-1".into(),
+                    table_name: "customers".into(),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .unwrap();
+
+        let art_members: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM shard_membership_view WHERE member_type = 'artifact' AND member_id = 'art-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            art_members >= 2,
+            "artifact should have entity_type and artifact_class shards"
+        );
+    }
+
+    #[test]
+    fn project_mergeable_state() {
+        let conn = setup();
+
+        apply_event(
+            &conn,
+            &make_event(
+                "m1",
+                Payload::MergeableTagUpdated(MergeableTagUpdated {
+                    object_type: "case".into(),
+                    object_id: "case-1".into(),
+                    tag: "urgent".into(),
+                    op: "add".into(),
+                }),
+            ),
+        )
+        .unwrap();
+        apply_event(
+            &conn,
+            &make_event(
+                "m2",
+                Payload::MergeableTagUpdated(MergeableTagUpdated {
+                    object_type: "case".into(),
+                    object_id: "case-1".into(),
+                    tag: "reviewed".into(),
+                    op: "add".into(),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mergeable_tag_events WHERE object_id = 'case-1' AND op = 'add'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 2);
+
+        apply_event(
+            &conn,
+            &make_event(
+                "m3",
+                Payload::MergeableCounterUpdated(MergeableCounterUpdated {
+                    object_type: "artifact".into(),
+                    object_id: "art-1".into(),
+                    counter_key: "view_count".into(),
+                    delta: 5,
+                }),
+            ),
+        )
+        .unwrap();
+        apply_event(
+            &conn,
+            &make_event(
+                "m4",
+                Payload::MergeableCounterUpdated(MergeableCounterUpdated {
+                    object_type: "artifact".into(),
+                    object_id: "art-1".into(),
+                    counter_key: "view_count".into(),
+                    delta: 3,
+                }),
+            ),
+        )
+        .unwrap();
+
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(delta), 0) FROM mergeable_counter_deltas
+                 WHERE object_type = 'artifact' AND object_id = 'art-1' AND counter_key = 'view_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 8);
+
+        apply_event(
+            &conn,
+            &make_event(
+                "m5",
+                Payload::MergeableAnnotationUpdated(MergeableAnnotationUpdated {
+                    object_type: "entity".into(),
+                    object_id: "customer:c1".into(),
+                    annotation_key: "notes".into(),
+                    value: "VIP customer".into(),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM mergeable_annotations_view
+                 WHERE object_type = 'entity' AND object_id = 'customer:c1' AND annotation_key = 'notes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "VIP customer");
+    }
+
+    #[test]
+    fn project_shard_subscription() {
+        let conn = setup();
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::ShardSubscriptionAdded(ShardSubscriptionAdded {
+                    shard_key: "entity_type:customer".into(),
+                    node_id: Some(NodeId {
+                        value: "node-abc".into(),
+                    }),
+                    capability: "host".into(),
+                    last_seen_ms: 1700000000000,
+                }),
+            ),
+        )
+        .unwrap();
+
+        let (node_id, cap): (String, String) = conn
+            .query_row(
+                "SELECT node_id, capability FROM shard_subscriptions_view WHERE shard_key = 'entity_type:customer'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(node_id, "node-abc");
+        assert_eq!(cap, "host");
+    }
+
+    #[test]
+    fn project_shard_rebuild() {
+        let conn = setup();
+        let events = [
+            make_event(
+                "e1",
+                Payload::CaseCreated(CaseCreated {
+                    case_id: "c1".into(),
+                    title: "T".into(),
+                    summary: "S".into(),
+                    content_ref: None,
+                    shareable: false,
+                }),
+            ),
+            make_event(
+                "e2",
+                Payload::ShardSubscriptionAdded(ShardSubscriptionAdded {
+                    shard_key: "tenant:public".into(),
+                    node_id: Some(NodeId {
+                        value: "node-x".into(),
+                    }),
+                    capability: "query".into(),
+                    last_seen_ms: 1700000001000,
+                }),
+            ),
+        ];
+        replay_events(&conn, &events).unwrap();
+
+        let shard_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM shards_view", [], |row| row.get(0))
+            .unwrap();
+        assert!(shard_count >= 1);
+
+        let sub_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM shard_subscriptions_view", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sub_count, 1);
     }
 }

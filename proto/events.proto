@@ -7,6 +7,10 @@ enum EventType {
   CASE_CREATED = 10;
   CASE_CONFIRMED = 11;
   CASE_TAGGED = 12;
+  CASE_FAILED = 13;
+  QUOTE_ACCEPTED = 14;
+  QUOTE_LOST = 15;
+  QUOTE_REVISED = 16;
   ARTIFACT_PUBLISHED = 20;
   ARTIFACT_DEPRECATED = 21;
   WEB_BRIEF_CREATED = 30;
@@ -33,11 +37,25 @@ enum EventType {
   // Entity intelligence graph
   ENTITY_RELATIONSHIP_RECORDED = 94;
 
+  // Knowledge shards (distributed memory)
+  SHARD_SUBSCRIPTION_ADDED = 95;
+
+  // Mergeable state (CRDT-like, Phase 3)
+  MERGEABLE_TAG_UPDATED = 96;
+  MERGEABLE_COUNTER_UPDATED = 97;
+  MERGEABLE_ANNOTATION_UPDATED = 98;
+
   // Federated learning
   TRAIN_DELTA_PUBLISHED = 90;
   TRAIN_DELTA_APPLIED = 91;
   FEDERATED_ROUND_STARTED = 92;
   FEDERATED_ROUND_COMPLETED = 93;
+
+  // Proactive insight engine (Phase 5)
+  INSIGHT_GENERATED = 100;
+  ANOMALY_DETECTED = 101;
+  ALERT_RAISED = 102;
+  BENCHMARK_UPDATED = 103;
 }
 
 enum ArtifactType {
@@ -69,6 +87,10 @@ message EventEnvelope {
     CaseCreated case_created = 100;
     CaseConfirmed case_confirmed = 101;
     CaseTagged case_tagged = 102;
+    CaseFailed case_failed = 103;
+    QuoteAccepted quote_accepted = 104;
+    QuoteLost quote_lost = 105;
+    QuoteRevised quote_revised = 106;
 
     ArtifactPublished artifact_published = 110;
     ArtifactDeprecated artifact_deprecated = 111;
@@ -99,11 +121,26 @@ message EventEnvelope {
 
     EntityRelationshipRecorded entity_relationship_recorded = 173;
 
+    // Knowledge shards
+    ShardSubscriptionAdded shard_subscription_added = 174;
+
+    // Mergeable state payloads (Phase 3)
+    MergeableTagUpdated mergeable_tag_updated = 175;
+    MergeableCounterUpdated mergeable_counter_updated = 176;
+    MergeableAnnotationUpdated mergeable_annotation_updated = 177;
+
+    // Proactive insight engine payloads (Phase 5)
+    InsightGenerated insight_generated = 178;
+    AnomalyDetected anomaly_detected = 179;
+
     // Federated learning payloads
     TrainDeltaPublished train_delta_published = 180;
     TrainDeltaApplied train_delta_applied = 181;
     FederatedRoundStarted federated_round_started = 182;
     FederatedRoundCompleted federated_round_completed = 183;
+
+    AlertRaised alert_raised = 184;
+    BenchmarkUpdated benchmark_updated = 185;
   }
 
   repeated string tags = 200;
@@ -119,6 +156,10 @@ message CaseCreated {
   bool shareable = 5;
 }
 message CaseConfirmed { string case_id = 1; string outcome = 2; float confidence = 3; }
+message CaseFailed { string case_id = 1; string reason = 2; }
+message QuoteAccepted { string quote_id = 1; string case_id = 2; string value_summary = 3; float confidence = 4; }
+message QuoteLost { string quote_id = 1; string case_id = 2; string reason = 3; }
+message QuoteRevised { string quote_id = 1; string case_id = 2; string revision_reason = 3; }
 message CaseTagged { string case_id = 1; repeated string add_tags = 2; repeated string remove_tags = 3; }
 
 message ArtifactPublished {
@@ -282,6 +323,34 @@ message EntityRelationshipRecorded {
   string table_name = 5;
 }
 
+// Shard key format: tenant:X | entity_type:customer | site:UK | artifact_class:document | public
+message ShardSubscriptionAdded {
+  string shard_key = 1;         // e.g. entity_type:customer
+  meshmind.common.NodeId node_id = 2;
+  string capability = 3;        // host | cache | query
+  int64 last_seen_ms = 4;
+}
+
+// Mergeable state (CRDT-like). object_type: case | artifact | entity
+message MergeableTagUpdated {
+  string object_type = 1;       // case | artifact | entity
+  string object_id = 2;
+  string tag = 3;
+  string op = 4;                // add | remove
+}
+message MergeableCounterUpdated {
+  string object_type = 1;
+  string object_id = 2;
+  string counter_key = 3;       // e.g. view_count, trust_delta
+  int64 delta = 4;              // positive or negative
+}
+message MergeableAnnotationUpdated {
+  string object_type = 1;
+  string object_id = 2;
+  string annotation_key = 3;    // e.g. notes, status
+  string value = 4;             // LWW: last write wins
+}
+
 message DatasetManifestCreated {
   string manifest_id = 1;
   meshmind.common.HashRef manifest_ref = 2;
@@ -289,6 +358,47 @@ message DatasetManifestCreated {
   string preset = 4;
   uint64 item_count = 5;
   uint64 total_bytes = 6;
+}
+
+// --- Proactive insight engine (Phase 5) ---
+
+message InsightGenerated {
+  string insight_id = 1;
+  string insight_type = 2;      // overdue_invoices, recent_quotes, financial_metrics, etc.
+  string title = 3;
+  string summary = 4;
+  repeated string entity_ids = 5;
+  float confidence = 6;
+  string schedule = 7;          // hourly | daily | weekly | monthly
+}
+
+message AnomalyDetected {
+  string anomaly_id = 1;
+  string metric = 2;
+  string dimension = 3;         // e.g. table name, entity type
+  double expected_value = 4;
+  double actual_value = 5;
+  double deviation_pct = 6;
+  string schedule = 7;
+}
+
+message AlertRaised {
+  string alert_id = 1;
+  string alert_type = 2;        // overdue, inactivity, pricing_shift, etc.
+  string severity = 3;          // info | warning | critical
+  string title = 4;
+  string message = 5;
+  repeated string entity_ids = 6;
+  string schedule = 7;
+}
+
+message BenchmarkUpdated {
+  string benchmark_id = 1;
+  string metric = 2;            // pricing, margin, win_rate
+  string dimension = 3;
+  double value = 4;
+  string time_window = 5;       // 2025-Q1, 2025-03
+  string schedule = 6;
 }
 
 // --- Federated learning payloads ---

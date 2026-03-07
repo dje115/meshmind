@@ -2,7 +2,10 @@
 
 pub mod cas;
 pub mod event_log;
+pub mod insights;
+pub mod mergeable;
 pub mod projector;
 pub mod search;
+pub mod shards;
 pub mod snapshot;
 pub mod sqlite_views;

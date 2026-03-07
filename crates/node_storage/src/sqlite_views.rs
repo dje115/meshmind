@@ -259,6 +259,123 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE VIEW IF NOT EXISTS accounts_view AS
             SELECT * FROM entity_cards_view WHERE entity_type = 'account';
+
+        -- Knowledge shards (distributed memory)
+        CREATE TABLE IF NOT EXISTS shards_view (
+            shard_key        TEXT PRIMARY KEY,
+            shard_kind       TEXT NOT NULL DEFAULT 'tenant',
+            created_at_ms    INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS shard_membership_view (
+            shard_key        TEXT NOT NULL,
+            member_type      TEXT NOT NULL,
+            member_id        TEXT NOT NULL,
+            node_id          TEXT NOT NULL DEFAULT '',
+            created_at_ms    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (shard_key, member_type, member_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS shard_subscriptions_view (
+            shard_key        TEXT NOT NULL,
+            node_id          TEXT NOT NULL,
+            capability       TEXT NOT NULL DEFAULT 'query',
+            last_seen_ms     INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (shard_key, node_id)
+        );
+
+        -- Mergeable state (CRDT-like, Phase 3)
+        CREATE TABLE IF NOT EXISTS mergeable_tag_events (
+            event_id         TEXT NOT NULL,
+            object_type      TEXT NOT NULL,
+            object_id        TEXT NOT NULL,
+            tag              TEXT NOT NULL,
+            op               TEXT NOT NULL,
+            node_id          TEXT NOT NULL,
+            ts_ms            INTEGER NOT NULL,
+            PRIMARY KEY (event_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mergeable_tag_events_obj
+            ON mergeable_tag_events(object_type, object_id);
+
+        CREATE TABLE IF NOT EXISTS mergeable_counter_deltas (
+            event_id         TEXT NOT NULL,
+            object_type      TEXT NOT NULL,
+            object_id        TEXT NOT NULL,
+            counter_key      TEXT NOT NULL,
+            node_id          TEXT NOT NULL,
+            delta            INTEGER NOT NULL,
+            ts_ms            INTEGER NOT NULL,
+            PRIMARY KEY (event_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mergeable_counter_obj
+            ON mergeable_counter_deltas(object_type, object_id, counter_key);
+
+        CREATE TABLE IF NOT EXISTS mergeable_annotations_view (
+            object_type      TEXT NOT NULL,
+            object_id        TEXT NOT NULL,
+            annotation_key   TEXT NOT NULL,
+            value            TEXT NOT NULL,
+            node_id          TEXT NOT NULL,
+            ts_ms            INTEGER NOT NULL,
+            PRIMARY KEY (object_type, object_id, annotation_key)
+        );
+
+        -- Proactive insight engine (Phase 5)
+        CREATE TABLE IF NOT EXISTS insights_view (
+            insight_id       TEXT PRIMARY KEY,
+            insight_type     TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            summary         TEXT NOT NULL,
+            entity_ids_json  TEXT NOT NULL DEFAULT '[]',
+            confidence       REAL NOT NULL DEFAULT 0.0,
+            schedule         TEXT NOT NULL DEFAULT 'manual',
+            created_at_ms    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS alerts_view (
+            alert_id         TEXT PRIMARY KEY,
+            alert_type       TEXT NOT NULL,
+            severity         TEXT NOT NULL DEFAULT 'info',
+            title            TEXT NOT NULL,
+            message          TEXT NOT NULL,
+            entity_ids_json  TEXT NOT NULL DEFAULT '[]',
+            schedule         TEXT NOT NULL DEFAULT 'manual',
+            created_at_ms    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS benchmarks_view (
+            benchmark_id     TEXT PRIMARY KEY,
+            metric           TEXT NOT NULL,
+            dimension        TEXT NOT NULL,
+            value            REAL NOT NULL,
+            time_window      TEXT NOT NULL,
+            schedule         TEXT NOT NULL DEFAULT 'manual',
+            created_at_ms    INTEGER NOT NULL
+        );
+        -- Outcome-driven learning (Phase 6)
+        CREATE TABLE IF NOT EXISTS outcomes_view (
+            outcome_id        TEXT PRIMARY KEY,
+            outcome_type      TEXT NOT NULL,
+            case_id           TEXT NOT NULL DEFAULT '',
+            quote_id          TEXT NOT NULL DEFAULT '',
+            outcome_value     TEXT,
+            reason            TEXT,
+            confidence        REAL,
+            created_at_ms     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outcomes_case ON outcomes_view(case_id);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_quote ON outcomes_view(quote_id);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_type ON outcomes_view(outcome_type);
+
+        CREATE TABLE IF NOT EXISTS anomalies_view (
+            anomaly_id       TEXT PRIMARY KEY,
+            metric           TEXT NOT NULL,
+            dimension        TEXT NOT NULL,
+            expected_value   REAL NOT NULL,
+            actual_value     REAL NOT NULL,
+            deviation_pct    REAL NOT NULL,
+            schedule         TEXT NOT NULL DEFAULT 'manual',
+            created_at_ms    INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -396,6 +513,17 @@ mod tests {
         assert!(tables.contains(&"facts_view".to_string()));
         assert!(tables.contains(&"entity_cards_view".to_string()));
         assert!(tables.contains(&"entity_relationships_view".to_string()));
+        assert!(tables.contains(&"shards_view".to_string()));
+        assert!(tables.contains(&"shard_membership_view".to_string()));
+        assert!(tables.contains(&"shard_subscriptions_view".to_string()));
+        assert!(tables.contains(&"mergeable_tag_events".to_string()));
+        assert!(tables.contains(&"mergeable_counter_deltas".to_string()));
+        assert!(tables.contains(&"mergeable_annotations_view".to_string()));
+        assert!(tables.contains(&"insights_view".to_string()));
+        assert!(tables.contains(&"alerts_view".to_string()));
+        assert!(tables.contains(&"benchmarks_view".to_string()));
+        assert!(tables.contains(&"anomalies_view".to_string()));
+        assert!(tables.contains(&"outcomes_view".to_string()));
     }
 
     #[test]

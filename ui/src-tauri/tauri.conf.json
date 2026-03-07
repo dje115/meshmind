@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/dev/src/content/docs/_schema/config.schema.json",
   "productName": "MeshMind",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "identifier": "com.meshmind.app",
   "build": {
     "frontendDist": "../dist",

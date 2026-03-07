@@ -1,4 +1,6 @@
 /target
+ui/src-tauri/target
+ui/test-results
 /data
 *.swp
 *.swo

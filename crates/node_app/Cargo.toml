@@ -18,6 +18,7 @@ node_ai = { workspace = true }
 node_ai_ollama = { workspace = true }
 node_ai_mock = { workspace = true }
 node_trainer = { workspace = true }
+node_federated = { workspace = true }
 node_relay = { workspace = true }
 node_api = { workspace = true }
 tokio = { workspace = true }

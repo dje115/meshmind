@@ -38,12 +38,21 @@ LLM generate answer
      ↓
 Store CaseDraft event
      ↓
-Return answer + confidence + context_used + case_id
+Return answer + confidence + context_used + case_id + source_types + evidence + missing_data_warnings
      ↓
 Optional: POST /v1/ask/confirm with case_id, outcome → CaseConfirmed (training signal)
+Optional: POST /v1/outcomes for quote/case outcomes (QUOTE_ACCEPTED, QUOTE_LOST, CASE_FAILED)
 ```
 
 ---
+
+## Response Fields (Distributed BI)
+
+- **source_types** — Which sources contributed: `local`, `peer`, `web`, `insight`, `business_system`
+- **evidence** — Per-item provenance: `id`, `source_type`, optional `title`
+- **missing_data_warnings** — Structured warnings when data may be incomplete
+
+Peer consult uses **shard-aware routing**: only peers hosting shards relevant to the question are contacted (see [distributed-memory.md](../distributed-memory.md)).
 
 ## Evidence Types
 
@@ -68,3 +77,4 @@ Optional: POST /v1/ask/confirm with case_id, outcome → CaseConfirmed (training
 - [docs/intelligence/training.md](../intelligence/training.md) — RouterClassifier
 - [docs/workflows/web-research.md](web-research.md) — Web fallback
 - [docs/workflows/peer-consult.md](peer-consult.md) — Peer forwarding
+- [docs/distributed-memory.md](../distributed-memory.md) — Shard routing, BI provenance

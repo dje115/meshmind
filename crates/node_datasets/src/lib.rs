@@ -81,9 +81,14 @@ fn matches_preset(event: &EventEnvelope, preset: &DatasetPreset) -> bool {
         DatasetPreset::AllApprovedNoRestricted => {
             event.sensitivity != Sensitivity::Restricted as i32
         }
-        DatasetPreset::ThisTenantConfirmed => {
-            matches!(&event.payload, Some(Payload::CaseConfirmed(_)))
-        }
+        DatasetPreset::ThisTenantConfirmed => matches!(
+            &event.payload,
+            Some(Payload::CaseConfirmed(_))
+                | Some(Payload::CaseFailed(_))
+                | Some(Payload::QuoteAccepted(_))
+                | Some(Payload::QuoteLost(_))
+                | Some(Payload::QuoteRevised(_))
+        ),
         DatasetPreset::NumericOnly => false,
         DatasetPreset::Custom(_) => true,
     }
@@ -108,6 +113,16 @@ fn extract_item(event: &EventEnvelope) -> DatasetItem {
             (hash, "artifact", truncate_preview(&ap.title))
         }
         Some(Payload::CaseConfirmed(cc)) => (String::new(), "case", truncate_preview(&cc.outcome)),
+        Some(Payload::CaseFailed(cf)) => (String::new(), "case", truncate_preview(&cf.reason)),
+        Some(Payload::QuoteAccepted(qa)) => {
+            (String::new(), "quote", truncate_preview(&qa.value_summary))
+        }
+        Some(Payload::QuoteLost(ql)) => (String::new(), "quote", truncate_preview(&ql.reason)),
+        Some(Payload::QuoteRevised(qr)) => (
+            String::new(),
+            "quote",
+            truncate_preview(&qr.revision_reason),
+        ),
         _ => {
             let hash = event
                 .event_hash

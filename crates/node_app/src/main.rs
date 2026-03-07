@@ -11,6 +11,7 @@ use node_ai_mock::MockBackend;
 use node_ai_ollama::OllamaBackend;
 use node_api::AppState;
 use node_crypto::DevCa;
+use node_federated::FederatedConfig;
 use node_mesh::tcp_transport::{EnvelopeHandler, TcpServer, TcpTransport};
 use node_mesh::{ConsultConfig, PeerDirectory};
 use node_policy::{PolicyConfig, PolicyEngine};
@@ -487,7 +488,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     }));
     let model_registry = Arc::new(tokio::sync::Mutex::new(ModelRegistry::new()));
-    let trainer = Arc::new(Trainer::new(train_policy, model_registry.clone()));
+    let trainer = Arc::new(Trainer::new(train_policy.clone(), model_registry.clone()));
 
     let data_dir = config.data_dir.clone();
     let listen_base_url = {
@@ -525,6 +526,9 @@ async fn main() -> Result<()> {
         })),
         listen_base_url: listen_base_url.clone(),
         oauth_pending: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        federated_rounds: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        federated_config: FederatedConfig::new("router"),
+        federated_policy: train_policy,
     });
 
     // Start TCP mesh server

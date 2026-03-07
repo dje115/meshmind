@@ -158,13 +158,59 @@ pub async fn consult_peers(
     question: &str,
     context: &[String],
 ) -> ConsultResult {
+    consult_peers_routed(
+        transport,
+        peer_dir,
+        config,
+        from_node_id,
+        tenant_id,
+        question,
+        context,
+        None,
+    )
+    .await
+}
+
+/// Consult peers with optional shard-based routing. When `shard_routed_peer_ids` is
+/// provided and non-empty, only forwards to those peers (no broadcast).
+pub async fn consult_peers_routed(
+    transport: &Arc<dyn Transport>,
+    peer_dir: &RwLock<PeerDirectory>,
+    config: &ConsultConfig,
+    from_node_id: &str,
+    tenant_id: &str,
+    question: &str,
+    context: &[String],
+    shard_routed_peer_ids: Option<Vec<String>>,
+) -> ConsultResult {
     let peers = {
         let dir = peer_dir.read().await;
-        dir.reachable_peers()
-            .iter()
-            .take(config.max_peers_to_ask)
-            .map(|p| (p.node_id.clone(), p.address.clone(), p.port))
-            .collect::<Vec<_>>()
+        let reachable = dir.reachable_peers();
+        let candidate: Vec<_> = if let Some(ref preferred) = shard_routed_peer_ids {
+            if preferred.is_empty() {
+                reachable
+                    .iter()
+                    .take(config.max_peers_to_ask)
+                    .map(|p| (p.node_id.clone(), p.address.clone(), p.port))
+                    .collect()
+            } else {
+                let set: std::collections::HashSet<_> =
+                    preferred.iter().map(String::as_str).collect();
+                reachable
+                    .iter()
+                    .filter(|p| set.contains(p.node_id.as_str()))
+                    .take(config.max_peers_to_ask)
+                    .map(|p| (p.node_id.clone(), p.address.clone(), p.port))
+                    .collect()
+            }
+        } else {
+            reachable
+                .iter()
+                .take(config.max_peers_to_ask)
+                .map(|p| (p.node_id.clone(), p.address.clone(), p.port))
+                .collect()
+        };
+        candidate
     };
 
     let ask = build_ask_envelope(
@@ -423,5 +469,48 @@ mod tests {
         assert!(result.answers.is_empty());
         assert!(result.refused.is_empty());
         assert!(result.timed_out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consult_peers_routed_limits_to_shard_peers() {
+        let transport = Arc::new(MockTransport::new());
+        let peer_dir = RwLock::new(PeerDirectory::new());
+        {
+            let mut dir = peer_dir.write().await;
+            dir.upsert("peer-1", "192.168.1.10", 9000);
+            dir.upsert("peer-2", "192.168.1.11", 9000);
+            dir.upsert("peer-3", "192.168.1.12", 9000);
+        }
+
+        // Only peer-2 is in shard_routed_peer_ids, so we should consult only peer-2
+        transport.push_response(build_answer_envelope(
+            "peer-2",
+            "msg-2",
+            "Answer from shard-relevant peer",
+            0.85,
+            vec![],
+        ));
+
+        let config = ConsultConfig::default();
+        let result = consult_peers_routed(
+            &(transport.clone() as Arc<dyn Transport>),
+            &peer_dir,
+            &config,
+            "node-a",
+            "public",
+            "Customer invoice question?",
+            &[],
+            Some(vec!["peer-2".to_string()]),
+        )
+        .await;
+
+        assert_eq!(result.answers.len(), 1);
+        assert!(result.best_answer.is_some());
+        assert_eq!(result.best_answer.as_ref().unwrap().peer_id, "peer-2");
+
+        // Verify only one request was sent (to peer-2, not peer-1 or peer-3)
+        let sent = transport.take_sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "192.168.1.11"); // peer-2's address
     }
 }

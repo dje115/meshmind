@@ -113,7 +113,10 @@ use node_mesh::transport::Transport;
 use node_mesh::{ConsultConfig, PeerDirectory};
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
+use node_storage::insights;
+use node_storage::mergeable;
 use node_storage::search;
+use node_storage::shards;
 
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
@@ -274,18 +277,29 @@ fn classify_business_intent(question: &str) -> BusinessIntent {
     if lower.contains("invoice") || lower.contains("invoices") || lower.contains("overdue") {
         entity_types.push("invoice".into());
     }
-    if lower.contains("quote") || lower.contains("quotes") || lower.contains("proposal") || lower.contains("proposals") {
+    if lower.contains("quote")
+        || lower.contains("quotes")
+        || lower.contains("proposal")
+        || lower.contains("proposals")
+    {
         entity_types.push("quote".into());
     }
-    if lower.contains("line item") || lower.contains("line items") || lower.contains("breakdown")
-        || (lower.contains("quote") && (lower.contains("similar") || lower.contains("margin") || lower.contains("charged")))
+    if lower.contains("line item")
+        || lower.contains("line items")
+        || lower.contains("breakdown")
+        || (lower.contains("quote")
+            && (lower.contains("similar") || lower.contains("margin") || lower.contains("charged")))
     {
         entity_types.push("quote_line_item".into());
     }
     if lower.contains("account") || lower.contains("accounts") {
         entity_types.push("account".into());
     }
-    if lower.contains("job") || lower.contains("jobs") || lower.contains("install") || lower.contains("work order") {
+    if lower.contains("job")
+        || lower.contains("jobs")
+        || lower.contains("install")
+        || lower.contains("work order")
+    {
         entity_types.push("job".into());
     }
 
@@ -299,11 +313,18 @@ fn classify_business_intent(question: &str) -> BusinessIntent {
     if lower.contains("margin") || lower.contains("margins") {
         metrics.push("margin".into());
     }
-    if lower.contains("charge") || lower.contains("charge for") || lower.contains("pricing") || lower.contains("price") {
+    if lower.contains("charge")
+        || lower.contains("charge for")
+        || lower.contains("pricing")
+        || lower.contains("price")
+    {
         metrics.push("pricing".into());
     }
 
-    BusinessIntent { entity_types, metrics }
+    BusinessIntent {
+        entity_types,
+        metrics,
+    }
 }
 
 fn looks_like_general_knowledge_question(content: &str) -> bool {
@@ -471,7 +492,10 @@ fn build_context_bullets(
 
     bullets
 }
-use node_federated::{FederatedConfig, FederatedCoordinator};
+use node_federated::{
+    build_delta_published_event, build_round_completed_event, build_round_started_event, DeltaInfo,
+    FederatedConfig, FederatedCoordinator, RoundState,
+};
 use node_trainer::{JobStatus, ModelRegistry, Trainer, TrainingJob};
 
 /// Returns a default rate limiter for /ask and chat (120/min, burst 10). Use in production.
@@ -511,6 +535,12 @@ pub struct AppState {
     pub listen_base_url: String,
     /// OAuth PKCE pending: state -> (code_verifier, created_at). Cleaned on callback.
     pub oauth_pending: Arc<RwLock<HashMap<String, (String, Instant)>>>,
+    /// Federated learning: active rounds (round_id -> RoundState).
+    pub federated_rounds: Arc<RwLock<HashMap<String, RoundState>>>,
+    /// Federated config (model_id, min/max participants).
+    pub federated_config: FederatedConfig,
+    /// Policy for federated delta sharing (can_share_deltas).
+    pub federated_policy: Arc<node_policy::PolicyEngine>,
 }
 
 async fn admin_auth(
@@ -585,6 +615,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/admin/federated/status",
             get(handle_admin_federated_status),
         )
+        .route(
+            "/admin/federated/rounds",
+            post(handle_admin_federated_start_round),
+        )
+        .route(
+            "/admin/federated/rounds/:round_id",
+            get(handle_admin_federated_round_status),
+        )
+        .route(
+            "/admin/federated/rounds/:round_id/deltas",
+            post(handle_admin_federated_submit_delta),
+        )
+        .route(
+            "/admin/federated/rounds/:round_id/aggregate",
+            post(handle_admin_federated_aggregate),
+        )
+        .route("/admin/insights/run", post(handle_admin_insights_run))
         .route("/admin/research", post(handle_admin_research))
         .route("/admin/scan", post(handle_admin_scan))
         .route("/admin/scan-dirs", get(handle_admin_scan_dirs_get))
@@ -629,8 +676,31 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(handle_peers))
         .route("/search", get(handle_search))
         .route("/insights", get(handle_insights))
+        .route("/insights/alerts", get(handle_insights_alerts))
+        .route("/insights/benchmarks", get(handle_insights_benchmarks))
+        .route("/shards", get(handle_list_shards))
+        .route("/shards/for-question", get(handle_shards_for_question))
+        .route("/shards/:key/members", get(handle_shard_members))
+        .route(
+            "/shards/:key/subscriptions",
+            get(handle_shard_subscriptions),
+        )
+        .route("/shards/subscribe", post(handle_shard_subscribe))
+        .route(
+            "/mergeable/:object_type/:object_id/tags",
+            get(handle_mergeable_tags),
+        )
+        .route(
+            "/mergeable/:object_type/:object_id/counters",
+            get(handle_mergeable_counters),
+        )
+        .route(
+            "/mergeable/:object_type/:object_id/annotations",
+            get(handle_mergeable_annotations),
+        )
         .route("/ask", post(handle_ask))
         .route("/ask/confirm", post(handle_ask_confirm))
+        .route("/outcomes", post(handle_outcomes))
         .route(
             "/conversations",
             get(handle_list_conversations).post(handle_create_conversation),
@@ -791,6 +861,14 @@ struct AskRequest {
 }
 
 #[derive(Serialize, Deserialize)]
+struct EvidenceItem {
+    id: String,
+    source_type: String, // local | peer | web | insight | business_system
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct AskResponse {
     answer: String,
     confidence: f32,
@@ -798,6 +876,15 @@ struct AskResponse {
     context_used: Vec<String>,
     /// ID for outcome confirmation (POST /v1/ask/confirm)
     case_id: String,
+    /// Source types that contributed (local, peer, web, insight, business_system)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_types: Vec<String>,
+    /// Structured evidence with provenance
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<EvidenceItem>,
+    /// Warnings when data may be missing or incomplete
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    missing_data_warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1008,7 +1095,22 @@ async fn handle_insights(
 
     let mut insights = Vec::new();
 
-    // Overdue invoices (entity cards with overdue in attributes)
+    // Proactive insights from insights_view (scheduled/manual)
+    if let Ok(rows) = insights::list_insights(&conn, None, 50) {
+        for r in rows {
+            let entity_ids: Vec<String> =
+                serde_json::from_str(&r.entity_ids_json).unwrap_or_default();
+            insights.push(InsightItem {
+                insight_type: r.insight_type,
+                title: r.title,
+                summary: r.summary,
+                entity_ids,
+                confidence: r.confidence,
+            });
+        }
+    }
+
+    // On-demand: overdue invoices (entity cards with overdue in attributes)
     if let Ok(hits) = search::search_entity_cards(&conn, Some("invoice"), 50) {
         let overdue: Vec<_> = hits
             .iter()
@@ -1085,6 +1187,298 @@ async fn handle_insights(
     Ok(Json(insights))
 }
 
+#[derive(Serialize)]
+struct AlertResponse {
+    alert_id: String,
+    alert_type: String,
+    severity: String,
+    title: String,
+    message: String,
+    entity_ids: Vec<String>,
+    schedule: String,
+    created_at_ms: i64,
+}
+
+#[derive(Serialize)]
+struct BenchmarkResponse {
+    benchmark_id: String,
+    metric: String,
+    dimension: String,
+    value: f64,
+    time_window: String,
+    schedule: String,
+    created_at_ms: i64,
+}
+
+async fn handle_insights_alerts(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<AlertResponse>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let schedule = params.get("schedule").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let rows = insights::list_alerts(&conn, schedule, limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out: Vec<AlertResponse> = rows
+        .into_iter()
+        .map(|r| {
+            let entity_ids: Vec<String> =
+                serde_json::from_str(&r.entity_ids_json).unwrap_or_default();
+            AlertResponse {
+                alert_id: r.alert_id,
+                alert_type: r.alert_type,
+                severity: r.severity,
+                title: r.title,
+                message: r.message,
+                entity_ids,
+                schedule: r.schedule,
+                created_at_ms: r.created_at_ms,
+            }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn handle_insights_benchmarks(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<BenchmarkResponse>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let schedule = params.get("schedule").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let rows = insights::list_benchmarks(&conn, schedule, limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out: Vec<BenchmarkResponse> = rows
+        .into_iter()
+        .map(|r| BenchmarkResponse {
+            benchmark_id: r.benchmark_id,
+            metric: r.metric,
+            dimension: r.dimension,
+            value: r.value,
+            time_window: r.time_window,
+            schedule: r.schedule,
+            created_at_ms: r.created_at_ms,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct ShardsForQuestionParams {
+    q: String,
+}
+
+#[derive(Serialize)]
+struct ShardResponse {
+    shard_key: String,
+    shard_kind: String,
+    created_at_ms: i64,
+}
+
+#[derive(Serialize)]
+struct ShardMemberResponse {
+    shard_key: String,
+    member_type: String,
+    member_id: String,
+    node_id: String,
+    created_at_ms: i64,
+}
+
+#[derive(Serialize)]
+struct ShardSubscriptionResponse {
+    shard_key: String,
+    node_id: String,
+    capability: String,
+    last_seen_ms: i64,
+}
+
+#[derive(Deserialize)]
+struct ShardSubscribeRequest {
+    shard_key: String,
+    capability: String, // host | cache | query
+}
+
+async fn handle_list_shards(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<ShardResponse>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let rows = shards::list_shards(&conn, limit).map_err(|e| ApiError::internal(e.to_string()))?;
+    let out = rows
+        .into_iter()
+        .map(|r| ShardResponse {
+            shard_key: r.shard_key,
+            shard_kind: r.shard_kind,
+            created_at_ms: r.created_at_ms,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn handle_shards_for_question(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ShardsForQuestionParams>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let keys = shards::shards_for_question(&conn, &params.q)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(keys))
+}
+
+async fn handle_shard_members(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<ShardMemberResponse>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let member_type = params.get("member_type").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let rows = shards::members_of_shard(&conn, &key, member_type, limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out = rows
+        .into_iter()
+        .map(|r| ShardMemberResponse {
+            shard_key: r.shard_key,
+            member_type: r.member_type,
+            member_id: r.member_id,
+            node_id: r.node_id,
+            created_at_ms: r.created_at_ms,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn handle_shard_subscriptions(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<ShardSubscriptionResponse>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let capability = params.get("capability").map(String::as_str);
+    let rows = shards::nodes_for_shard(&conn, &key, capability)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out = rows
+        .into_iter()
+        .map(|r| ShardSubscriptionResponse {
+            shard_key: r.shard_key,
+            node_id: r.node_id,
+            capability: r.capability,
+            last_seen_ms: r.last_seen_ms,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn handle_shard_subscribe(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ShardSubscribeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let capability = if req.capability.is_empty() {
+        "query"
+    } else {
+        &req.capability
+    };
+    let ts = now_ms();
+    let event = EventEnvelope {
+        event_id: format!("shard-sub-{}", uuid::Uuid::new_v4()),
+        r#type: EventType::ShardSubscriptionAdded as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::ShardSubscriptionAdded(
+            ShardSubscriptionAdded {
+                shard_key: req.shard_key,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                capability: capability.to_string(),
+                last_seen_ms: ts,
+            },
+        )),
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(log);
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct MergeablePath {
+    object_type: String,
+    object_id: String,
+}
+
+async fn handle_mergeable_tags(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<MergeablePath>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let tags = mergeable::tags_for_object(&conn, &path.object_type, &path.object_id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(tags))
+}
+
+async fn handle_mergeable_counters(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<MergeablePath>,
+) -> Result<Json<std::collections::HashMap<String, i64>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = mergeable::counters_for_object(&conn, &path.object_type, &path.object_id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out: std::collections::HashMap<String, i64> = rows.into_iter().collect();
+    Ok(Json(out))
+}
+
+async fn handle_mergeable_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<MergeablePath>,
+) -> Result<Json<std::collections::HashMap<String, String>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = mergeable::annotations_for_object(&conn, &path.object_type, &path.object_id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let out: std::collections::HashMap<String, String> = rows.into_iter().collect();
+    Ok(Json(out))
+}
+
 async fn handle_ask(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AskRequest>,
@@ -1109,9 +1503,7 @@ async fn handle_ask(
                 entity_evidence_ids.push(h.entity_id.clone());
                 entity_fact_bullets.push(format!(
                     "[Entity {} {}] {}",
-                    h.entity_type,
-                    h.entity_id,
-                    h.attributes_json
+                    h.entity_type, h.entity_id, h.attributes_json
                 ));
             }
         }
@@ -1128,9 +1520,10 @@ async fn handle_ask(
         }
     }
     // If no metric filter matched, try broader facts query for revenue/profit/margin questions
-    if intent.metrics.is_empty() && (req.question.to_lowercase().contains("revenue")
-        || req.question.to_lowercase().contains("profit")
-        || req.question.to_lowercase().contains("margin"))
+    if intent.metrics.is_empty()
+        && (req.question.to_lowercase().contains("revenue")
+            || req.question.to_lowercase().contains("profit")
+            || req.question.to_lowercase().contains("margin"))
     {
         if let Ok(hits) = search::query_facts(&conn, None, 15) {
             for h in hits {
@@ -1227,7 +1620,10 @@ async fn handle_ask(
         )
     } else {
         let quote_guidance = if !entity_fact_bullets.is_empty()
-            && (intent.entity_types.iter().any(|e| e == "quote" || e == "quote_line_item")
+            && (intent
+                .entity_types
+                .iter()
+                .any(|e| e == "quote" || e == "quote_line_item")
                 || intent.metrics.iter().any(|m| m == "pricing"))
         {
             " When answering about quotes or pricing, cite similar historical jobs/line items where relevant and note variance from typical ranges if evident."
@@ -1259,11 +1655,70 @@ async fn handle_ask(
 
     let local_confidence: f32 = if context_bullets.is_empty() { 0.3 } else { 0.7 };
 
+    // Build source_types, evidence, missing_data_warnings
+    let mut source_types: Vec<String> = Vec::new();
+    let mut evidence: Vec<EvidenceItem> = Vec::new();
+    let mut missing_data_warnings: Vec<String> = Vec::new();
+
+    if !context_hits.is_empty() {
+        if !source_types.contains(&"local".to_string()) {
+            source_types.push("local".to_string());
+        }
+        for h in &context_hits {
+            evidence.push(EvidenceItem {
+                id: h.id.clone(),
+                source_type: "local".to_string(),
+                title: Some(h.title.clone()),
+            });
+        }
+    }
+    if !entity_evidence_ids.is_empty() {
+        if !source_types.contains(&"business_system".to_string()) {
+            source_types.push("business_system".to_string());
+        }
+        for id in &entity_evidence_ids {
+            evidence.push(EvidenceItem {
+                id: id.clone(),
+                source_type: "business_system".to_string(),
+                title: None,
+            });
+        }
+    }
+    if !web_search_context.is_empty() {
+        if !source_types.contains(&"web".to_string()) {
+            source_types.push("web".to_string());
+        }
+        evidence.push(EvidenceItem {
+            id: "web_search".to_string(),
+            source_type: "web".to_string(),
+            title: Some("Web search results".to_string()),
+        });
+    }
+    if context_bullets.is_empty() && !web_search_context.is_empty() {
+        missing_data_warnings
+            .push("No local knowledge base matches; answer based on web search only.".to_string());
+    }
+    if context_bullets.is_empty() && web_search_context.is_empty() {
+        missing_data_warnings.push("No relevant data found in local knowledge base. Consider scanning and ingesting more sources.".to_string());
+    }
+    if local_confidence < 0.6
+        && entity_evidence_ids.is_empty()
+        && intent
+            .entity_types
+            .iter()
+            .any(|e| *e == "customer" || *e == "invoice" || *e == "quote")
+    {
+        missing_data_warnings.push("Business intent detected but no entity/fact data matched. Ingest customer, invoice, or quote data for better answers.".to_string());
+    }
+
     // If local confidence is low and we have a transport, consult peers
     let mut peer_answers = Vec::new();
     if local_confidence < 0.6 {
         if let Some(ref transport) = state.transport {
-            let result = node_mesh::consult::consult_peers(
+            let shard_peers = shards::peers_for_question(&conn, &req.question)
+                .ok()
+                .filter(|v| !v.is_empty());
+            let result = node_mesh::consult::consult_peers_routed(
                 transport,
                 &state.peer_dir,
                 &state.consult_config,
@@ -1271,24 +1726,47 @@ async fn handle_ask(
                 "public",
                 &req.question,
                 &context_bullets,
+                shard_peers,
             )
             .await;
 
             for pa in &result.answers {
                 peer_answers.push(format!("[{}] {}", pa.peer_id, pa.answer));
+                if !source_types.contains(&"peer".to_string()) {
+                    source_types.push("peer".to_string());
+                }
+                evidence.push(EvidenceItem {
+                    id: pa.peer_id.clone(),
+                    source_type: "peer".to_string(),
+                    title: Some(pa.answer.chars().take(80).collect::<String>()),
+                });
+            }
+
+            if result.answers.is_empty() && !result.refused.is_empty() {
+                missing_data_warnings
+                    .push("Peers were contacted but had no relevant knowledge.".to_string());
             }
 
             if let Some(best) = result.best_answer {
                 if best.confidence > local_confidence {
+                    let mut context_used = best.evidence_refs.clone();
+                    context_used.push(best.peer_id.clone());
                     return Ok(Json(AskResponse {
                         answer: best.answer,
                         confidence: best.confidence,
                         model: format!("peer:{}", best.peer_id),
-                        context_used: best.evidence_refs,
+                        context_used,
                         case_id: case_id.clone(),
+                        source_types,
+                        evidence,
+                        missing_data_warnings,
                     }));
                 }
             }
+        } else {
+            missing_data_warnings.push(
+                "No mesh/peer consult available; answer from local context only.".to_string(),
+            );
         }
     }
 
@@ -1303,7 +1781,7 @@ async fn handle_ask(
     };
 
     let mut context_used: Vec<String> = context_hits.iter().map(|h| h.id.clone()).collect();
-    context_used.extend(entity_evidence_ids);
+    context_used.extend(entity_evidence_ids.clone());
 
     Ok(Json(AskResponse {
         answer,
@@ -1311,6 +1789,9 @@ async fn handle_ask(
         model: gen_resp.model,
         context_used,
         case_id,
+        source_types,
+        evidence,
+        missing_data_warnings,
     }))
 }
 
@@ -1352,6 +1833,145 @@ async fn handle_ask_confirm(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Serialize, Deserialize)]
+struct OutcomeRequest {
+    outcome_type: String, // case_failed | quote_accepted | quote_lost | quote_revised
+    case_id: Option<String>,
+    quote_id: Option<String>,
+    outcome: Option<String>,
+    reason: Option<String>,
+    value_summary: Option<String>,
+    revision_reason: Option<String>,
+    confidence: Option<f32>,
+}
+
+async fn handle_outcomes(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OutcomeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::event_envelope::Payload;
+    use node_proto::events::*;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let event = match req.outcome_type.as_str() {
+        "case_failed" => {
+            let case_id = req.case_id.unwrap_or_default();
+            let reason = req.reason.unwrap_or_default();
+            EventEnvelope {
+                event_id: format!("out-cf-{}", uuid::Uuid::new_v4()),
+                r#type: EventType::CaseFailed as i32,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                ts: Some(Timestamp { unix_ms: ts }),
+                payload: Some(Payload::CaseFailed(CaseFailed { case_id, reason })),
+                ..Default::default()
+            }
+        }
+        "quote_accepted" => {
+            let case_id = req.case_id.unwrap_or_default();
+            let quote_id = req.quote_id.unwrap_or_default();
+            let value_summary = req.value_summary.or(req.outcome).unwrap_or_default();
+            let confidence = req.confidence.unwrap_or(1.0);
+            EventEnvelope {
+                event_id: format!("out-qa-{}", uuid::Uuid::new_v4()),
+                r#type: EventType::QuoteAccepted as i32,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                ts: Some(Timestamp { unix_ms: ts }),
+                payload: Some(Payload::QuoteAccepted(QuoteAccepted {
+                    quote_id,
+                    case_id,
+                    value_summary,
+                    confidence,
+                })),
+                ..Default::default()
+            }
+        }
+        "quote_lost" => {
+            let case_id = req.case_id.unwrap_or_default();
+            let quote_id = req.quote_id.unwrap_or_default();
+            let reason = req.reason.unwrap_or_default();
+            EventEnvelope {
+                event_id: format!("out-ql-{}", uuid::Uuid::new_v4()),
+                r#type: EventType::QuoteLost as i32,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                ts: Some(Timestamp { unix_ms: ts }),
+                payload: Some(Payload::QuoteLost(QuoteLost {
+                    quote_id,
+                    case_id,
+                    reason,
+                })),
+                ..Default::default()
+            }
+        }
+        "quote_revised" => {
+            let case_id = req.case_id.unwrap_or_default();
+            let quote_id = req.quote_id.unwrap_or_default();
+            let revision_reason = req.revision_reason.or(req.reason).unwrap_or_default();
+            EventEnvelope {
+                event_id: format!("out-qr-{}", uuid::Uuid::new_v4()),
+                r#type: EventType::QuoteRevised as i32,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                ts: Some(Timestamp { unix_ms: ts }),
+                payload: Some(Payload::QuoteRevised(QuoteRevised {
+                    quote_id,
+                    case_id,
+                    revision_reason,
+                })),
+                ..Default::default()
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(format!(
+                "unknown outcome_type: {} (use case_failed, quote_accepted, quote_lost, quote_revised)",
+                req.outcome_type
+            )));
+        }
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(log);
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "outcome_type": req.outcome_type }),
+    ))
 }
 
 // ---------- Conversation types ----------
@@ -3584,15 +4204,290 @@ struct FederatedStatusResponse {
     max_participants: u32,
 }
 
-async fn handle_admin_federated_status() -> Result<Json<FederatedStatusResponse>, ApiError> {
-    let config = FederatedConfig::new("router");
-    let _coordinator = FederatedCoordinator::new(config.clone());
+async fn handle_admin_federated_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<FederatedStatusResponse>, ApiError> {
+    let config = &state.federated_config;
     Ok(Json(FederatedStatusResponse {
         supported: true,
-        aggregation: config.aggregation_strategy,
+        aggregation: config.aggregation_strategy.clone(),
         min_participants: config.min_participants,
         max_participants: config.max_participants,
     }))
+}
+
+#[derive(Serialize, Deserialize)]
+struct FederatedStartRoundRequest {
+    model_id: String,
+    round_number: Option<u32>,
+    min_participants: Option<u32>,
+    max_participants: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct FederatedRoundResponse {
+    round_id: String,
+    model_id: String,
+    round_number: u32,
+    status: String,
+    delta_count: usize,
+    min_participants: u32,
+    max_participants: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FederatedSubmitDeltaRequest {
+    delta_id: String,
+    model_id: String,
+    base_version: String,
+    cas_hash: String,
+    metrics: Vec<(String, f64)>,
+    from_node: String,
+}
+
+async fn handle_admin_federated_start_round(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FederatedStartRoundRequest>,
+) -> Result<Json<FederatedRoundResponse>, ApiError> {
+    if !state.federated_policy.can_share_deltas().is_allowed() {
+        return Err(ApiError::from_status(
+            StatusCode::FORBIDDEN,
+            "federated training disabled by policy",
+        ));
+    }
+    let model_id = if req.model_id.is_empty() {
+        state.federated_config.model_id.clone()
+    } else {
+        req.model_id
+    };
+    let round_number = req.round_number.unwrap_or(1);
+    let min_p = req
+        .min_participants
+        .unwrap_or(state.federated_config.min_participants);
+    let max_p = req
+        .max_participants
+        .unwrap_or(state.federated_config.max_participants);
+
+    let config = FederatedConfig {
+        model_id: model_id.clone(),
+        min_participants: min_p,
+        max_participants: max_p,
+        ..state.federated_config.clone()
+    };
+    let coordinator = FederatedCoordinator::new(config.clone());
+    let round_state = coordinator.start_round(&model_id, round_number);
+
+    let mut rounds = state.federated_rounds.write().await;
+    rounds.insert(round_state.round_id.clone(), round_state.clone());
+    drop(rounds);
+
+    let evt = build_round_started_event(&round_state, &state.node_id);
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(evt)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(log);
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(FederatedRoundResponse {
+        round_id: round_state.round_id,
+        model_id: round_state.model_id,
+        round_number: round_state.round_number,
+        status: round_state.status,
+        delta_count: round_state.deltas.len(),
+        min_participants: config.min_participants,
+        max_participants: config.max_participants,
+    }))
+}
+
+async fn handle_admin_federated_round_status(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<String>,
+) -> Result<Json<FederatedRoundResponse>, ApiError> {
+    let rounds = state.federated_rounds.read().await;
+    let round_state = rounds
+        .get(&round_id)
+        .ok_or_else(|| ApiError::from_status(StatusCode::NOT_FOUND, "round not found"))?;
+    let config = &state.federated_config;
+    Ok(Json(FederatedRoundResponse {
+        round_id: round_state.round_id.clone(),
+        model_id: round_state.model_id.clone(),
+        round_number: round_state.round_number,
+        status: round_state.status.clone(),
+        delta_count: round_state.deltas.len(),
+        min_participants: config.min_participants,
+        max_participants: config.max_participants,
+    }))
+}
+
+async fn handle_admin_federated_submit_delta(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<String>,
+    Json(req): Json<FederatedSubmitDeltaRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !state.federated_policy.can_share_deltas().is_allowed() {
+        return Err(ApiError::from_status(
+            StatusCode::FORBIDDEN,
+            "federated training disabled by policy",
+        ));
+    }
+    let delta = DeltaInfo {
+        delta_id: req.delta_id,
+        model_id: req.model_id,
+        base_version: req.base_version,
+        from_node: req.from_node,
+        cas_hash: req.cas_hash,
+        metrics: req.metrics,
+    };
+    let coordinator = FederatedCoordinator::new(state.federated_config.clone());
+
+    let mut rounds = state.federated_rounds.write().await;
+    let round_state = rounds
+        .get_mut(&round_id)
+        .ok_or_else(|| ApiError::from_status(StatusCode::NOT_FOUND, "round not found"))?;
+    let accepted = coordinator.submit_delta(round_state, delta.clone());
+    let round_state = round_state.clone();
+    drop(rounds);
+
+    if accepted {
+        let evt = build_delta_published_event(&delta, &state.node_id);
+        let mut log = state.event_log.write().await;
+        let stored = log
+            .append(evt)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        drop(log);
+        let conn = rusqlite::Connection::open(&state.db_path)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        node_storage::projector::apply_event(&conn, &stored)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "accepted": accepted,
+        "round_id": round_id,
+        "delta_count": round_state.deltas.len(),
+    })))
+}
+
+async fn handle_admin_federated_aggregate(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !state.federated_policy.can_share_deltas().is_allowed() {
+        return Err(ApiError::from_status(
+            StatusCode::FORBIDDEN,
+            "federated training disabled by policy",
+        ));
+    }
+    let coordinator = FederatedCoordinator::new(state.federated_config.clone());
+
+    let mut rounds = state.federated_rounds.write().await;
+    let round_state = rounds
+        .get_mut(&round_id)
+        .ok_or_else(|| ApiError::from_status(StatusCode::NOT_FOUND, "round not found"))?;
+    let hash = coordinator
+        .aggregate(round_state, &state.cas)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let round_state = round_state.clone();
+    drop(rounds);
+
+    let evt = build_round_completed_event(&round_state, &state.node_id);
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(evt)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(log);
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "round_id": round_id,
+        "result_model_hash": hash,
+        "participants": round_state.deltas.len(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct InsightsRunRequest {
+    schedule: Option<String>, // hourly | daily | weekly | monthly | manual
+}
+
+async fn handle_admin_insights_run(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InsightsRunRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::event_envelope::Payload;
+    use node_proto::events::*;
+
+    let schedule = req.schedule.as_deref().unwrap_or("manual");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let mut created = 0u32;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Run same logic as handle_insights but emit InsightGenerated events
+    if let Ok(hits) = search::search_entity_cards(&conn, Some("invoice"), 50) {
+        let overdue: Vec<_> = hits
+            .iter()
+            .filter(|h| {
+                h.attributes_json.contains("overdue")
+                    || h.attributes_json.contains("Overdue")
+                    || h.attributes_json.contains("\"overdue_count\":1")
+                    || h.attributes_json.contains("\"overdue_count\": 1")
+            })
+            .take(10)
+            .collect();
+        if !overdue.is_empty() {
+            let entity_ids: Vec<String> = overdue.iter().map(|h| h.entity_id.clone()).collect();
+            let insight_id = format!("insight-overdue-{}", uuid::Uuid::new_v4());
+            let evt = EventEnvelope {
+                event_id: format!("evt-ig-{}", insight_id),
+                r#type: EventType::InsightGenerated as i32,
+                node_id: Some(NodeId {
+                    value: state.node_id.clone(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                ts: Some(Timestamp { unix_ms: ts }),
+                payload: Some(Payload::InsightGenerated(InsightGenerated {
+                    insight_id: insight_id.clone(),
+                    insight_type: "overdue_invoices".into(),
+                    title: format!("{} overdue invoice(s)", overdue.len()),
+                    summary: format!("Entity IDs: {}", entity_ids.join(", ")),
+                    entity_ids,
+                    confidence: 0.8,
+                    schedule: schedule.to_string(),
+                })),
+                ..Default::default()
+            };
+            let mut log = state.event_log.write().await;
+            if let Ok(stored) = log.append(evt) {
+                drop(log);
+                let conn = rusqlite::Connection::open(&state.db_path)
+                    .map_err(|e| ApiError::internal(e.to_string()))?;
+                let _ = node_storage::projector::apply_event(&conn, &stored);
+                created += 1;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "schedule": schedule,
+        "insights_created": created,
+    })))
 }
 
 // ---------- WebSocket (real-time status) ----------
@@ -3798,6 +4693,12 @@ mod tests {
             })),
             listen_base_url: "http://127.0.0.1:9900".into(),
             oauth_pending: Arc::new(RwLock::new(HashMap::new())),
+            federated_rounds: Arc::new(RwLock::new(HashMap::new())),
+            federated_config: FederatedConfig::new("router"),
+            federated_policy: Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+                allow_train: true,
+                ..Default::default()
+            })),
         })
     }
 
@@ -4142,6 +5043,12 @@ mod tests {
             research_policy: deny_policy,
             listen_base_url: "http://127.0.0.1:9900".into(),
             oauth_pending: Arc::new(RwLock::new(HashMap::new())),
+            federated_rounds: Arc::new(RwLock::new(HashMap::new())),
+            federated_config: FederatedConfig::new("router"),
+            federated_policy: Arc::new(node_policy::PolicyEngine::new(node_policy::PolicyConfig {
+                allow_train: true,
+                ..Default::default()
+            })),
         });
 
         let app = build_router(state);

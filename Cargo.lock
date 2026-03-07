@@ -1623,7 +1623,7 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
 name = "node_ai"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "node_ai_mock"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "node_ai_ollama"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "node_api"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "node_app"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1722,6 +1722,7 @@ dependencies = [
  "node_api",
  "node_connectors",
  "node_crypto",
+ "node_federated",
  "node_ingest",
  "node_mesh",
  "node_policy",
@@ -1746,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "node_connectors"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "docx-rust",
@@ -1765,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "node_crypto"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1783,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "node_datasets"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_policy",
@@ -1798,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "node_discovery"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_policy",
@@ -1814,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "node_federated"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_mesh",
@@ -1832,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "node_ingest"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_connectors",
@@ -1850,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "node_mesh"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1871,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "node_policy"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_proto",
@@ -1882,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "node_proto"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1890,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "node_relay"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -1911,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "node_repl"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1927,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "node_research"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_ai",
@@ -1946,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "node_storage"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1964,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "node_trainer"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "node_policy",

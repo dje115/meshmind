@@ -4,6 +4,17 @@ Complete index of all documentation sections. Use this as a map to find what you
 
 ---
 
+## Distributed Memory Fabric
+
+| Document | Description |
+|----------|-------------|
+| [distributed-memory.md](distributed-memory.md) | Shards, mergeable state, query routing, federated, insights, outcomes, BI |
+| [DISTRIBUTED_MEMORY_GAPS.md](DISTRIBUTED_MEMORY_GAPS.md) | Gap analysis and roadmap |
+| [proactive-insights.md](proactive-insights.md) | Scheduled insights, alerts, benchmarks |
+| [federated-learning.md](federated-learning.md) | Federated rounds, delta aggregation |
+
+---
+
 ## Architecture
 
 | Document | Description |

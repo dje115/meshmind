@@ -8,6 +8,7 @@ A production-grade, local-first, cross-platform distributed AI node system built
 
 - [Features](#features)
 - [Architecture](#architecture)
+- [Documentation](#documentation)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
   - [Windows](#windows)
@@ -83,6 +84,22 @@ A production-grade, local-first, cross-platform distributed AI node system built
 
 ---
 
+## Documentation
+
+Full documentation is in `docs/`. See **[docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)** for the complete index.
+
+| Section | Description |
+|---------|-------------|
+| [Architecture](docs/architecture/overview.md) | Overview, storage, event log, CAS, replication, mesh, security |
+| [Ingestion](docs/ingestion/discovery.md) | Discovery, connectors, normalization, entity cards |
+| [Intelligence](docs/intelligence/business-intelligence.md) | Business intelligence, training, router/tagger/ranker models |
+| [Workflows](docs/workflows/ask-flow.md) | Ask flow, web research, peer consult, dataset manifests |
+| [Use Cases](docs/use-cases/quoting.md) | Quoting, customer intelligence, accounting, operations |
+| [Operations](docs/operations/configuration.md) | Configuration, snapshots, recovery, scaling, policy examples |
+| [Development](docs/development/crate-architecture.md) | Crate map, adding connectors/models, testing |
+
+---
+
 ## Prerequisites
 
 ### Required
@@ -115,10 +132,16 @@ CI uses `stable` (MSVC on Windows). For local development you need **one of** th
   # In MSYS2 UCRT64 terminal:
   pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-protobuf
 
-  # Add to PATH (PowerShell) — required so dlltool and linker are found:
+  # Add to PATH (PowerShell) — required so dlltool, linker, and DLLs are found:
+  # Without this, you may see "collect2.exe: error: ld returned 53 exit status"
   $env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"
   $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
   $env:PROTOC = "C:\msys64\mingw64\bin\protoc.exe"
+  ```
+  **Or use the wrapper script** (sets PATH automatically):
+  ```powershell
+  .\build.ps1 test
+  .\build.ps1 build
   ```
   Then create `.cargo/config.toml` in the project root:
   ```toml
@@ -522,16 +545,14 @@ meshmind/
 │   ├── index.html            # App shell with sidebar nav
 │   └── package.json          # Vite + Tauri dependencies
 ├── docs/
-│   ├── spec.md               # Full architecture specification
-│   ├── protocol.md           # Wire protocol documentation
-│   ├── storage.md            # Storage engine details
-│   ├── replication.md        # Replication model
-│   ├── security.md           # Security model
-│   ├── mesh.md               # Mesh networking
-│   ├── inference.md          # Inference backend design
-│   ├── research.md           # Web research system
-│   ├── training.md           # Training system
-│   └── roadmap.md            # Implementation progress
+│   ├── DOCUMENTATION_INDEX.md # Complete documentation index
+│   ├── architecture/         # Overview, storage, event-log, cas, replication, mesh, security
+│   ├── ingestion/            # Discovery, connectors, normalization, entity-cards
+│   ├── intelligence/         # Business intelligence, training, router/tagger/ranker
+│   ├── workflows/            # Ask flow, web research, peer consult, dataset manifests
+│   ├── use-cases/            # Quoting, customer, accounting, operations
+│   ├── operations/           # Configuration, snapshots, recovery, scaling
+│   └── development/          # Crate architecture, adding connectors/models, testing
 ├── proto/
 │   ├── common.proto          # Shared types
 │   ├── cas.proto             # CAS object headers
@@ -677,7 +698,7 @@ Supported Ollama models: any model available via `ollama pull`, e.g.:
 
 ## Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md) for detailed progress.
+See [docs/roadmap.md](docs/roadmap.md) for detailed progress. For documentation structure, see [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
 
 | Phase | Status | Description |
 |---|---|---|

@@ -44,7 +44,10 @@ fn create_node_state(
         ..Default::default()
     }));
     let model_registry = Arc::new(tokio::sync::Mutex::new(node_trainer::ModelRegistry::new()));
-    let trainer = Arc::new(node_trainer::Trainer::new(policy, model_registry.clone()));
+    let trainer = Arc::new(node_trainer::Trainer::new(
+        policy.clone(),
+        model_registry.clone(),
+    ));
 
     let state = Arc::new(AppState {
         event_log: RwLock::new(event_log),
@@ -72,6 +75,9 @@ fn create_node_state(
         })),
         listen_base_url: "http://127.0.0.1:9900".into(),
         oauth_pending: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        federated_rounds: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        federated_config: node_federated::FederatedConfig::new("router"),
+        federated_policy: policy,
     });
 
     (state, tmp)

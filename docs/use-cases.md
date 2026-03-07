@@ -172,8 +172,22 @@ Each scenario follows: **Data Source → Normalization → Retrieval → Trainin
 
 ---
 
+## Distributed Memory Features
+
+Across use cases, the distributed memory fabric adds:
+
+- **Shard-aware routing**: Questions route to peers hosting relevant shards (e.g. `entity_type:invoice`) instead of broadcasting.
+- **Outcome events**: Record QUOTE_ACCEPTED, QUOTE_LOST, CASE_FAILED via `POST /v1/outcomes` to feed training.
+- **Proactive insights**: Scheduled insight generation (overdue, anomalies, benchmarks) via `POST /admin/insights/run`.
+- **BI provenance**: Ask responses include `source_types`, `evidence`, and `missing_data_warnings` for structured provenance.
+
+See [distributed-memory.md](distributed-memory.md), [proactive-insights.md](proactive-insights.md), [federated-learning.md](federated-learning.md).
+
+---
+
 ## References
 
 - `docs/ingestion.md` — Ingest lifecycle
 - `docs/business-intelligence.md` — Entity cards, facts
 - `docs/training.md` — Training pipeline
+- `docs/distributed-memory.md` — Shards, mergeable state, query routing

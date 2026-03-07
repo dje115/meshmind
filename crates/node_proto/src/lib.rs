@@ -8,6 +8,7 @@ pub mod cas {
     include!(concat!(env!("OUT_DIR"), "/meshmind.cas.rs"));
 }
 
+#[allow(clippy::large_enum_variant)]
 pub mod events {
     include!(concat!(env!("OUT_DIR"), "/meshmind.events.rs"));
 }
@@ -1474,6 +1475,10 @@ mod tests {
             (EventType::Unspecified, 0),
             (EventType::CaseCreated, 10),
             (EventType::CaseConfirmed, 11),
+            (EventType::CaseFailed, 13),
+            (EventType::QuoteAccepted, 14),
+            (EventType::QuoteLost, 15),
+            (EventType::QuoteRevised, 16),
             (EventType::CaseTagged, 12),
             (EventType::ArtifactPublished, 20),
             (EventType::ArtifactDeprecated, 21),
@@ -1495,6 +1500,14 @@ mod tests {
             (EventType::IngestCompleted, 81),
             (EventType::DatasetManifestCreated, 82),
             (EventType::EntityRelationshipRecorded, 94),
+            (EventType::ShardSubscriptionAdded, 95),
+            (EventType::MergeableTagUpdated, 96),
+            (EventType::MergeableCounterUpdated, 97),
+            (EventType::MergeableAnnotationUpdated, 98),
+            (EventType::InsightGenerated, 100),
+            (EventType::AnomalyDetected, 101),
+            (EventType::AlertRaised, 102),
+            (EventType::BenchmarkUpdated, 103),
             (EventType::TrainDeltaPublished, 90),
             (EventType::TrainDeltaApplied, 91),
             (EventType::FederatedRoundStarted, 92),
