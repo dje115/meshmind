@@ -36,6 +36,7 @@ enum EventType {
 
   // Entity intelligence graph
   ENTITY_RELATIONSHIP_RECORDED = 94;
+  EXTRACTED_ENTITY_RECORDED = 99;  // Document-derived entity (person, company, email, etc.)
 
   // Knowledge shards (distributed memory)
   SHARD_SUBSCRIPTION_ADDED = 95;
@@ -120,6 +121,7 @@ message EventEnvelope {
     DatasetManifestCreated dataset_manifest_created = 172;
 
     EntityRelationshipRecorded entity_relationship_recorded = 173;
+    ExtractedEntityRecorded extracted_entity_recorded = 186;
 
     // Knowledge shards
     ShardSubscriptionAdded shard_subscription_added = 174;
@@ -321,6 +323,18 @@ message EntityRelationshipRecorded {
   string relationship_type = 3; // e.g. has_quotes, has_line_items, belongs_to
   string source_id = 4;
   string table_name = 5;
+}
+
+// Document-derived extracted entity (Phase B: entity extraction from chunks)
+message ExtractedEntityRecorded {
+  string entity_id = 1;           // e.g. person:john-smith, email:john@example.com
+  string entity_type = 2;         // person, company, email, phone, money, date, etc.
+  string entity_value = 3;        // raw value as found in text
+  string normalized_value = 4;    // for deduplication (lowercase, trimmed, etc.)
+  string source_document_id = 5;  // parent document (e.g. filename)
+  int32 chunk_index = 6;          // chunk within document
+  float confidence = 7;           // 0.0–1.0
+  string extraction_method = 8;   // rule_based | llm_assisted
 }
 
 // Shard key format: tenant:X | entity_type:customer | site:UK | artifact_class:document | public

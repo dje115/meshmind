@@ -327,6 +327,79 @@ fn classify_business_intent(question: &str) -> BusinessIntent {
     }
 }
 
+/// Document entity intent: questions about extracted entities in documents.
+#[derive(Debug)]
+enum DocumentEntityIntent {
+    ListPeople,
+    ListCompanies,
+    ListEmails,
+    ListInvoiceNumbers,
+    ListQuoteNumbers,
+    DocumentsMentioning(String),
+}
+
+fn classify_document_entity_intent(question: &str) -> Option<DocumentEntityIntent> {
+    let lower = question.trim().to_lowercase();
+    if lower.contains("who appears")
+        || lower.contains("what people")
+        || lower.contains("people mentioned")
+        || lower.contains("names in")
+    {
+        return Some(DocumentEntityIntent::ListPeople);
+    }
+    if lower.contains("which companies")
+        || lower.contains("what companies")
+        || lower.contains("companies appear")
+        || lower.contains("companies mentioned")
+    {
+        return Some(DocumentEntityIntent::ListCompanies);
+    }
+    if lower.contains("list emails")
+        || lower.contains("emails found")
+        || lower.contains("what emails")
+    {
+        return Some(DocumentEntityIntent::ListEmails);
+    }
+    if lower.contains("invoice numbers")
+        || lower.contains("invoice no")
+        || lower.contains("inv numbers")
+    {
+        return Some(DocumentEntityIntent::ListInvoiceNumbers);
+    }
+    if lower.contains("quote numbers")
+        || lower.contains("quote no")
+        || lower.contains("quotation numbers")
+    {
+        return Some(DocumentEntityIntent::ListQuoteNumbers);
+    }
+    // "show documents mentioning X" / "documents that mention X"
+    if lower.contains("documents mentioning")
+        || lower.contains("documents that mention")
+        || lower.contains("mentioning ")
+    {
+        let rest = if let Some(i) = lower.find("mentioning ") {
+            lower[i + 11..].trim()
+        } else if let Some(i) = lower.find("that mention ") {
+            lower[i + 13..].trim()
+        } else {
+            return None;
+        };
+        let entity: String = rest
+            .chars()
+            .take_while(|c| {
+                c.is_alphanumeric() || *c == ' ' || *c == '.' || *c == '-' || *c == '\''
+            })
+            .collect();
+        let entity = entity.trim().trim_end_matches(['?', '.']);
+        if entity.len() >= 2 {
+            return Some(DocumentEntityIntent::DocumentsMentioning(
+                entity.to_string(),
+            ));
+        }
+    }
+    None
+}
+
 fn looks_like_general_knowledge_question(content: &str) -> bool {
     let lower = content.trim().to_lowercase();
     if lower.len() < 8 || lower.len() > 120 {
@@ -372,6 +445,8 @@ fn to_fts5_query(text: &str) -> String {
 const CONTEXT_CONTENT_DEFAULT_CHARS: usize = 8000; // Per-doc for broad queries (trends, summarize)
 const CONTEXT_CONTENT_DOC_SPECIFIC_CHARS: usize = 60_000; // Full doc when question targets it
 const CONTEXT_SUMMARY_MAX_CHARS: usize = 500;
+/// Per-chunk for document_chunk hits (chunk_text). Chunks are ~1500 chars.
+const CONTEXT_CHUNK_MAX_CHARS: usize = 1500;
 const CONTEXT_TOTAL_BUDGET_CHARS: usize = 95_000; // Stay under ~100K for LLM context
 
 /// True if the question asks about a specific document (e.g. "read IT3000.docx", "content of this doc").
@@ -470,6 +545,8 @@ fn build_context_bullets(
             CONTEXT_CONTENT_DOC_SPECIFIC_CHARS
         } else if is_doc_specific {
             CONTEXT_SUMMARY_MAX_CHARS
+        } else if h.hit_type == "document_chunk" {
+            CONTEXT_CHUNK_MAX_CHARS
         } else {
             CONTEXT_CONTENT_DEFAULT_CHARS
         };
@@ -480,7 +557,10 @@ fn build_context_bullets(
             total_chars += excerpt.len();
             excerpt
         } else {
-            h.summary.chars().take(CONTEXT_SUMMARY_MAX_CHARS).collect()
+            let take = (CONTEXT_TOTAL_BUDGET_CHARS - total_chars).min(max_per_doc);
+            let excerpt: String = h.summary.chars().take(take).collect();
+            total_chars += excerpt.len();
+            excerpt
         };
 
         bullets.push(format!("- [{}] {}:\n{}", h.hit_type, h.title, text));
@@ -1533,6 +1613,95 @@ async fn handle_ask(
                     h.fact_id, h.metric, h.value_json, h.dimensions_json
                 ));
             }
+        }
+    }
+
+    // Document entity intent: structured queries over extracted entities (people, companies, emails, etc.)
+    if let Some(doc_entity_intent) = classify_document_entity_intent(&req.question) {
+        let mut doc_entity_bullets: Vec<String> = Vec::new();
+        match doc_entity_intent {
+            DocumentEntityIntent::ListPeople => {
+                if let Ok(entities) = search::list_entities_by_type(&conn, "person", 50) {
+                    let unique: std::collections::HashSet<_> = entities
+                        .iter()
+                        .map(|e| e.normalized_value.as_str())
+                        .collect();
+                    for v in unique.into_iter().take(30) {
+                        doc_entity_bullets.push(format!("- Person: {}", v));
+                        entity_evidence_ids.push(format!("person:{}", v));
+                    }
+                }
+            }
+            DocumentEntityIntent::ListCompanies => {
+                if let Ok(entities) = search::list_entities_by_type(&conn, "company", 50) {
+                    let unique: std::collections::HashSet<_> = entities
+                        .iter()
+                        .map(|e| e.normalized_value.as_str())
+                        .collect();
+                    for v in unique.into_iter().take(30) {
+                        doc_entity_bullets.push(format!("- Company: {}", v));
+                        entity_evidence_ids.push(format!("company:{}", v));
+                    }
+                }
+            }
+            DocumentEntityIntent::ListEmails => {
+                if let Ok(entities) = search::list_entities_by_type(&conn, "email", 50) {
+                    for e in entities.into_iter().take(30) {
+                        doc_entity_bullets.push(format!("- Email: {}", e.entity_value));
+                        entity_evidence_ids.push(e.entity_id);
+                    }
+                }
+            }
+            DocumentEntityIntent::ListInvoiceNumbers => {
+                if let Ok(entities) = search::list_entities_by_type(&conn, "invoice_number", 50) {
+                    for e in entities.into_iter().take(30) {
+                        doc_entity_bullets.push(format!("- Invoice: {}", e.entity_value));
+                        entity_evidence_ids.push(e.entity_id);
+                    }
+                }
+            }
+            DocumentEntityIntent::ListQuoteNumbers => {
+                if let Ok(entities) = search::list_entities_by_type(&conn, "quote_number", 50) {
+                    for e in entities.into_iter().take(30) {
+                        doc_entity_bullets.push(format!("- Quote: {}", e.entity_value));
+                        entity_evidence_ids.push(e.entity_id);
+                    }
+                }
+            }
+            DocumentEntityIntent::DocumentsMentioning(mention) => {
+                let norm = node_extraction::normalize_value("company", &mention);
+                if let Ok(docs) = search::list_documents_for_entity(&conn, &norm, None, 20) {
+                    for (doc_id, etype, eval) in docs {
+                        doc_entity_bullets.push(format!(
+                            "- Document '{}' mentions {}: {}",
+                            doc_id, etype, eval
+                        ));
+                        entity_evidence_ids.push(format!("doc:{}", doc_id));
+                    }
+                }
+                if doc_entity_bullets.is_empty() {
+                    if let Ok(docs) =
+                        search::list_documents_for_entity(&conn, &mention.to_lowercase(), None, 20)
+                    {
+                        for (doc_id, etype, eval) in docs {
+                            doc_entity_bullets.push(format!(
+                                "- Document '{}' mentions {}: {}",
+                                doc_id, etype, eval
+                            ));
+                            entity_evidence_ids.push(format!("doc:{}", doc_id));
+                        }
+                    }
+                }
+            }
+        }
+        if !doc_entity_bullets.is_empty() {
+            entity_fact_bullets.insert(
+                0,
+                format!(
+                    "Extracted entities from documents:\n{}",
+                    doc_entity_bullets.join("\n")
+                ),
+            );
         }
     }
 
@@ -3187,6 +3356,7 @@ async fn handle_admin_ingest(
         &db_path,
         &node_id,
         mapping_hints.as_ref(),
+        Some(state.backend.clone()),
     )
     .map_err(|e| {
         (
@@ -3717,6 +3887,7 @@ async fn handle_admin_ingest_all(
             &db_path,
             &node_id,
             mapping_hints.as_ref(),
+            Some(state.backend.clone()),
         ) {
             Ok(result) => {
                 total_rows += result.rows_ingested;

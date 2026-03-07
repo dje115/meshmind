@@ -8,7 +8,9 @@ node_proto = { workspace = true }
 node_storage = { workspace = true }
 rusqlite = { workspace = true }
 node_policy = { workspace = true }
+node_ai = { path = "../node_ai" }
 node_connectors = { path = "../node_connectors" }
+node_extraction = { path = "../node_extraction" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

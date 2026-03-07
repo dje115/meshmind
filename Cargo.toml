@@ -14,6 +14,7 @@ members = [
     "crates/node_research",
     "crates/node_discovery",
     "crates/node_connectors",
+    "crates/node_extraction",
     "crates/node_ingest",
     "crates/node_datasets",
     "crates/node_trainer",
@@ -100,6 +101,7 @@ node_ai_mock = { path = "crates/node_ai_mock" }
 node_research = { path = "crates/node_research" }
 node_discovery = { path = "crates/node_discovery" }
 node_connectors = { path = "crates/node_connectors" }
+node_extraction = { path = "crates/node_extraction" }
 node_ingest = { path = "crates/node_ingest" }
 node_datasets = { path = "crates/node_datasets" }
 node_trainer = { path = "crates/node_trainer" }

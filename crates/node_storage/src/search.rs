@@ -38,6 +38,16 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
+/// Document chunk hit from documents_fts (full-text search over chunk_text).
+#[derive(Debug, Clone)]
+pub struct DocumentChunkHit {
+    pub artifact_id: String,
+    pub document_id: String,
+    pub chunk_index: String,
+    pub chunk_text: String,
+    pub rank: f64,
+}
+
 /// Search cases by FTS5 query.
 pub fn search_cases(conn: &Connection, query: &str, limit: usize) -> Result<Vec<CaseHit>> {
     let mut stmt = conn.prepare(
@@ -55,6 +65,37 @@ pub fn search_cases(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
                 title: row.get(1)?,
                 summary: row.get(2)?,
                 rank: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(hits)
+}
+
+/// Search document chunks by FTS5 query over chunk_text.
+/// Returns document fragments that match the query; results map back to document_id.
+pub fn search_documents_fts(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<DocumentChunkHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT artifact_id, document_id, chunk_index, chunk_text, rank
+         FROM documents_fts
+         WHERE documents_fts MATCH ?1
+         ORDER BY rank
+         LIMIT ?2",
+    )?;
+
+    let hits = stmt
+        .query_map(params![query, limit as i64], |row| {
+            Ok(DocumentChunkHit {
+                artifact_id: row.get(0)?,
+                document_id: row.get(1)?,
+                chunk_index: row.get(2)?,
+                chunk_text: row.get(3)?,
+                rank: row.get(4)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -191,12 +232,151 @@ pub fn query_facts(
     }
 }
 
-/// Unified search across both cases and artifacts, merged by rank.
+/// Extracted entity from documents (Phase B).
+#[derive(Debug, Clone)]
+pub struct EntityRecord {
+    pub entity_id: String,
+    pub entity_type: String,
+    pub entity_value: String,
+    pub normalized_value: String,
+    pub document_id: String,
+    pub chunk_index: i32,
+    pub confidence: f32,
+}
+
+/// List entities by type.
+pub fn list_entities_by_type(
+    conn: &Connection,
+    entity_type: &str,
+    limit: usize,
+) -> Result<Vec<EntityRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence
+         FROM entities_view WHERE entity_type = ?1
+         ORDER BY created_at_ms DESC LIMIT ?2",
+    )?;
+    let mut out = Vec::new();
+    let mut rows = stmt.query(params![entity_type, limit as i64])?;
+    while let Some(row) = rows.next()? {
+        out.push(EntityRecord {
+            entity_id: row.get(0)?,
+            entity_type: row.get(1)?,
+            entity_value: row.get(2)?,
+            normalized_value: row.get(3)?,
+            document_id: row.get(4)?,
+            chunk_index: row.get(5)?,
+            confidence: row.get(6)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Search entities by value (LIKE on entity_value or normalized_value).
+pub fn search_entities_by_value(
+    conn: &Connection,
+    query: &str,
+    entity_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<EntityRecord>> {
+    let pattern = format!("%{query}%");
+    let limit_i64 = limit as i64;
+    let mut out = Vec::new();
+    if let Some(et) = entity_type {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence
+             FROM entities_view
+             WHERE entity_type = ?1 AND (entity_value LIKE ?2 OR normalized_value LIKE ?2)
+             ORDER BY created_at_ms DESC LIMIT ?3",
+        )?;
+        let mut rows = stmt.query(params![et, pattern, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(EntityRecord {
+                entity_id: row.get(0)?,
+                entity_type: row.get(1)?,
+                entity_value: row.get(2)?,
+                normalized_value: row.get(3)?,
+                document_id: row.get(4)?,
+                chunk_index: row.get(5)?,
+                confidence: row.get(6)?,
+            });
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence
+             FROM entities_view
+             WHERE entity_value LIKE ?1 OR normalized_value LIKE ?1
+             ORDER BY created_at_ms DESC LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(params![pattern, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(EntityRecord {
+                entity_id: row.get(0)?,
+                entity_type: row.get(1)?,
+                entity_value: row.get(2)?,
+                normalized_value: row.get(3)?,
+                document_id: row.get(4)?,
+                chunk_index: row.get(5)?,
+                confidence: row.get(6)?,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// List documents that mention an entity (by normalized_value).
+pub fn list_documents_for_entity(
+    conn: &Connection,
+    normalized_value: &str,
+    entity_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, String, String)>> {
+    let limit_i64 = limit as i64;
+    let mut out = Vec::new();
+    if let Some(et) = entity_type {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT document_id, entity_type, entity_value
+             FROM entities_view
+             WHERE normalized_value = ?1 AND entity_type = ?2
+             LIMIT ?3",
+        )?;
+        let mut rows = stmt.query(params![normalized_value, et, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT document_id, entity_type, entity_value
+             FROM entities_view
+             WHERE normalized_value = ?1
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(params![normalized_value, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+    }
+    Ok(out)
+}
+
+/// Count entity mentions by type.
+pub fn count_entity_mentions(conn: &Connection, entity_type: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM entities_view WHERE entity_type = ?1",
+        params![entity_type],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Unified search across cases, artifacts, and document chunks (documents_fts), merged by rank.
+/// Document chunk hits include chunk_text in summary so they can be used as context evidence.
 pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let cases = search_cases(conn, query, limit)?;
     let artifacts = search_artifacts(conn, query, limit)?;
+    let doc_chunks = search_documents_fts(conn, query, limit)?;
 
-    let mut all: Vec<SearchHit> = Vec::with_capacity(cases.len() + artifacts.len());
+    let mut all: Vec<SearchHit> =
+        Vec::with_capacity(cases.len() + artifacts.len() + doc_chunks.len());
 
     for c in cases {
         all.push(SearchHit {
@@ -216,6 +396,16 @@ pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
             summary: a.summary,
             content_hash: a.content_hash,
             rank: a.rank,
+        });
+    }
+    for d in doc_chunks {
+        all.push(SearchHit {
+            hit_type: "document_chunk".into(),
+            id: d.artifact_id,
+            title: format!("{} (chunk {})", d.document_id, d.chunk_index),
+            summary: d.chunk_text,
+            content_hash: None,
+            rank: d.rank,
         });
     }
 
@@ -419,6 +609,137 @@ mod tests {
         let hits = search_artifacts(&conn, "database failover", 10).unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().any(|h| h.artifact_id == "a3"));
+    }
+
+    #[test]
+    fn search_documents_fts_phrase_in_chunk() {
+        let conn = Connection::open_in_memory().unwrap();
+        sqlite_views::create_schema(&conn).unwrap();
+
+        // Insert document chunks via projector (chunk 0, 1, 2 - phrase only in chunk 1)
+        for (i, chunk_text) in [
+            "First chunk with introductory content about the project.",
+            "Second chunk containing the unique zebra stripes phrase in the middle.",
+            "Third chunk with concluding remarks and summary.",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let attrs = serde_json::json!({
+                "document_id": "doc-multi",
+                "chunk_index": i,
+                "chunk_text": chunk_text
+            });
+            let event = EventEnvelope {
+                event_id: format!("e-chunk-{i}"),
+                r#type: EventType::ArtifactPublished as i32,
+                ts: Some(Timestamp {
+                    unix_ms: 1700000000000 + i as i64,
+                }),
+                node_id: Some(NodeId {
+                    value: "node-1".into(),
+                }),
+                tenant_id: Some(TenantId {
+                    value: "public".into(),
+                }),
+                sensitivity: Sensitivity::Public as i32,
+                event_hash: Some(HashRef {
+                    sha256: format!("h-chunk-{i}"),
+                }),
+                payload: Some(event_envelope::Payload::ArtifactPublished(
+                    ArtifactPublished {
+                        artifact_id: format!("doc-multi::chunk::{i}"),
+                        artifact_type: ArtifactType::Document as i32,
+                        version: 1,
+                        title: format!("Doc chunk {i}"),
+                        summary: chunk_text.chars().take(100).collect::<String>(),
+                        content_ref: Some(HashRef {
+                            sha256: format!("ch-{i}"),
+                        }),
+                        shareable: false,
+                        expires_unix_ms: 0,
+                        document_subtype: "document_chunk".into(),
+                        entity_attributes_json: attrs.to_string(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            };
+            projector::apply_event(&conn, &event).unwrap();
+        }
+
+        // Search for phrase appearing only in middle chunk
+        let hits = search_documents_fts(&conn, "zebra stripes", 10).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits
+            .iter()
+            .any(|h| h.chunk_index == "1" && h.document_id == "doc-multi"));
+        assert!(hits.iter().any(|h| h.chunk_text.contains("zebra stripes")));
+    }
+
+    #[test]
+    fn search_all_includes_document_chunks() {
+        let conn = Connection::open_in_memory().unwrap();
+        sqlite_views::create_schema(&conn).unwrap();
+        // Insert a document chunk
+        let attrs = serde_json::json!({
+            "document_id": "doc-x",
+            "chunk_index": 0,
+            "chunk_text": "The annual budget allocation for infrastructure was approved."
+        });
+        let event = EventEnvelope {
+            event_id: "e1".into(),
+            r#type: EventType::ArtifactPublished as i32,
+            ts: Some(Timestamp {
+                unix_ms: 1700000000000,
+            }),
+            node_id: Some(NodeId {
+                value: "node-1".into(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
+            sensitivity: Sensitivity::Public as i32,
+            event_hash: Some(HashRef {
+                sha256: "h1".into(),
+            }),
+            payload: Some(event_envelope::Payload::ArtifactPublished(
+                ArtifactPublished {
+                    artifact_id: "doc-x::chunk::0".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Doc chunk 0".into(),
+                    summary: "Budget section".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch0".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "document_chunk".into(),
+                    entity_attributes_json: attrs.to_string(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        projector::apply_event(&conn, &event).unwrap();
+
+        let all = search_all(&conn, "budget allocation", 10).unwrap();
+        assert!(!all.is_empty());
+        let chunk_hits: Vec<_> = all
+            .iter()
+            .filter(|h| h.hit_type == "document_chunk")
+            .collect();
+        assert!(!chunk_hits.is_empty());
+        assert!(chunk_hits[0].summary.contains("budget allocation"));
+    }
+
+    #[test]
+    fn search_documents_fts_no_results() {
+        let conn = Connection::open_in_memory().unwrap();
+        sqlite_views::create_schema(&conn).unwrap();
+        let hits = search_documents_fts(&conn, "nonexistentxyzzz", 10).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]

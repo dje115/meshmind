@@ -682,6 +682,38 @@ const DOCUMENT_EXTENSIONS: &[&str] = &["pdf", "docx", "txt", "md", "rtf"];
 
 const MAX_DOCUMENT_TEXT_BYTES: usize = 100 * 1024;
 
+/// Chunk size in characters for document splitting.
+pub const CHUNK_SIZE: usize = 1500;
+/// Overlap in characters between consecutive chunks.
+pub const CHUNK_OVERLAP: usize = 200;
+
+/// Split text into chunks with overlap. Small texts return a single chunk.
+fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return vec![];
+    }
+    if text.len() <= chunk_size {
+        return vec![text.to_string()];
+    }
+    let step = chunk_size.saturating_sub(overlap).max(1);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let end = (start + chunk_size).min(text.len());
+        let chunk = &text[start..end];
+        let chunk_trimmed = chunk.trim();
+        if !chunk_trimmed.is_empty() {
+            chunks.push(chunk_trimmed.to_string());
+        }
+        if end >= text.len() {
+            break;
+        }
+        start += step;
+    }
+    chunks
+}
+
 fn is_document_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -692,18 +724,29 @@ fn is_document_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Result of extracting text from a document file.
+struct ExtractResult {
+    text: String,
+    file_type: String,
+    page_count: u64,
+}
+
 /// Extract text from PDF using pdf_oxide (more robust than pdf-extract, handles complex PDFs).
-fn extract_pdf_text(path: &Path) -> String {
+fn extract_pdf_text(path: &Path) -> ExtractResult {
     let mut doc = match pdf_oxide::PdfDocument::open(path) {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "PDF open failed");
-            return String::new();
+            return ExtractResult {
+                text: String::new(),
+                file_type: "pdf".into(),
+                page_count: 0,
+            };
         }
     };
-    let page_count = doc.page_count().unwrap_or(0) as usize;
+    let page_count = doc.page_count().unwrap_or(0) as u64;
     let mut text = String::new();
-    for page in 0..page_count {
+    for page in 0..(page_count as usize) {
         match doc.extract_text(page) {
             Ok(page_text) => {
                 if !page_text.is_empty() {
@@ -718,38 +761,61 @@ fn extract_pdf_text(path: &Path) -> String {
             }
         }
     }
-    text
+    let truncated = if text.len() > MAX_DOCUMENT_TEXT_BYTES {
+        text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
+    } else {
+        text
+    };
+    ExtractResult {
+        text: truncated,
+        file_type: "pdf".into(),
+        page_count,
+    }
 }
 
-fn extract_text_from_file(path: &Path) -> (String, String, u64) {
+fn extract_text_from_file(path: &Path) -> ExtractResult {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     let file_type = ext.clone();
-    let page_count = 0u64;
 
-    let text = match ext.as_str() {
-        "txt" | "md" | "rtf" => fs::read_to_string(path).unwrap_or_default(),
+    let result = match ext.as_str() {
+        "txt" | "md" | "rtf" => ExtractResult {
+            text: fs::read_to_string(path).unwrap_or_default(),
+            file_type,
+            page_count: 0,
+        },
         "pdf" => extract_pdf_text(path),
-        "docx" => match docx_rust::DocxFile::from_file(path) {
-            Ok(docx_file) => match docx_file.parse() {
-                Ok(docx) => extract_docx_text(&docx.document),
+        "docx" => ExtractResult {
+            text: match docx_rust::DocxFile::from_file(path) {
+                Ok(docx_file) => match docx_file.parse() {
+                    Ok(docx) => extract_docx_text(&docx.document),
+                    Err(_) => String::new(),
+                },
                 Err(_) => String::new(),
             },
-            Err(_) => String::new(),
+            file_type,
+            page_count: 0,
         },
-        _ => String::new(),
+        _ => ExtractResult {
+            text: String::new(),
+            file_type,
+            page_count: 0,
+        },
     };
 
-    let truncated = if text.len() > MAX_DOCUMENT_TEXT_BYTES {
-        text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
+    let truncated = if result.text.len() > MAX_DOCUMENT_TEXT_BYTES {
+        result.text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
     } else {
-        text
+        result.text
     };
-
-    (truncated, file_type, page_count)
+    ExtractResult {
+        text: truncated,
+        file_type: result.file_type,
+        page_count: result.page_count,
+    }
 }
 
 fn extract_docx_text(docx: &docx_rust::document::Document) -> String {
@@ -798,6 +864,36 @@ impl Connector for DocumentConnector {
 
         let columns = vec![
             SchemaColumn {
+                name: "document_id".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "chunk_index".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "chunk_text".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "source_file".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                is_primary_key: false,
+            },
+            SchemaColumn {
+                name: "page_number".into(),
+                data_type: "INTEGER".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
+            SchemaColumn {
                 name: "filename".into(),
                 data_type: "TEXT".into(),
                 nullable: false,
@@ -822,12 +918,6 @@ impl Connector for DocumentConnector {
                 is_primary_key: false,
             },
             SchemaColumn {
-                name: "page_count".into(),
-                data_type: "INTEGER".into(),
-                nullable: true,
-                is_primary_key: false,
-            },
-            SchemaColumn {
                 name: "content_text".into(),
                 data_type: "TEXT".into(),
                 nullable: true,
@@ -838,7 +928,7 @@ impl Connector for DocumentConnector {
         Ok(vec![TableInfo {
             table_name: "documents".to_string(),
             columns,
-            row_count_estimate: file_count,
+            row_count_estimate: file_count * 3, // rough estimate: avg 3 chunks per doc
         }])
     }
 
@@ -856,35 +946,53 @@ impl Connector for DocumentConnector {
             .collect();
         doc_files.sort_by_key(|e| e.file_name());
 
-        let start = offset as usize;
-        let end = std::cmp::min(start + limit as usize, doc_files.len());
-        let mut rows = Vec::new();
+        let mut all_chunks: Vec<IngestRow> = Vec::new();
 
-        for (i, entry) in doc_files[start..end].iter().enumerate() {
+        for entry in doc_files.iter() {
             let fpath = entry.path();
-            let (content_text, file_type, page_count) = extract_text_from_file(&fpath);
+            let filename = fpath
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let file_path = fpath.to_string_lossy().into_owned();
             let file_size = fs::metadata(&fpath).map(|m| m.len()).unwrap_or(0);
+            let extract = extract_text_from_file(&fpath);
 
-            let mut columns = BTreeMap::new();
-            columns.insert(
-                "filename".into(),
-                fpath
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string(),
-            );
-            columns.insert("file_path".into(), fpath.to_string_lossy().into_owned());
-            columns.insert("file_type".into(), file_type);
-            columns.insert("file_size_bytes".into(), file_size.to_string());
-            columns.insert("page_count".into(), page_count.to_string());
-            columns.insert("content_text".into(), content_text);
+            let chunks = chunk_text(&extract.text, CHUNK_SIZE, CHUNK_OVERLAP);
+            let document_id = filename.clone();
 
-            rows.push(IngestRow {
-                entity_id: format!("{}", start + i),
-                columns,
-            });
+            let num_chunks = chunks.len();
+            for (chunk_idx, chunk_text) in chunks.into_iter().enumerate() {
+                let mut columns = BTreeMap::new();
+                columns.insert("document_id".into(), document_id.clone());
+                columns.insert("chunk_index".into(), chunk_idx.to_string());
+                columns.insert("chunk_text".into(), chunk_text.clone());
+                columns.insert("source_file".into(), file_path.clone());
+                let page_number = if extract.page_count > 0 && num_chunks > 0 {
+                    1 + (chunk_idx as u64 * extract.page_count / num_chunks as u64)
+                        .min(extract.page_count.saturating_sub(1))
+                } else {
+                    0
+                };
+                columns.insert("page_number".into(), page_number.to_string());
+                columns.insert("filename".into(), filename.clone());
+                columns.insert("file_path".into(), file_path.clone());
+                columns.insert("file_type".into(), extract.file_type.clone());
+                columns.insert("file_size_bytes".into(), file_size.to_string());
+                columns.insert("content_text".into(), chunk_text);
+
+                let entity_id = format!("{}::chunk::{}", document_id, chunk_idx);
+                all_chunks.push(IngestRow { entity_id, columns });
+            }
         }
+
+        let start = offset as usize;
+        let rows: Vec<IngestRow> = all_chunks
+            .into_iter()
+            .skip(start)
+            .take(limit as usize)
+            .collect();
 
         Ok(IngestBatchResult {
             table_name: "documents".to_string(),
@@ -1155,8 +1263,12 @@ mod tests {
 
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].table_name, "documents");
-        assert_eq!(tables[0].row_count_estimate, 2);
-        assert_eq!(tables[0].columns.len(), 6);
+        assert_eq!(tables[0].row_count_estimate, 6);
+        assert!(tables[0].columns.len() >= 10);
+        let col_names: Vec<_> = tables[0].columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(col_names.contains(&"document_id"));
+        assert!(col_names.contains(&"chunk_index"));
+        assert!(col_names.contains(&"chunk_text"));
     }
 
     #[test]
@@ -1167,8 +1279,10 @@ mod tests {
         let c = DocumentConnector::new("doc-test");
         let batch = c.ingest_batch(dir.path(), "documents", 0, 10).unwrap();
 
-        assert_eq!(batch.rows.len(), 1);
+        assert_eq!(batch.rows.len(), 1, "small document remains single chunk");
         assert_eq!(batch.rows[0].columns["filename"], "hello.txt");
+        assert_eq!(batch.rows[0].columns["document_id"], "hello.txt");
+        assert_eq!(batch.rows[0].columns["chunk_index"], "0");
         assert_eq!(batch.rows[0].columns["file_type"], "txt");
         assert_eq!(batch.rows[0].columns["content_text"], "Hello, world!");
         assert!(
@@ -1209,6 +1323,73 @@ mod tests {
 
         let batch2 = c.ingest_batch(dir.path(), "documents", 2, 10).unwrap();
         assert_eq!(batch2.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_text_small_remains_single() {
+        let text = "Short text.";
+        let chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "Short text.");
+    }
+
+    #[test]
+    fn test_chunk_text_large_splits_into_multiple() {
+        let text: String = "x".repeat(4000);
+        let chunks = chunk_text(&text, CHUNK_SIZE, CHUNK_OVERLAP);
+        assert!(
+            chunks.len() >= 2,
+            "4000 chars should produce multiple chunks, got {}",
+            chunks.len()
+        );
+        for (i, ch) in chunks.iter().enumerate() {
+            assert!(
+                ch.len() <= CHUNK_SIZE + 100,
+                "chunk {} length {} exceeds CHUNK_SIZE",
+                i,
+                ch.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_overlap() {
+        let text: String = "a".repeat(2000);
+        let chunks = chunk_text(&text, CHUNK_SIZE, CHUNK_OVERLAP);
+        assert!(chunks.len() >= 2);
+        let c1_end = chunks[0]
+            .chars()
+            .rev()
+            .take(CHUNK_OVERLAP)
+            .collect::<String>();
+        let c2_start = chunks[1].chars().take(CHUNK_OVERLAP).collect::<String>();
+        assert_eq!(
+            c1_end, c2_start,
+            "consecutive chunks should overlap by CHUNK_OVERLAP"
+        );
+    }
+
+    #[test]
+    fn test_document_ingest_large_splits_into_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let large_text: String = "word ".repeat(400);
+        fs::write(dir.path().join("large.txt"), large_text.as_bytes()).unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 100).unwrap();
+
+        assert!(
+            batch.rows.len() >= 2,
+            "large document should split into multiple chunks, got {}",
+            batch.rows.len()
+        );
+        assert_eq!(batch.rows[0].columns["document_id"], "large.txt");
+        assert_eq!(batch.rows[0].columns["chunk_index"], "0");
+        assert_eq!(
+            batch.rows[1].columns["document_id"], "large.txt",
+            "all chunks from same document"
+        );
+        assert_eq!(batch.rows[1].columns["chunk_index"], "1");
     }
 
     #[test]

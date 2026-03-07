@@ -77,8 +77,13 @@ Entity cards and relationships participate in the distributed memory fabric:
 
 See [distributed-memory.md](../distributed-memory.md).
 
+## Document-Derived Entities (Phase B)
+
+Documents now also produce extracted entities (people, companies, emails, money, invoice numbers, etc.) from chunk text. These are stored in `entities_view` and linked via `documents_entities_view`. See [entity-graph.md](../entity-graph.md) for extraction, normalization, and query support.
+
 ## References
 
 - [docs/ingestion/entity-cards.md](../ingestion/entity-cards.md) — Schema and mapping rules
 - [docs/intelligence/business-intelligence.md](../intelligence/business-intelligence.md) — BI use cases
+- [entity-graph.md](../entity-graph.md) — Document-derived entity extraction (Phase B)
 - [distributed-memory.md](../distributed-memory.md) — Shards, mergeable state, outcomes

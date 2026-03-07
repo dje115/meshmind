@@ -201,6 +201,41 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                             ts,
                         ],
                     )?;
+                    // Populate documents_fts for document_chunk (full chunk text indexing)
+                    if doc_type == "document_chunk" && !ap.entity_attributes_json.is_empty() {
+                        if let Ok(attrs) = serde_json::from_str::<
+                            serde_json::Map<String, serde_json::Value>,
+                        >(&ap.entity_attributes_json)
+                        {
+                            let doc_id = attrs
+                                .get("document_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let chunk_idx = attrs
+                                .get("chunk_index")
+                                .map(|v| {
+                                    v.as_str()
+                                        .map(String::from)
+                                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                                        .unwrap_or_default()
+                                })
+                                .unwrap_or_default();
+                            let chunk_text = attrs
+                                .get("chunk_text")
+                                .or(attrs.get("content_text"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !doc_id.is_empty() && !chunk_text.is_empty() {
+                                update_documents_fts(
+                                    conn,
+                                    &ap.artifact_id,
+                                    doc_id,
+                                    &chunk_idx,
+                                    chunk_text,
+                                )?;
+                            }
+                        }
+                    }
                     // Populate entity_cards_view for entity_card documents
                     if doc_type == "entity_card" && !ap.entity_type.is_empty() {
                         let entity_id = format!("{}:{}", ap.entity_type, ap.entity_key);
@@ -280,6 +315,11 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     "UPDATE artifacts_view SET deprecated = 1, deprecate_reason = ?1
                      WHERE artifact_id = ?2 AND version = ?3",
                     params![ad.reason, ad.artifact_id, ad.version],
+                )?;
+                // Remove deprecated document chunks from documents_fts
+                conn.execute(
+                    "DELETE FROM documents_fts WHERE artifact_id = ?1",
+                    params![ad.artifact_id],
                 )?;
             }
             Payload::WebBriefCreated(wb) => {
@@ -589,6 +629,45 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::ExtractedEntityRecorded(ee) => {
+                let doc_entity_id = format!("document:{}", ee.source_document_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO entities_view
+                     (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index,
+                      confidence, extraction_method, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        ee.entity_id,
+                        ee.entity_type,
+                        ee.entity_value,
+                        ee.normalized_value,
+                        ee.source_document_id,
+                        ee.chunk_index,
+                        ee.confidence,
+                        ee.extraction_method,
+                        ts,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO documents_entities_view
+                     (document_id, entity_id, entity_type, entity_value, chunk_index, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        ee.source_document_id,
+                        ee.entity_id,
+                        ee.entity_type,
+                        ee.entity_value,
+                        ee.chunk_index,
+                        ts,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO entity_relationships_view
+                     (from_entity_id, to_entity_id, relationship_type, source_id, table_name, created_at_ms)
+                     VALUES (?1, ?2, 'mentions', '', 'document_extraction', ?3)",
+                    params![doc_entity_id, ee.entity_id, ts],
+                )?;
+            }
             Payload::DatasetManifestCreated(dm) => {
                 conn.execute(
                     "INSERT OR REPLACE INTO datasets_view
@@ -872,6 +951,12 @@ fn event_summary(event: &EventEnvelope) -> String {
                 err.from_entity_id, err.relationship_type, err.to_entity_id
             )
         }
+        Some(Payload::ExtractedEntityRecorded(ee)) => {
+            format!(
+                "extracted entity: {} {} from doc {}",
+                ee.entity_type, ee.entity_id, ee.source_document_id
+            )
+        }
         Some(Payload::IngestStarted(i)) => format!("ingest started: {}", i.ingest_id),
         Some(Payload::IngestCompleted(i)) => {
             format!("ingest completed: {} rows={}", i.ingest_id, i.rows_ingested)
@@ -959,6 +1044,25 @@ fn update_artifacts_fts(conn: &Connection, artifact_id: &str, _version: u32) -> 
          ORDER BY version DESC
          LIMIT 1",
         params![artifact_id],
+    )?;
+    Ok(())
+}
+
+fn update_documents_fts(
+    conn: &Connection,
+    artifact_id: &str,
+    document_id: &str,
+    chunk_index: &str,
+    chunk_text: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM documents_fts WHERE artifact_id = ?1",
+        params![artifact_id],
+    )?;
+    conn.execute(
+        "INSERT INTO documents_fts (artifact_id, document_id, chunk_index, chunk_text)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![artifact_id, document_id, chunk_index, chunk_text],
     )?;
     Ok(())
 }
@@ -1757,6 +1861,139 @@ mod tests {
             .unwrap();
         assert_eq!(node_id, "node-abc");
         assert_eq!(cap, "host");
+    }
+
+    #[test]
+    fn project_document_chunks_rebuild_from_events() {
+        let conn = setup();
+        let events: Vec<EventEnvelope> = vec![
+            make_event(
+                "e1",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "doc-abc::chunk::0".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Report chunk 0".into(),
+                    summary: "First part of report".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch0".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "document_chunk".into(),
+                    entity_type: "document".into(),
+                    entity_key: "doc-abc".into(),
+                    entity_attributes_json: serde_json::json!({
+                        "document_id": "doc-abc",
+                        "chunk_index": 0,
+                        "chunk_text": "Introduction to the quarterly report. Revenue grew.",
+                        "source_file": "q3.pdf",
+                        "page_number": 1
+                    })
+                    .to_string(),
+                    ..Default::default()
+                }),
+            ),
+            make_event(
+                "e2",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "doc-abc::chunk::1".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Report chunk 1".into(),
+                    summary: "Middle section".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch1".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "document_chunk".into(),
+                    entity_type: "document".into(),
+                    entity_key: "doc-abc".into(),
+                    entity_attributes_json: serde_json::json!({
+                        "document_id": "doc-abc",
+                        "chunk_index": 1,
+                        "chunk_text": "Key metrics and operational highlights. Costs decreased.",
+                        "source_file": "q3.pdf",
+                        "page_number": 2
+                    })
+                    .to_string(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        replay_events(&conn, &events).unwrap();
+
+        let doc_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents_view WHERE document_type = 'document_chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(doc_count, 2);
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 2);
+
+        let hits =
+            crate::search::search_documents_fts(&conn, "operational highlights", 10).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits
+            .iter()
+            .any(|h| h.document_id == "doc-abc" && h.chunk_index == "1"));
+    }
+
+    #[test]
+    fn project_document_chunk_populates_documents_fts() {
+        let conn = setup();
+        let attrs = serde_json::json!({
+            "document_id": "doc-123",
+            "chunk_index": 1,
+            "chunk_text": "The critical phrase mid-document appears only in chunk 1.",
+            "source_file": "report.pdf",
+            "page_number": 2
+        });
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "doc-123::chunk::1".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Report (chunk 1)".into(),
+                    summary: "Chunk 1 of report".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch-h1".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "document_chunk".into(),
+                    entity_attributes_json: attrs.to_string(),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let (doc_id, chunk_idx, chunk_text): (String, String, String) = conn
+            .query_row(
+                "SELECT document_id, chunk_index, chunk_text FROM documents_fts WHERE artifact_id = 'doc-123::chunk::1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(doc_id, "doc-123");
+        assert_eq!(chunk_idx, "1");
+        assert!(chunk_text.contains("critical phrase mid-document"));
     }
 
     #[test]

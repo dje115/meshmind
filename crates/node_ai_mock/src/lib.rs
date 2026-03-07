@@ -46,7 +46,11 @@ impl InferenceBackend for MockBackend {
     async fn generate(&self, request: GenerateRequest) -> anyhow::Result<GenerateResponse> {
         let prompt_lower = request.prompt.to_lowercase();
 
-        let text = if prompt_lower.contains("hello") {
+        let text = if prompt_lower.contains("extract entities")
+            || prompt_lower.contains("extract entities from")
+        {
+            r#"{"people":["Alice Smith"],"companies":["Test Corp"],"emails":["test@example.com"],"phones":[],"money":[],"dates":[],"locations":[],"products":[],"invoice_numbers":["INV-001"],"quote_numbers":[]}"#.into()
+        } else if prompt_lower.contains("hello") {
             "Hello! I'm MeshMind's mock AI assistant. How can I help you today?".into()
         } else if prompt_lower.contains("error") || prompt_lower.contains("fix") {
             "Based on the context provided, the issue is likely related to configuration. \

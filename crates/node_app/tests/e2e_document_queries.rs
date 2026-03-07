@@ -61,6 +61,7 @@ fn document_ingest_and_search_invoices() {
         &db_path,
         "test-node",
         None,
+        None,
     )
     .unwrap();
 

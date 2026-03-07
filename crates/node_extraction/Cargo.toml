@@ -1,0 +1,17 @@
+[package]
+name = "node_extraction"
+version.workspace = true
+edition.workspace = true
+description = "Entity extraction from document chunks (rule-based and optional LLM)"
+
+[dependencies]
+regex = "1.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1"
+anyhow = "1"
+node_ai = { path = "../node_ai" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+node_ai_mock = { path = "../node_ai_mock" }

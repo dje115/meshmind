@@ -173,6 +173,7 @@ pub async fn consult_peers(
 
 /// Consult peers with optional shard-based routing. When `shard_routed_peer_ids` is
 /// provided and non-empty, only forwards to those peers (no broadcast).
+#[allow(clippy::too_many_arguments)]
 pub async fn consult_peers_routed(
     transport: &Arc<dyn Transport>,
     peer_dir: &RwLock<PeerDirectory>,

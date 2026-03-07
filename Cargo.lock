@@ -1680,6 +1680,7 @@ dependencies = [
  "node_connectors",
  "node_datasets",
  "node_discovery",
+ "node_extraction",
  "node_federated",
  "node_ingest",
  "node_mesh",
@@ -1814,6 +1815,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "node_extraction"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "node_ai",
+ "node_ai_mock",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "node_federated"
 version = "2.0.0"
 dependencies = [
@@ -1836,7 +1851,9 @@ name = "node_ingest"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "node_ai",
  "node_connectors",
+ "node_extraction",
  "node_policy",
  "node_proto",
  "node_storage",

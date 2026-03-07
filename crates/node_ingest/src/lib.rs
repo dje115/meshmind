@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+
+use node_ai::InferenceBackend;
 
 /// Accumulates numeric stats for fact extraction.
 #[derive(Default)]
@@ -21,10 +24,11 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use node_connectors::Connector;
+use node_extraction::{extract_entities, extract_entities_with_llm, ExtractionConfig};
 use node_proto::common::{NodeId, Sensitivity, TenantId, Timestamp};
 use node_proto::events::{
     event_envelope, ArtifactPublished, ArtifactType, ConnectorType, EntityRelationshipRecorded,
-    EventEnvelope, EventType, IngestCompleted, IngestStarted,
+    EventEnvelope, EventType, ExtractedEntityRecorded, IngestCompleted, IngestStarted,
 };
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
@@ -34,6 +38,9 @@ use node_storage::event_log::EventLog;
 pub struct IngestConfig {
     pub batch_size: u64,
     pub max_rows_per_table: u64,
+    /// Entity extraction config. When backend is provided and enable_llm_entity_extraction,
+    /// LLM-assisted extraction may run for long chunks with few rule-based entities.
+    pub extraction_config: ExtractionConfig,
 }
 
 impl Default for IngestConfig {
@@ -41,6 +48,7 @@ impl Default for IngestConfig {
         Self {
             batch_size: 100,
             max_rows_per_table: 10_000,
+            extraction_config: ExtractionConfig::default(),
         }
     }
 }
@@ -330,21 +338,45 @@ fn build_artifact_title(
     format!("{}/{}", table, entity_id)
 }
 
-fn build_artifact_summary(columns: &BTreeMap<String, String>, max_len: usize) -> String {
-    if let Some(text) = columns.get("content_text") {
-        if !text.is_empty() {
-            return truncate_str(text, max_len);
-        }
-    }
+/// Default summary cap: 800–1000 chars to retain more context than the old 500-char limit.
+const SUMMARY_CAP: usize = 900;
 
+/// Metadata keys to include as prefix when building document summaries.
+const SUMMARY_METADATA_KEYS: &[&str] = &["source_file", "page_number"];
+
+fn build_artifact_summary(columns: &BTreeMap<String, String>, max_len: usize) -> String {
+    let cap = max_len.clamp(800, SUMMARY_CAP);
+    // Prefer chunk_text for document chunks (canonical full chunk); fallback to content_text
+    let main_text = columns
+        .get("chunk_text")
+        .or_else(|| columns.get("content_text"))
+        .filter(|s| !s.is_empty());
+    if let Some(t) = main_text {
+        let main = truncate_str(t, cap);
+        // Include detected metadata when available (e.g. source_file, page_number)
+        let meta_parts: Vec<String> = SUMMARY_METADATA_KEYS
+            .iter()
+            .filter_map(|k| columns.get(*k))
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("[{}]", truncate_str(v, 80)))
+            .collect();
+        let meta_prefix = if meta_parts.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", meta_parts.join(" "))
+        };
+        let combined = format!("{meta_prefix}{main}");
+        return truncate_str(&combined, cap);
+    }
+    // Fallback for entity cards etc.: key-value pairs from other columns
     let mut parts = Vec::new();
     for (k, v) in columns {
-        if k == "content_text" || v.is_empty() {
+        if k == "content_text" || k == "chunk_text" || v.is_empty() {
             continue;
         }
         parts.push(format!("{}: {}", k, truncate_str(v, 200)));
     }
-    truncate_str(&parts.join(" | "), max_len)
+    truncate_str(&parts.join(" | "), cap)
 }
 
 /// FK column -> target entity type for relationship inference
@@ -439,6 +471,7 @@ pub fn run_ingest(
     db_path: &Path,
     node_id: &str,
     mapping_hints: Option<&MappingHints>,
+    backend: Option<Arc<dyn InferenceBackend>>,
 ) -> anyhow::Result<IngestResult> {
     let start = Instant::now();
 
@@ -491,7 +524,26 @@ pub fn run_ingest(
                 let hash_ref = cas.put_bytes("application/json", &json)?;
 
                 let title = build_artifact_title(table, &row.entity_id, &row.columns);
-                let summary = build_artifact_summary(&row.columns, 500);
+                let is_document_chunk = row.columns.contains_key("chunk_index")
+                    && row.columns.contains_key("document_id");
+                let summary = build_artifact_summary(&row.columns, SUMMARY_CAP);
+
+                let (doc_subtype, entity_type, entity_key) = if is_document_chunk {
+                    (
+                        "document_chunk".into(),
+                        "document".into(),
+                        row.columns
+                            .get("document_id")
+                            .cloned()
+                            .unwrap_or_else(|| row.entity_id.clone()),
+                    )
+                } else {
+                    (
+                        "entity_card".into(),
+                        infer_entity_type(table, mapping_hints.and_then(|m| m.get(table))),
+                        infer_entity_key(row, mapping_hints.and_then(|m| m.get(table))),
+                    )
+                };
 
                 let artifact_id = format!("{}-{}-{}", job.ingest_id, table, row.entity_id);
                 let artifact_event = EventEnvelope {
@@ -514,15 +566,9 @@ pub fn run_ingest(
                             shareable: false,
                             expires_unix_ms: 0,
                             summary,
-                            document_subtype: "entity_card".into(),
-                            entity_type: infer_entity_type(
-                                table,
-                                mapping_hints.and_then(|m| m.get(table)),
-                            ),
-                            entity_key: infer_entity_key(
-                                row,
-                                mapping_hints.and_then(|m| m.get(table)),
-                            ),
+                            document_subtype: doc_subtype,
+                            entity_type,
+                            entity_key,
                             source_ref: job.source_id.clone(),
                             table_name: table.to_string(),
                             entity_attributes_json: serde_json::to_string(&row.columns)
@@ -539,19 +585,42 @@ pub fn run_ingest(
                 total_bytes += json_len;
                 total_docs += 1;
 
-                // Emit relationship events for FK columns
-                let from_entity_id = format!(
-                    "{}:{}",
-                    infer_entity_type(table, mapping_hints.and_then(|m| m.get(table)),),
-                    infer_entity_key(row, mapping_hints.and_then(|m| m.get(table)),),
-                );
-                for (fk_col, target_type) in FK_RELATIONSHIPS {
-                    if let Some(ref to_key) = row.columns.get(*fk_col) {
-                        if !to_key.is_empty() {
-                            let to_entity_id = format!("{target_type}:{to_key}");
+                // Extract entities from document chunks and emit ExtractedEntityRecorded
+                if is_document_chunk {
+                    let chunk_text = row
+                        .columns
+                        .get("chunk_text")
+                        .or_else(|| row.columns.get("content_text"))
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let document_id = row
+                        .columns
+                        .get("document_id")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let chunk_index: i32 = row
+                        .columns
+                        .get("chunk_index")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    if !chunk_text.is_empty() && !document_id.is_empty() {
+                        let result = if config.extraction_config.enable_llm_entity_extraction
+                            && backend.is_some()
+                        {
+                            let rt = tokio::runtime::Runtime::new()
+                                .context("create tokio runtime for LLM extraction")?;
+                            rt.block_on(extract_entities_with_llm(
+                                backend.as_ref(),
+                                chunk_text,
+                                &config.extraction_config,
+                            ))
+                        } else {
+                            extract_entities(chunk_text)
+                        };
+                        for entity in result.entities {
                             let rel_event = EventEnvelope {
                                 event_id: Uuid::new_v4().to_string(),
-                                r#type: EventType::EntityRelationshipRecorded as i32,
+                                r#type: EventType::ExtractedEntityRecorded as i32,
                                 node_id: Some(NodeId {
                                     value: node_id.to_string(),
                                 }),
@@ -559,19 +628,65 @@ pub fn run_ingest(
                                     value: "public".to_string(),
                                 }),
                                 sensitivity: Sensitivity::Public as i32,
-                                payload: Some(event_envelope::Payload::EntityRelationshipRecorded(
-                                    EntityRelationshipRecorded {
-                                        from_entity_id: from_entity_id.clone(),
-                                        to_entity_id: to_entity_id.clone(),
-                                        relationship_type: format!("belongs_to_{target_type}"),
-                                        source_id: job.source_id.clone(),
-                                        table_name: table.to_string(),
+                                payload: Some(event_envelope::Payload::ExtractedEntityRecorded(
+                                    ExtractedEntityRecorded {
+                                        entity_id: entity.entity_id(),
+                                        entity_type: entity.entity_type,
+                                        entity_value: entity.entity_value,
+                                        normalized_value: entity.normalized_value,
+                                        source_document_id: document_id.to_string(),
+                                        chunk_index,
+                                        confidence: entity.confidence,
+                                        extraction_method: entity.extraction_method.to_string(),
                                     },
                                 )),
                                 ..Default::default()
                             };
                             let rel_event = event_log.append(rel_event)?;
                             node_storage::projector::apply_event(&proj_conn, &rel_event)?;
+                        }
+                    }
+                }
+
+                // Emit relationship events for FK columns (skip for document chunks)
+                if !is_document_chunk {
+                    let from_entity_id = format!(
+                        "{}:{}",
+                        infer_entity_type(table, mapping_hints.and_then(|m| m.get(table)),),
+                        infer_entity_key(row, mapping_hints.and_then(|m| m.get(table)),),
+                    );
+                    for (fk_col, target_type) in FK_RELATIONSHIPS {
+                        if let Some(ref to_key) = row.columns.get(*fk_col) {
+                            if !to_key.is_empty() {
+                                let to_entity_id = format!("{target_type}:{to_key}");
+                                let rel_event = EventEnvelope {
+                                    event_id: Uuid::new_v4().to_string(),
+                                    r#type: EventType::EntityRelationshipRecorded as i32,
+                                    node_id: Some(NodeId {
+                                        value: node_id.to_string(),
+                                    }),
+                                    tenant_id: Some(TenantId {
+                                        value: "public".to_string(),
+                                    }),
+                                    sensitivity: Sensitivity::Public as i32,
+                                    payload: Some(
+                                        event_envelope::Payload::EntityRelationshipRecorded(
+                                            EntityRelationshipRecorded {
+                                                from_entity_id: from_entity_id.clone(),
+                                                to_entity_id: to_entity_id.clone(),
+                                                relationship_type: format!(
+                                                    "belongs_to_{target_type}"
+                                                ),
+                                                source_id: job.source_id.clone(),
+                                                table_name: table.to_string(),
+                                            },
+                                        ),
+                                    ),
+                                    ..Default::default()
+                                };
+                                let rel_event = event_log.append(rel_event)?;
+                                node_storage::projector::apply_event(&proj_conn, &rel_event)?;
+                            }
                         }
                     }
                 }
@@ -690,6 +805,7 @@ mod tests {
             &proj_db,
             "node-test",
             None,
+            None,
         )
         .unwrap();
 
@@ -715,6 +831,7 @@ mod tests {
         let config = IngestConfig {
             batch_size: 100,
             max_rows_per_table: 2,
+            extraction_config: ExtractionConfig::default(),
         };
 
         let result = run_ingest(
@@ -727,6 +844,7 @@ mod tests {
             &mut event_log,
             &proj_db,
             "node-test",
+            None,
             None,
         )
         .unwrap();
@@ -752,6 +870,7 @@ mod tests {
         let config = IngestConfig {
             batch_size: 100,
             max_rows_per_table: 3,
+            extraction_config: ExtractionConfig::default(),
         };
 
         run_ingest(
@@ -764,6 +883,7 @@ mod tests {
             &mut event_log,
             &proj_db,
             "node-test",
+            None,
             None,
         )
         .unwrap();
@@ -854,6 +974,7 @@ mod tests {
             &proj_db,
             "node-test",
             None,
+            None,
         )
         .unwrap();
 
@@ -900,6 +1021,187 @@ mod tests {
         assert_eq!(row_count_facts, 1);
     }
 
+    /// Integration test: ingest multi-chunk document, verify chunk creation,
+    /// phrase in middle is searchable, and ask pipeline retrieves chunk evidence.
+    #[test]
+    fn test_document_chunk_ingest_search_and_ask_retrieval() {
+        use node_connectors::DocumentConnector;
+        use node_storage::search;
+        use std::fs;
+
+        let tmp = TempDir::new().unwrap();
+        let doc_dir = tmp.path().join("docs");
+        fs::create_dir_all(&doc_dir).unwrap();
+
+        // Build a ~3500 char document so we get 3 chunks. Put unique phrase in middle (chunk 1).
+        let mut content = "Introduction. ".repeat(100);
+        content.push_str(" UNIQUE_MIDPHRASE_Q7R9 ");
+        content.push_str(&"Conclusion and details. ".repeat(100));
+
+        fs::write(doc_dir.join("report.txt"), content.as_bytes()).unwrap();
+
+        let (cas, mut event_log, proj_db) = setup_infra(tmp.path());
+        let connector = DocumentConnector::new("doc-chunk-test");
+        let job = IngestJob {
+            ingest_id: "ing-doc".into(),
+            source_id: "src-doc".into(),
+            connector_type: "document".into(),
+        };
+
+        run_ingest(
+            &job,
+            &connector,
+            &doc_dir,
+            &["documents".to_string()],
+            &IngestConfig::default(),
+            &cas,
+            &mut event_log,
+            &proj_db,
+            "node-test",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = node_storage::sqlite_views::open_db(&proj_db).unwrap();
+
+        // 1. Verify chunk creation
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents_view WHERE document_type = 'document_chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            chunk_count >= 2,
+            "expect multiple chunks for large doc, got {chunk_count}"
+        );
+
+        // 2. Verify phrase in middle of document is searchable
+        let doc_hits = search::search_documents_fts(&conn, "UNIQUE_MIDPHRASE_Q7R9", 10).unwrap();
+        assert!(
+            !doc_hits.is_empty(),
+            "phrase in middle of document should be searchable via documents_fts"
+        );
+        assert!(doc_hits[0].chunk_text.contains("UNIQUE_MIDPHRASE_Q7R9"));
+
+        // 3. Verify ask pipeline (search_all) retrieves chunk evidence
+        let all_hits = search::search_all(&conn, "UNIQUE_MIDPHRASE_Q7R9", 10).unwrap();
+        let chunk_evidence: Vec<_> = all_hits
+            .iter()
+            .filter(|h| h.hit_type == "document_chunk")
+            .collect();
+        assert!(
+            !chunk_evidence.is_empty(),
+            "ask pipeline should retrieve document chunk as context candidate"
+        );
+        assert!(
+            chunk_evidence[0].summary.contains("UNIQUE_MIDPHRASE_Q7R9"),
+            "chunk_text should be in summary for context bullets"
+        );
+    }
+
+    /// Integration test: ingest document with person, company, email, money, invoice number;
+    /// verify entities extracted and queryable.
+    #[test]
+    fn test_document_entity_extraction_integration() {
+        use node_connectors::DocumentConnector;
+        use node_storage::search;
+        use std::fs;
+
+        let tmp = TempDir::new().unwrap();
+        let doc_dir = tmp.path().join("docs");
+        fs::create_dir_all(&doc_dir).unwrap();
+
+        let content = "Invoice from Acme Corporation Ltd.
+Contact: Mr. John Smith, john.smith@example.com, +44 20 7123 4567
+Total: £1,234.56
+Invoice No: INV-2024-001";
+
+        fs::write(doc_dir.join("invoice.txt"), content.as_bytes()).unwrap();
+
+        let (cas, mut event_log, proj_db) = setup_infra(tmp.path());
+        let connector = DocumentConnector::new("doc-entity-test");
+        let job = IngestJob {
+            ingest_id: "ing-entity".into(),
+            source_id: "src-entity".into(),
+            connector_type: "document".into(),
+        };
+
+        run_ingest(
+            &job,
+            &connector,
+            &doc_dir,
+            &["documents".to_string()],
+            &IngestConfig::default(),
+            &cas,
+            &mut event_log,
+            &proj_db,
+            "node-test",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = node_storage::sqlite_views::open_db(&proj_db).unwrap();
+
+        let people = search::list_entities_by_type(&conn, "person", 20).unwrap();
+        assert!(
+            people
+                .iter()
+                .any(|e| e.normalized_value.contains("john") || e.entity_value.contains("John")),
+            "expect at least one person extracted"
+        );
+
+        let companies = search::list_entities_by_type(&conn, "company", 20).unwrap();
+        assert!(
+            companies
+                .iter()
+                .any(|e| e.normalized_value.contains("acme") || e.entity_value.contains("Acme")),
+            "expect at least one company extracted"
+        );
+        // Use actual normalized_value from DB for list_documents_for_entity
+        let company_norm = companies
+            .iter()
+            .find(|e| e.normalized_value.contains("acme") || e.entity_value.contains("Acme"))
+            .map(|e| e.normalized_value.clone())
+            .unwrap_or_else(|| "acme corp ltd".into());
+
+        let emails = search::list_entities_by_type(&conn, "email", 20).unwrap();
+        assert!(
+            emails
+                .iter()
+                .any(|e| e.entity_value.contains("john.smith@example.com")),
+            "expect email extracted"
+        );
+
+        let money = search::list_entities_by_type(&conn, "money", 20).unwrap();
+        assert!(!money.is_empty(), "expect money amount extracted");
+
+        let inv = search::list_entities_by_type(&conn, "invoice_number", 20).unwrap();
+        assert!(
+            inv.iter().any(|e| e.entity_value.contains("INV-2024")),
+            "expect invoice number extracted"
+        );
+
+        // list_documents_for_entity: use normalized_value
+        let docs_email =
+            search::list_documents_for_entity(&conn, "john.smith@example.com", Some("email"), 10)
+                .unwrap();
+        assert!(
+            !docs_email.is_empty(),
+            "documents_for_entity should return invoice.txt for email"
+        );
+        let docs_company =
+            search::list_documents_for_entity(&conn, &company_norm, Some("company"), 10).unwrap();
+        assert!(
+            !docs_company.is_empty(),
+            "documents_for_entity should return invoice.txt for company (normalized: {})",
+            company_norm
+        );
+    }
+
     #[test]
     fn test_entity_graph_from_ingest() {
         let tmp = TempDir::new().unwrap();
@@ -944,6 +1246,7 @@ mod tests {
             &proj_db,
             "node-test",
             Some(&hints),
+            None,
         )
         .unwrap();
 

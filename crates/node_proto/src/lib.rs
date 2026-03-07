@@ -1500,6 +1500,7 @@ mod tests {
             (EventType::IngestCompleted, 81),
             (EventType::DatasetManifestCreated, 82),
             (EventType::EntityRelationshipRecorded, 94),
+            (EventType::ExtractedEntityRecorded, 99),
             (EventType::ShardSubscriptionAdded, 95),
             (EventType::MergeableTagUpdated, 96),
             (EventType::MergeableCounterUpdated, 97),

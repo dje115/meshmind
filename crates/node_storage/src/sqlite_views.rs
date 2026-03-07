@@ -260,6 +260,39 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         CREATE VIEW IF NOT EXISTS accounts_view AS
             SELECT * FROM entity_cards_view WHERE entity_type = 'account';
 
+        -- Extracted entities from document chunks (Phase B)
+        CREATE TABLE IF NOT EXISTS entities_view (
+            entity_id         TEXT NOT NULL,
+            entity_type       TEXT NOT NULL,
+            entity_value      TEXT NOT NULL,
+            normalized_value  TEXT NOT NULL,
+            document_id       TEXT NOT NULL,
+            chunk_index       INTEGER NOT NULL,
+            confidence        REAL NOT NULL DEFAULT 0.0,
+            extraction_method TEXT NOT NULL DEFAULT 'rule_based',
+            created_at_ms     INTEGER NOT NULL,
+            PRIMARY KEY (entity_id, document_id, chunk_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entities_view_type ON entities_view(entity_type);
+        CREATE INDEX IF NOT EXISTS idx_entities_view_normalized ON entities_view(normalized_value, entity_type);
+
+        CREATE TABLE IF NOT EXISTS documents_entities_view (
+            document_id       TEXT NOT NULL,
+            entity_id         TEXT NOT NULL,
+            entity_type       TEXT NOT NULL,
+            entity_value      TEXT NOT NULL,
+            chunk_index       INTEGER NOT NULL,
+            created_at_ms     INTEGER NOT NULL,
+            PRIMARY KEY (document_id, entity_id, chunk_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_doc_entities_entity ON documents_entities_view(entity_id);
+
+        CREATE VIEW IF NOT EXISTS people_view AS
+            SELECT * FROM entities_view WHERE entity_type = 'person';
+
+        CREATE VIEW IF NOT EXISTS companies_view AS
+            SELECT * FROM entities_view WHERE entity_type = 'company';
+
         -- Knowledge shards (distributed memory)
         CREATE TABLE IF NOT EXISTS shards_view (
             shard_key        TEXT PRIMARY KEY,
@@ -393,6 +426,13 @@ fn create_fts_tables(conn: &Connection) -> Result<()> {
 
         CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
             artifact_id, title, summary
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+            artifact_id UNINDEXED,
+            document_id UNINDEXED,
+            chunk_index UNINDEXED,
+            chunk_text
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
