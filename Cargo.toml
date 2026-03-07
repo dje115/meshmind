@@ -20,12 +20,13 @@ members = [
     "crates/node_trainer",
     "crates/node_federated",
     "crates/node_relay",
+    "crates/node_ask",
     "crates/node_api",
     "crates/node_app",
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.5.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
@@ -107,5 +108,6 @@ node_datasets = { path = "crates/node_datasets" }
 node_trainer = { path = "crates/node_trainer" }
 node_federated = { path = "crates/node_federated" }
 node_relay = { path = "crates/node_relay" }
+node_ask = { path = "crates/node_ask" }
 node_api = { path = "crates/node_api" }
 node_app = { path = "crates/node_app" }

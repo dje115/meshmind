@@ -52,6 +52,7 @@ function renderPage(page) {
     case 'federated': renderFederated(content); break;
     case 'peers': renderPeers(content); break;
     case 'audit': renderAudit(content); break;
+    case 'debug': renderDebug(content); break;
     case 'settings': renderSettings(content); break;
     default: content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">?</div><div class="empty-state-text">Page not found</div></div>';
   }
@@ -533,26 +534,41 @@ async function renderSearch(el) {
 // --- Sources ---
 async function renderSources(el) {
   el.innerHTML = `
-    <div class="page-header">
+    <div class="page-header sources-page-header">
       <h1>Data Sources</h1>
-      <p>Discovered data sources and their approval status</p>
-      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <p class="page-header-desc">Discovered data sources and their approval status</p>
+      <div class="sources-header-actions">
+        <button class="btn btn-sm btn-secondary" id="btn-cleanup-missing" title="Remove sources whose folders were deleted from disk">Clean up missing</button>
         <button class="btn btn-sm btn-primary" id="btn-approve-all">Approve All</button>
-        <button class="btn btn-sm btn-primary" id="btn-ingest-all">Ingest All</button>
+        <button class="btn btn-sm btn-secondary" id="btn-ingest-all">Ingest All</button>
       </div>
     </div>
-    <div id="scan-folders-card" class="card" style="margin-bottom:16px">
-      <div class="card-header" style="margin-bottom:12px">
+    <div id="scan-folders-card" class="card scan-folders-card">
+      <div class="card-header scan-folders-header">
         <span class="card-title">Scan folders</span>
-        <div style="display:flex;gap:8px">
+        <div class="scan-folders-actions">
           <button class="btn btn-sm btn-primary" id="btn-add-folder" type="button">+ Add folder</button>
           <button class="btn btn-sm btn-secondary" id="btn-scan-sources" type="button">Scan</button>
         </div>
       </div>
-      <div id="scan-folders-list" style="min-height:36px"><div class="spinner"></div></div>
+      <div id="scan-folders-list" class="scan-folders-list"><div class="spinner"></div></div>
     </div>
     <div id="sources-content"><div class="empty-state"><div class="spinner"></div></div></div>
   `;
+
+  document.getElementById('btn-cleanup-missing').onclick = async () => {
+    try {
+      const r = await api.removeMissingSources();
+      if (r.removed_count > 0) {
+        toast(`Removed ${r.removed_count} missing source(s)`, 'success');
+        renderSources(el);
+      } else {
+        toast('No missing sources to remove', 'info');
+      }
+    } catch (e) {
+      toast(`Error: ${e.message}`, 'error');
+    }
+  };
 
   document.getElementById('btn-approve-all').onclick = async () => {
     const btn = document.getElementById('btn-approve-all');
@@ -668,24 +684,42 @@ async function renderSources(el) {
       return list;
     }
 
-    // Build folder tree from path_or_uri
+    function collectSourcesInFolderOnly(node) {
+      return [...node.sources];
+    }
+
+    // Deduplicate sources by path+connector (handles Invoices/InvoicES from older scans)
+    function dedupeSources(sources) {
+      const seen = new Map();
+      for (const s of sources) {
+        const pathNorm = (s.path_or_uri || '').replace(/\\/g, '/').toLowerCase();
+        const key = `${pathNorm}|${s.connector_type}`;
+        if (!seen.has(key)) seen.set(key, s);
+      }
+      return [...seen.values()];
+    }
+
+    // Build folder tree from path_or_uri (case-insensitive path keys to merge duplicates)
     function buildTree(sources) {
       const root = { name: '', children: new Map(), sources: [] };
-      for (const s of sources) {
+      const deduped = dedupeSources(sources);
+      for (const s of deduped) {
         const path = (s.path_or_uri || '').replace(/\\/g, '/');
         const isFile = /^[A-Za-z]:\//.test(path) || path.startsWith('/');
         let parts;
         if (isFile && path) {
           parts = path.split('/').filter(Boolean);
         } else {
-          // URI (onedrive://, etc) or unknown - put in "Other"
           parts = ['Other'];
         }
         let node = root;
         for (let i = 0; i < parts.length - 1; i++) {
-          const key = parts[i];
-          if (!node.children.has(key)) node.children.set(key, { name: key, children: new Map(), sources: [] });
-          node = node.children.get(key);
+          const part = parts[i];
+          const keyLower = part.toLowerCase();
+          if (!node.children.has(keyLower)) {
+            node.children.set(keyLower, { name: part, children: new Map(), sources: [] });
+          }
+          node = node.children.get(keyLower);
         }
         if (parts.length === 1) {
           root.sources.push(s);
@@ -705,15 +739,41 @@ async function renderSources(el) {
       if (node.name) {
         const id = folderId || `folder-${Math.random().toString(36).slice(2, 9)}`;
         const underSources = collectSourcesUnder(node);
+        const inFolderOnly = collectSourcesInFolderOnly(node);
         const underIds = underSources.map(s => s.source_id);
+        const inFolderIds = inFolderOnly.map(s => s.source_id);
         const totalSize = underSources.reduce((sum, s) => sum + (s.estimated_size_bytes || 0), 0);
+        const totalDocs = underSources.reduce((sum, s) => sum + (s.last_ingest_documents || 0), 0);
+        const allApproved = underSources.length > 0 && underSources.every(s => s.status === 'approved');
+        const allIngested = underSources.length > 0 && underSources.every(s => s.last_ingest_status === 'completed');
         const idsAttr = underIds.join(',');
-        const folderActions = underIds.length > 0
-          ? `<span class="sources-tree-folder-actions" onclick="event.stopPropagation()">
-              <button class="btn btn-sm btn-primary" type="button" data-action="approve-folder" data-folder-ids="${escapeHtml(idsAttr)}">Approve all</button>
-              <button class="btn btn-sm btn-secondary" type="button" data-action="ingest-folder" data-folder-ids="${escapeHtml(idsAttr)}">Ingest all</button>
-            </span>`
-          : '';
+        const inFolderIdsAttr = inFolderIds.join(',');
+
+        // Only show approval/ingest actions for folders that directly contain sources.
+        // Path-only folders (C:, Users, Documents, etc.) are structural — don't show "Approved".
+        let folderActions = '';
+        if (node.sources.length > 0 && underSources.length > 0) {
+          const hasInFolder = inFolderIds.length > 0;
+          const needsInFolderApproval = inFolderOnly.some(s => s.status !== 'approved');
+          const needsUnderApproval = underSources.some(s => s.status !== 'approved');
+          let approveBtns = '';
+          if (allApproved) {
+            approveBtns = `<span class="btn btn-sm btn-muted" disabled title="All sources approved">Approved</span>`;
+          } else {
+            if (hasInFolder && needsInFolderApproval) {
+              approveBtns += `<button class="btn btn-sm btn-primary" type="button" data-action="approve-folder-only" data-folder-ids="${escapeHtml(inFolderIdsAttr)}" title="Approve only sources in this folder (not subfolders)">Approve folder</button>`;
+            }
+            if (needsUnderApproval) {
+              approveBtns += ` <button class="btn btn-sm btn-primary" type="button" data-action="approve-folder" data-folder-ids="${escapeHtml(idsAttr)}" title="Approve this folder and all sources in subfolders">Approve folder & subfolders</button>`;
+            }
+          }
+          const ingestBtn = allIngested
+            ? `<span class="btn btn-sm btn-muted" disabled title="${totalDocs} documents ingested">Ingested (${totalDocs} docs)</span>`
+            : `<button class="btn btn-sm btn-secondary" type="button" data-action="ingest-folder" data-folder-ids="${escapeHtml(idsAttr)}" title="Ingest all approved sources in this folder and subfolders">Ingest all</button>`;
+          folderActions = `<span class="sources-tree-folder-actions" onclick="event.stopPropagation()">${approveBtns} ${ingestBtn}</span>`;
+        }
+
+        const docCountLabel = totalDocs > 0 ? ` <span class="sources-tree-folder-docs" title="Documents ingested">${totalDocs} docs</span>` : '';
         html += `<div class="sources-tree-folder" data-folder-id="${id}" style="padding-left:${indent}px">
           <div class="sources-tree-folder-name-cell">
             <button type="button" class="sources-tree-toggle" aria-expanded="true" title="Collapse folder">
@@ -721,16 +781,17 @@ async function renderSources(el) {
             </button>
             <span class="sources-tree-folder-icon">📁</span>
             <span class="sources-tree-folder-name">${escapeHtml(node.name)}</span>
-            <span class="sources-tree-folder-count">(${childCount})</span>
+            <span class="sources-tree-folder-count">(${childCount})${docCountLabel}</span>
           </div>
-          <span class="sources-tree-folder-badges">Folder</span>
+          <span class="sources-tree-col-type">—</span>
+          <span class="sources-tree-col-status">—</span>
           <span class="sources-tree-folder-size">${formatBytes(totalSize)}</span>
           ${folderActions}
         </div>`;
         html += `<div class="sources-tree-folder-children" data-folder-children="${id}">`;
       }
 
-      for (const [name, child] of [...node.children.entries()].sort()) {
+      for (const [keyLower, child] of [...node.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
         html += renderTreeNode(child, depth + 1, null);
       }
       for (const s of [...node.sources].sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''))) {
@@ -748,19 +809,15 @@ async function renderSources(el) {
       const primaryAction = s.status !== 'approved'
         ? `<button class="${ingestClass}" type="button" data-action="approve-source" data-source-id="${escapeHtml(s.source_id)}">Approve</button>`
         : `<button class="${ingestClass}" type="button" data-action="ingest-source" data-source-id="${escapeHtml(s.source_id)}" title="${isIngested ? `Ingested ${s.last_ingest_rows ?? 0} rows. Click to re-ingest.` : 'Ingest'}">${ingestLabel}</button>`;
-      const removeBtn = `<button class="btn btn-sm btn-danger" type="button" data-action="remove-source" data-source-id="${escapeHtml(s.source_id)}" title="Remove">Remove</button>`;
+      const removeBtn = `<button class="btn btn-sm btn-danger" type="button" data-action="remove-source" data-source-id="${escapeHtml(s.source_id)}" data-path="${escapeHtml(s.path_or_uri || '')}" data-connector-type="${s.connector_type ?? ''}" title="Remove">Remove</button>`;
       return `
         <div class="sources-tree-row" style="padding-left:${indent + 20}px" data-source-id="${escapeHtml(s.source_id)}">
           <span class="sources-tree-row-name-wrap">
             <span class="sources-tree-row-icon">${connectorIcon(s.connector_type)}</span>
             <span class="sources-tree-row-name">${escapeHtml(s.display_name)}</span>
           </span>
-          <span class="sources-tree-row-badges">
-            <span class="badge badge-blue">${connectorLabel(s.connector_type)}</span>
-            ${statusBadge(s.status)}
-            ${isIngested ? '<span class="badge badge-green" title="Ingested">✓</span>' : ''}
-            ${s.pii_detected ? '<span class="badge badge-red">PII</span>' : ''}
-          </span>
+          <span class="sources-tree-col-type"><span class="badge badge-blue">${connectorLabel(s.connector_type)}</span>${s.pii_detected ? ' <span class="badge badge-red">PII</span>' : ''}</span>
+          <span class="sources-tree-col-status">${statusBadge(s.status)}${isIngested ? ' <span class="badge badge-green" title="Ingested">✓</span>' : ''}${s.path_exists === false ? ' <span class="badge badge-red" title="Folder was deleted">Missing</span>' : ''}</span>
           <span class="sources-tree-row-size">${formatBytes(s.estimated_size_bytes)}</span>
           <span class="sources-tree-row-actions">
             ${primaryAction}
@@ -776,7 +833,8 @@ async function renderSources(el) {
         <div class="sources-tree">
           <div class="sources-tree-header">
             <span class="sources-tree-col-name">Source</span>
-            <span class="sources-tree-col-badges">Type / Status</span>
+            <span class="sources-tree-col-type">Type</span>
+            <span class="sources-tree-col-status">Status</span>
             <span class="sources-tree-col-size">Size</span>
             <span class="sources-tree-col-actions">Actions</span>
           </div>
@@ -803,11 +861,12 @@ async function renderSources(el) {
     });
 
     container.addEventListener('click', async (e) => {
-      const folderBtn = e.target.closest('[data-action="approve-folder"], [data-action="ingest-folder"]');
+      const folderBtn = e.target.closest('[data-action="approve-folder"], [data-action="approve-folder-only"], [data-action="ingest-folder"]');
       if (folderBtn) {
         const ids = (folderBtn.dataset.folderIds || '').split(',').filter(Boolean);
         if (ids.length === 0) return;
-        if (folderBtn.dataset.action === 'approve-folder') {
+        const action = folderBtn.dataset.action;
+        if (action === 'approve-folder' || action === 'approve-folder-only') {
           folderBtn.disabled = true;
           folderBtn.textContent = 'Approving...';
           try {
@@ -823,7 +882,8 @@ async function renderSources(el) {
           } catch (err) {
             toast(`Error: ${err.message}`, 'error');
             folderBtn.disabled = false;
-            folderBtn.textContent = 'Approve all';
+            const lbl = action === 'approve-folder' ? 'Approve folder & subfolders' : action === 'approve-folder-only' ? 'Approve folder' : 'Ingest all';
+            folderBtn.textContent = lbl;
           }
         } else {
           folderBtn.disabled = true;
@@ -879,8 +939,13 @@ async function renderSources(el) {
       } else if (action === 'remove-source') {
         if (!confirm('Remove this source from the list? Ingested data will remain in the knowledge base.')) return;
         try {
-          await api.removeSource(id);
-          toast('Source removed', 'success');
+          const path = btn.dataset.path || '';
+          const connectorType = btn.dataset.connectorType !== '' && btn.dataset.connectorType != null
+            ? parseInt(btn.dataset.connectorType, 10) : undefined;
+          const r = path
+            ? await api.removeSourceByPath(path, connectorType)
+            : await api.removeSource(id);
+          toast(r.removed_count != null ? `Removed ${r.removed_count} source(s)` : 'Source removed', 'success');
           renderSources(el);
         } catch (err) {
           toast(`Error: ${err.message}`, 'error');
@@ -1270,6 +1335,209 @@ async function renderAudit(el) {
   } catch (e) {
     document.getElementById('audit-content').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">Failed to load audit log</div></div>`;
   }
+}
+
+// --- Debug ---
+async function renderDebug(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <h1>Debug Panel</h1>
+      <p>Inspect ingestion, OCR, chunks, entities, and ask plans</p>
+    </div>
+    <div class="debug-tabs">
+      <button class="debug-tab active" data-tab="documents">Documents</button>
+      <button class="debug-tab" data-tab="document-detail">Document Detail</button>
+      <button class="debug-tab" data-tab="ask">Ask Debug</button>
+      <button class="debug-tab" data-tab="entities">Entities</button>
+    </div>
+    <div id="debug-documents" class="debug-panel active">
+      <div class="card"><div id="debug-docs-list"><div class="spinner"></div></div></div>
+    </div>
+    <div id="debug-document-detail" class="debug-panel">
+      <div class="card">
+        <div class="form-group">
+          <label>Document ID</label>
+          <input type="text" id="debug-doc-id" class="form-input" placeholder="e.g. invoice.pdf" />
+          <button class="btn btn-primary" id="debug-load-doc">Load</button>
+        </div>
+        <div id="debug-doc-detail-body"></div>
+      </div>
+    </div>
+    <div id="debug-ask" class="debug-panel">
+      <div class="card">
+        <div class="form-group">
+          <label>Case ID</label>
+          <input type="text" id="debug-case-id" class="form-input" placeholder="e.g. ask-xxx-xxx" />
+          <button class="btn btn-primary" id="debug-load-ask">Load</button>
+        </div>
+        <div id="debug-ask-body"></div>
+      </div>
+    </div>
+    <div id="debug-entities" class="debug-panel">
+      <div class="card">
+        <div class="form-group" style="display:flex;gap:8px;align-items:center">
+          <label>Filter by type</label>
+          <select id="debug-entity-type">
+            <option value="">All</option>
+            <option value="person">person</option>
+            <option value="company">company</option>
+            <option value="email">email</option>
+            <option value="invoice_number">invoice_number</option>
+            <option value="quote_number">quote_number</option>
+          </select>
+          <button class="btn btn-primary" id="debug-load-entities">Load</button>
+        </div>
+        <div id="debug-entities-list"></div>
+      </div>
+    </div>
+  `;
+
+  el.querySelectorAll('.debug-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      el.querySelectorAll('.debug-tab').forEach(t => t.classList.remove('active'));
+      el.querySelectorAll('.debug-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const panelId = 'debug-' + tab.dataset.tab;
+      document.getElementById(panelId)?.classList.add('active');
+    });
+  });
+
+  try {
+    const docs = await api.getDebugDocuments();
+    const listEl = document.getElementById('debug-docs-list');
+    if (docs.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⊟</div><div class="empty-state-text">No ingested documents yet</div></div>';
+    } else {
+      listEl.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Document</th><th>OCR</th><th>Chunks</th><th>Entities</th><th>Created</th></tr></thead>
+          <tbody>${docs.map(d => `
+            <tr>
+              <td><button type="button" class="link-btn" data-doc-id="${escapeHtml(d.document_id)}">${escapeHtml(d.filename || d.document_id)}</button></td>
+              <td>${d.ocr_used ? '<span class="badge badge-blue">Yes</span>' : '<span class="badge badge-default">No</span>'}</td>
+              <td>${d.chunk_count}</td>
+              <td>${d.entity_count}</td>
+              <td>${d.created_at_ms ? formatTime(d.created_at_ms) : '—'}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+      listEl.querySelectorAll('.link-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.getElementById('debug-doc-id').value = btn.dataset.docId;
+          el.querySelector('.debug-tab[data-tab="document-detail"]').click();
+          document.getElementById('debug-load-doc').click();
+        });
+      });
+    }
+  } catch (e) {
+    document.getElementById('debug-docs-list').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+  }
+
+  document.getElementById('debug-load-doc').addEventListener('click', async () => {
+    const id = document.getElementById('debug-doc-id').value.trim();
+    if (!id) { toast('Enter document ID', 'error'); return; }
+    const body = document.getElementById('debug-doc-detail-body');
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const data = await api.getDebugDocument(id);
+      const meta = data.metadata || {};
+      body.innerHTML = `
+        <h4>Metadata</h4>
+        <pre>${escapeHtml(JSON.stringify(meta, null, 2))}</pre>
+        <h4>Chunks (${(data.chunks || []).length})</h4>
+        <div class="table-container"><table>
+          <thead><tr><th>#</th><th>OCR</th><th>Page</th><th>Source</th><th>Preview</th></tr></thead>
+          <tbody>${(data.chunks || []).map(c => `
+            <tr>
+              <td>${c.chunk_index}</td>
+              <td>${c.ocr_used ? 'Yes' : 'No'}</td>
+              <td>${c.page_number || '—'}</td>
+              <td style="font-size:11px">${escapeHtml((c.source_file || '').slice(-40))}</td>
+              <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(c.chunk_text_preview || '').slice(0, 100)}…</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+        <h4>Entities (${(data.entities || []).length})</h4>
+        <div class="table-container"><table>
+          <thead><tr><th>Type</th><th>Value</th><th>Method</th><th>Confidence</th></tr></thead>
+          <tbody>${(data.entities || []).map(e => `
+            <tr>
+              <td>${escapeHtml(e.entity_type)}</td>
+              <td>${escapeHtml(e.entity_value)}</td>
+              <td>${escapeHtml(e.extraction_method)}</td>
+              <td>${(e.confidence * 100).toFixed(0)}%</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  });
+
+  document.getElementById('debug-load-ask').addEventListener('click', async () => {
+    const caseId = document.getElementById('debug-case-id').value.trim();
+    if (!caseId) { toast('Enter case ID', 'error'); return; }
+    const body = document.getElementById('debug-ask-body');
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const s = await api.getDebugAskSession(caseId);
+      let plan = {};
+      try { plan = JSON.parse(s.plan_json || '{}'); } catch (_) {}
+      let evidence = [];
+      try { evidence = JSON.parse(s.evidence_json || '[]'); } catch (_) {}
+      let sourceTypes = [];
+      try { sourceTypes = JSON.parse(s.source_types || '[]'); } catch (_) {}
+      body.innerHTML = `
+        <h4>Question</h4>
+        <p>${escapeHtml(s.question)}</p>
+        <h4>Plan</h4>
+        <pre>${escapeHtml(JSON.stringify(plan, null, 2))}</pre>
+        <h4>Evidence</h4>
+        <pre>${escapeHtml(JSON.stringify(evidence, null, 2))}</pre>
+        <p><strong>Source types:</strong> ${sourceTypes.join(', ') || '—'}</p>
+        <p><strong>Confidence:</strong> ${(s.confidence * 100).toFixed(0)}%</p>
+        <p><strong>Web fallback:</strong> ${s.web_fallback_used ? 'Yes' : 'No'}</p>
+        <p><strong>Peer consult:</strong> ${s.peer_consult_used ? 'Yes' : 'No'}</p>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  });
+
+  document.getElementById('debug-load-entities').addEventListener('click', async () => {
+    const entityType = document.getElementById('debug-entity-type').value || undefined;
+    const listEl = document.getElementById('debug-entities-list');
+    listEl.innerHTML = '<div class="spinner"></div>';
+    try {
+      const entities = await api.getDebugEntities(entityType, 100);
+      if (entities.length === 0) {
+        listEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">No entities found</div></div>';
+      } else {
+        listEl.innerHTML = `
+          <div class="table-container"><table>
+            <thead><tr><th>Type</th><th>Value</th><th>Normalized</th><th>Method</th><th>Confidence</th><th>Document</th></tr></thead>
+            <tbody>${entities.map(e => `
+              <tr>
+                <td>${escapeHtml(e.entity_type)}</td>
+                <td>${escapeHtml(e.entity_value)}</td>
+                <td>${escapeHtml(e.normalized_value)}</td>
+                <td>${escapeHtml(e.extraction_method)}</td>
+                <td>${(e.confidence * 100).toFixed(0)}%</td>
+                <td style="font-size:11px">${escapeHtml(e.source_document_id)}</td>
+              </tr>
+            `).join('')}</tbody>
+          </table></div>
+        `;
+      }
+    } catch (e) {
+      listEl.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  });
+
+  // Load entities on tab switch
+  document.getElementById('debug-entities-list').innerHTML = '<div class="empty-state"><div class="empty-state-text">Click Load to fetch entities</div></div>';
 }
 
 // --- Train modal ---

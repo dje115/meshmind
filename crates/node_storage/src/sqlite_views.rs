@@ -287,6 +287,81 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_doc_entities_entity ON documents_entities_view(entity_id);
 
+        -- Debug: document chunks with OCR/source metadata (populated on ingest)
+        CREATE TABLE IF NOT EXISTS document_chunks_view (
+            artifact_id       TEXT NOT NULL PRIMARY KEY,
+            document_id       TEXT NOT NULL,
+            chunk_index       INTEGER NOT NULL,
+            chunk_text        TEXT NOT NULL DEFAULT '',
+            source_file       TEXT NOT NULL DEFAULT '',
+            page_number       INTEGER NOT NULL DEFAULT 0,
+            ocr_used          INTEGER NOT NULL DEFAULT 0,
+            source_id         TEXT NOT NULL DEFAULT '',
+            created_at_ms     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_chunks_doc ON document_chunks_view(document_id);
+
+        -- Debug: ask sessions for inspection (question, plan, evidence)
+        -- Extraction corrections (entity, OCR/chunk, classification) for self-learning
+        CREATE TABLE IF NOT EXISTS corrections_view (
+            correction_id     TEXT NOT NULL PRIMARY KEY,
+            correction_type   TEXT NOT NULL,
+            target_document_id TEXT NOT NULL DEFAULT '',
+            target_entity_id  TEXT NOT NULL DEFAULT '',
+            target_chunk_index INTEGER NOT NULL DEFAULT -1,
+            original_value    TEXT NOT NULL DEFAULT '',
+            corrected_value   TEXT NOT NULL DEFAULT '',
+            corrected_type    TEXT NOT NULL DEFAULT '',
+            is_valid          INTEGER NOT NULL DEFAULT 1,
+            note              TEXT NOT NULL DEFAULT '',
+            source_user       TEXT NOT NULL DEFAULT 'admin',
+            created_at_ms     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_corrections_doc ON corrections_view(target_document_id);
+        CREATE INDEX IF NOT EXISTS idx_corrections_entity ON corrections_view(target_entity_id);
+
+        -- Effective entities: prefer corrected values when present (for future training)
+        CREATE VIEW IF NOT EXISTS effective_entities_view AS
+        SELECT e.entity_id,
+            COALESCE(
+                (SELECT NULLIF(c.corrected_type, '') FROM corrections_view c
+                 WHERE c.target_document_id = e.document_id AND c.target_entity_id = e.entity_id
+                   AND c.target_chunk_index = e.chunk_index AND c.correction_type = 'entity'
+                   AND c.is_valid = 1
+                 ORDER BY c.created_at_ms DESC LIMIT 1),
+                e.entity_type
+            ) AS entity_type,
+            COALESCE(
+                (SELECT c.corrected_value FROM corrections_view c
+                 WHERE c.target_document_id = e.document_id AND c.target_entity_id = e.entity_id
+                   AND c.target_chunk_index = e.chunk_index AND c.correction_type = 'entity'
+                   AND c.is_valid = 1
+                 ORDER BY c.created_at_ms DESC LIMIT 1),
+                e.entity_value
+            ) AS entity_value,
+            COALESCE(
+                (SELECT c.corrected_value FROM corrections_view c
+                 WHERE c.target_document_id = e.document_id AND c.target_entity_id = e.entity_id
+                   AND c.target_chunk_index = e.chunk_index AND c.correction_type = 'entity'
+                   AND c.is_valid = 1
+                 ORDER BY c.created_at_ms DESC LIMIT 1),
+                e.normalized_value
+            ) AS normalized_value,
+            e.document_id, e.chunk_index, e.confidence, e.extraction_method, e.created_at_ms
+        FROM entities_view e;
+
+        CREATE TABLE IF NOT EXISTS debug_ask_sessions (
+            case_id           TEXT NOT NULL PRIMARY KEY,
+            question          TEXT NOT NULL,
+            plan_json         TEXT NOT NULL DEFAULT '{}',
+            evidence_json     TEXT NOT NULL DEFAULT '[]',
+            confidence        REAL NOT NULL DEFAULT 0.0,
+            source_types      TEXT NOT NULL DEFAULT '[]',
+            web_fallback_used INTEGER NOT NULL DEFAULT 0,
+            peer_consult_used INTEGER NOT NULL DEFAULT 0,
+            created_at_ms     INTEGER NOT NULL
+        );
+
         CREATE VIEW IF NOT EXISTS people_view AS
             SELECT * FROM entities_view WHERE entity_type = 'person';
 
@@ -456,6 +531,7 @@ pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     migrate_artifacts_summary(&conn)?;
     migrate_source_profiles_mapping(&conn)?;
+    migrate_debug_tables(&conn)?;
     create_schema(&conn)?;
     Ok(conn)
 }
@@ -484,6 +560,68 @@ fn migrate_artifacts_summary(conn: &Connection) -> Result<()> {
 }
 
 /// Migrate source_profiles_view: add mapping_rules_json if missing.
+fn migrate_debug_tables(conn: &Connection) -> Result<()> {
+    for (name, sql) in [
+        (
+            "document_chunks_view",
+            "CREATE TABLE IF NOT EXISTS document_chunks_view (
+                artifact_id TEXT NOT NULL PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_text TEXT NOT NULL DEFAULT '',
+                source_file TEXT NOT NULL DEFAULT '',
+                page_number INTEGER NOT NULL DEFAULT 0,
+                ocr_used INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL
+            )",
+        ),
+        (
+            "corrections_view",
+            "CREATE TABLE IF NOT EXISTS corrections_view (
+                correction_id TEXT NOT NULL PRIMARY KEY,
+                correction_type TEXT NOT NULL,
+                target_document_id TEXT NOT NULL DEFAULT '',
+                target_entity_id TEXT NOT NULL DEFAULT '',
+                target_chunk_index INTEGER NOT NULL DEFAULT -1,
+                original_value TEXT NOT NULL DEFAULT '',
+                corrected_value TEXT NOT NULL DEFAULT '',
+                corrected_type TEXT NOT NULL DEFAULT '',
+                is_valid INTEGER NOT NULL DEFAULT 1,
+                note TEXT NOT NULL DEFAULT '',
+                source_user TEXT NOT NULL DEFAULT 'admin',
+                created_at_ms INTEGER NOT NULL
+            )",
+        ),
+        (
+            "debug_ask_sessions",
+            "CREATE TABLE IF NOT EXISTS debug_ask_sessions (
+                case_id TEXT NOT NULL PRIMARY KEY,
+                question TEXT NOT NULL,
+                plan_json TEXT NOT NULL DEFAULT '{}',
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                source_types TEXT NOT NULL DEFAULT '[]',
+                web_fallback_used INTEGER NOT NULL DEFAULT 0,
+                peer_consult_used INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL
+            )",
+        ),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [name],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if !exists {
+            conn.execute(sql, [])?;
+        }
+    }
+    Ok(())
+}
+
 fn migrate_source_profiles_mapping(conn: &Connection) -> Result<()> {
     let table_exists: bool = conn
         .query_row(

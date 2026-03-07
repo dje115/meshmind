@@ -1,6 +1,6 @@
 [package]
 name = "meshmind-ui"
-version = "2.0.0"
+version = "2.5.0"
 edition = "2021"
 description = "MeshMind - Distributed Autonomous Intelligence Platform"
 default-run = "meshmind-ui"

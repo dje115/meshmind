@@ -1,19 +1,21 @@
 # MeshMind Ask Flow
 
-## Decision Ladder
+## Planner-First Flow (Phase C)
 
-When a user asks a question, MeshMind follows this order:
+MeshMind uses a **planner-first** flow: the AskPlanner classifies intent and produces an AskPlan *before* retrieval. The plan controls which evidence sources are used and whether peer consult or web fallback is allowed.
 
-1. **Local retrieval** — FTS search across cases, artifacts, documents
-2. **Peer consult** — If router says so, forward to peers (max 3 hops)
-3. **Business system queries** — Query entity cards, facts (structured)
-4. **Web research fallback** — If router says so AND policy allows AND node has research capability
+1. **AskPlanner** — Classify intent, build retrieval plan
+2. **EvidenceCollector** — Execute plan steps (entity, fact, FTS, document chunks)
+3. **Peer consult** — Only if `plan.requires_peer_consult` and local confidence is low
+4. **Web fallback** — Only if `plan.allows_web_fallback` and policy allows
+
+See [docs/ask-planner.md](../ask-planner.md) for the full planner specification.
 
 ---
 
-## Router Role
+## Decision Ladder (Legacy / Training)
 
-The RouterClassifier (when trained) influences:
+When a trained RouterClassifier exists, it will influence:
 
 - Whether to ask peers
 - Whether to permit web fallback
@@ -26,9 +28,9 @@ The RouterClassifier (when trained) influences:
 ```
 User question
      ↓
-Router decision (local / peers / web)
+AskPlanner → AskPlan (intent, retrieval_steps, peer/web flags)
      ↓
-Retrieve evidence (FTS + entity cards + facts)
+EvidenceCollector (execute plan steps)
      ↓
 Rank evidence (if Ranker available)
      ↓

@@ -1102,6 +1102,69 @@ mod tests {
         );
     }
 
+    /// Integration test: ingest scanned PDF (minimal text) through OCR fallback path;
+    /// verify chunks created and searchable. Requires fixtures/minimal.pdf.
+    #[test]
+    fn test_scanned_pdf_ocr_ingest_and_search() {
+        use node_connectors::DocumentConnector;
+        use node_storage::search;
+        use std::fs;
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture_path = manifest_dir
+            .parent()
+            .map(|p| p.join("node_connectors/tests/fixtures/minimal.pdf"))
+            .filter(|p| p.exists());
+        let Some(fixture) = fixture_path else {
+            return;
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let doc_dir = tmp.path().join("docs");
+        fs::create_dir_all(&doc_dir).unwrap();
+        fs::copy(&fixture, doc_dir.join("minimal.pdf")).unwrap();
+
+        let (cas, mut event_log, proj_db) = setup_infra(tmp.path());
+        let connector = DocumentConnector::new("doc-ocr-test");
+        let job = IngestJob {
+            ingest_id: "ing-ocr".into(),
+            source_id: "src-ocr".into(),
+            connector_type: "document".into(),
+        };
+
+        run_ingest(
+            &job,
+            &connector,
+            &doc_dir,
+            &["documents".to_string()],
+            &IngestConfig::default(),
+            &cas,
+            &mut event_log,
+            &proj_db,
+            "node-test",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = node_storage::sqlite_views::open_db(&proj_db).unwrap();
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents_view WHERE document_type = 'document_chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            chunk_count >= 1,
+            "scanned PDF should produce at least 1 chunk"
+        );
+
+        // "Hello World" is in the minimal PDF - should be searchable
+        let hits = search::search_documents_fts(&conn, "Hello", 10).unwrap();
+        assert!(!hits.is_empty(), "OCR/pdf text should be searchable");
+    }
+
     /// Integration test: ingest document with person, company, email, money, invoice number;
     /// verify entities extracted and queryable.
     #[test]

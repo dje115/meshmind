@@ -26,6 +26,7 @@ Each chunk is represented as a row with:
 - `chunk_text` — The extracted text for this fragment
 - `source_file` — Original filename
 - `page_number` — Page number (if available, e.g. from PDF)
+- `ocr_used` — `1` when OCR fallback was used (scanned PDF), `0` otherwise
 
 ### Behavior
 
@@ -121,10 +122,44 @@ Rebuilding projections from the event log (e.g. via `replay_events`) recreates:
 
 ---
 
-## 7. Example Ingestion Pipeline
+## 7. PDF Text Extraction and OCR Fallback
+
+### PDF Text Extraction
+
+PDFs are processed using **pdf_oxide** for direct text extraction. The extractor iterates over each page and extracts embedded text. Text is truncated to 100KB per document to avoid oversized context.
+
+### OCR Fallback for Scanned PDFs
+
+When a PDF yields very little extractable text (fewer than 200 characters), it is treated as a **scanned document**. The system automatically runs an OCR fallback:
+
+1. **Render pages to images** — Uses `pdftoppm` (from poppler-utils) to convert each PDF page to PNG at 300 DPI.
+2. **Run OCR** — Uses **Tesseract OCR** on each page image to recognize text.
+3. **Combine results** — Collected text from all pages is merged and passed through the normal pipeline.
+
+**Requirements**: `pdftoppm` (poppler-utils) and `tesseract` must be installed and available in PATH.
+
+| Platform | Install |
+|----------|---------|
+| Ubuntu/Debian | `apt install poppler-utils tesseract-ocr` |
+| macOS | `brew install poppler tesseract` |
+| Windows | [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases), [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) |
+
+When OCR is used, chunk metadata includes `ocr_used = true` and `page_number` for provenance.
+
+### Supported Formats
+
+| Format | Extension | Extraction Method |
+|--------|-----------|-------------------|
+| PDF | `.pdf` | pdf_oxide (direct) → OCR fallback if &lt; 200 chars |
+| Word | `.docx` | docx-rust (paragraph/run text) |
+| Plain text | `.txt`, `.md`, `.rtf` | Direct file read |
+
+---
+
+## 8. Example Ingestion Pipeline
 
 1. **Scan**: DocumentConnector discovers PDF, DOCX, TXT, MD, RTF files in a folder.
-2. **Extract**: Text is extracted (e.g. `pdf_oxide` for PDFs).
+2. **Extract**: Text is extracted (e.g. `pdf_oxide` for PDFs; OCR fallback for scanned PDFs).
 3. **Chunk**: Text is split with `chunk_text()` (1500 chars, 200 overlap).
 4. **Emit**: One `ArtifactPublished` per chunk with `document_subtype = "document_chunk"` and `entity_attributes_json` containing `document_id`, `chunk_index`, `chunk_text`, `source_file`, `page_number`.
 5. **Project**: Projector updates `artifacts_view`, `documents_view`, and `documents_fts`.
@@ -132,7 +167,7 @@ Rebuilding projections from the event log (e.g. via `replay_events`) recreates:
 
 ---
 
-## 8. Entity Extraction (Phase B)
+## 9. Entity Extraction (Phase B)
 
 ### Overview
 
@@ -158,7 +193,40 @@ See [entity-graph.md](entity-graph.md) for full details.
 
 ---
 
-## 9. Out of Scope (Phase C)
+## 10. Debug Panel and Correction Feedback
+
+### Debug API and UI
+
+The Debug Panel allows inspection of:
+
+- **OCR status** — Which documents used OCR, per-chunk OCR flags
+- **Chunks** — `document_id`, `chunk_index`, `chunk_text` preview, `source_file`, `page_number`
+- **Entities** — Extracted entities with type, value, confidence, extraction method
+- **Ask plan** — Intent, retrieval steps, evidence, source types, web/peer fallback
+
+See [debug-panel.md](debug-panel.md) for endpoints and usage.
+
+### Correction Storage
+
+Corrections are stored in `corrections_view`:
+
+- **Entity correction** — `corrected_value`, `corrected_type`, `is_valid` (marks incorrect extractions)
+- **Chunk (OCR) correction** — `corrected_text` for OCR errors
+- **Classification correction** — Document type or entity type override
+
+Each correction includes `source_user`, `created_at_ms` for provenance.
+
+### Effective Entities View
+
+`effective_entities_view` mirrors `entities_view` but uses corrected values when a correction exists. Original extraction remains in `entities_view`. Queries that prefer human-corrected data should use `effective_entities_view`.
+
+### Future Training
+
+Corrections are queryable by DatasetManifest builders. Fields `original_value`, `corrected_value`, `corrected_type`, `is_valid`, `source_user`, `created_at_ms` provide full provenance for supervised learning.
+
+---
+
+## 11. Out of Scope (Phase C)
 
 - Planner logic for retrieval strategy selection
 - Learned entity resolution or cross-document linking

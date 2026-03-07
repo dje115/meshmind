@@ -4,6 +4,22 @@ Each scenario follows: **Data Source → Normalization → Retrieval → Trainin
 
 ---
 
+## Planner-Driven Question Routing (Phase C)
+
+The AskPlanner routes questions to the right retrieval path:
+
+| Question Type | Example | Plan Intent | Retrieval Path |
+|---------------|---------|-------------|----------------|
+| Entity list | "Who appears in my documents?" | list_entities | EntityQuery(person) |
+| Companies | "Which companies are mentioned?" | list_entities | EntityQuery(company) |
+| Pricing history | "What have we charged for Cat6?" | pricing_history | FactQuery + EntityCards + DocumentChunk |
+| Document lookup | "Summarize document X" | document_lookup | DocumentChunk + FtsSearch |
+| Web freshness | "What happened in Iran yesterday?" | web_freshness_needed | Optional FTS + Web fallback allowed |
+
+See [docs/ask-planner.md](ask-planner.md) for full specification.
+
+---
+
 ## 1. Accounts Receivable Overdue
 
 | Phase | Description |

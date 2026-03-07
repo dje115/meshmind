@@ -29,7 +29,7 @@ function getRequestUrl(path) {
 
 async function request(method, path, body) {
   const opts = { method, headers: {} };
-  if (adminToken && path.startsWith('/admin')) {
+  if (adminToken && (path.startsWith('/admin') || path.startsWith('/debug'))) {
     opts.headers['Authorization'] = `Bearer ${adminToken}`;
   }
   if (body) {
@@ -76,6 +76,10 @@ export const api = {
     request('POST', '/admin/sources/approve', { source_id: sourceId, allowed_tables: allowedTables, row_limit: rowLimit }),
   removeSource: (sourceId) =>
     request('POST', '/admin/sources/remove', { source_id: sourceId }),
+  removeSourceByPath: (pathOrUri, connectorType) =>
+    request('POST', '/admin/sources/remove-by-path', { path_or_uri: pathOrUri, connector_type: connectorType ?? undefined }),
+  removeMissingSources: () =>
+    request('POST', '/admin/sources/remove-missing'),
   train: (target, datasetPreset) =>
     request('POST', '/admin/train', { target, dataset_preset: datasetPreset }),
   getModels: () => request('GET', '/admin/models'),
@@ -148,4 +152,12 @@ export const api = {
   getConfigGeneral: () => request('GET', '/admin/config/general'),
   saveConfigGeneral: (cfg) => request('POST', '/admin/config/general', cfg),
   restart: () => request('POST', '/admin/restart'),
+  // Debug API
+  getDebugDocuments: () => request('GET', '/debug/documents'),
+  getDebugDocument: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}`),
+  getDebugDocumentChunks: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}/chunks`),
+  getDebugDocumentEntities: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}/entities`),
+  getDebugAskSession: (caseId) => request('GET', `/debug/ask/${encodeURIComponent(caseId)}`),
+  getDebugEntities: (entityType, limit = 100) =>
+    request('GET', `/debug/entities?limit=${limit}${entityType ? `&entity_type=${encodeURIComponent(entityType)}` : ''}`),
 };

@@ -1,5 +1,19 @@
 # MeshMind Business Intelligence
 
+## Planner-First Ask (Phase C)
+
+MeshMind uses a **planner-first** flow for BI questions. The AskPlanner classifies intent and chooses retrieval strategy *before* executing retrieval. This improves answer quality by:
+
+1. **Structured queries first** — Entity and fact queries run before FTS when intent matches
+2. **Clear evidence sections** — Entity, fact, and document evidence are separated in the prompt
+3. **Controlled fallbacks** — Peer consult and web fallback are planner-controlled, not heuristic-only
+
+Example: "What have we historically charged for Cat6 installs?" → PricingHistory intent → FactQuery(pricing) + EntityCards(quote) + DocumentChunk(cat6 install). The LLM receives structured evidence, not a mixed blob.
+
+See [docs/ask-planner.md](ask-planner.md) for details.
+
+---
+
 ## What Is "Business Intelligence" in MeshMind?
 
 Beyond traditional BI dashboards and ETL pipelines, MeshMind treats **Business Intelligence** as:

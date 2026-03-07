@@ -233,6 +233,41 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                                     &chunk_idx,
                                     chunk_text,
                                 )?;
+                                // Populate document_chunks_view for debug (OCR, source_file, etc.)
+                                let source_file = attrs
+                                    .get("source_file")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let page_number: i64 = attrs
+                                    .get("page_number")
+                                    .and_then(|v| v.as_str().and_then(|s| s.parse().ok()))
+                                    .or_else(|| attrs.get("page_number").and_then(|v| v.as_i64()))
+                                    .unwrap_or(0);
+                                let ocr_used: i32 = attrs
+                                    .get("ocr_used")
+                                    .and_then(|v| {
+                                        v.as_str()
+                                            .map(|s| if s == "1" { 1 } else { 0 })
+                                            .or_else(|| v.as_i64().map(|n| n as i32))
+                                    })
+                                    .unwrap_or(0);
+                                let chunk_idx_int: i64 = chunk_idx.parse().unwrap_or(0);
+                                let _ = conn.execute(
+                                    "INSERT OR REPLACE INTO document_chunks_view
+                                     (artifact_id, document_id, chunk_index, chunk_text, source_file, page_number, ocr_used, source_id, created_at_ms)
+                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                    params![
+                                        ap.artifact_id,
+                                        doc_id,
+                                        chunk_idx_int,
+                                        chunk_text,
+                                        source_file,
+                                        page_number,
+                                        ocr_used,
+                                        ap.source_ref,
+                                        ts,
+                                    ],
+                                );
                             }
                         }
                     }

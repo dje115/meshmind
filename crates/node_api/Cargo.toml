@@ -18,6 +18,7 @@ node_datasets = { workspace = true }
 node_federated = { workspace = true }
 node_repl = { workspace = true }
 node_research = { path = "../node_research" }
+node_ask = { path = "../node_ask" }
 hex = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

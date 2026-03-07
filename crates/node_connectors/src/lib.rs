@@ -7,6 +7,8 @@
 //! - ImageConnector: extract EXIF/GPS metadata from image folders
 //! - DocumentConnector: extract text from PDF, DOCX, TXT, Markdown folders
 
+mod pdf_ocr;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -729,9 +731,12 @@ struct ExtractResult {
     text: String,
     file_type: String,
     page_count: u64,
+    /// True when OCR was used (scanned PDF fallback).
+    ocr_used: bool,
 }
 
-/// Extract text from PDF using pdf_oxide (more robust than pdf-extract, handles complex PDFs).
+/// Extract text from PDF using pdf_oxide. If extracted text is very short (< 200 chars),
+/// treat as scanned and run OCR fallback (pdftoppm + tesseract).
 fn extract_pdf_text(path: &Path) -> ExtractResult {
     let mut doc = match pdf_oxide::PdfDocument::open(path) {
         Ok(d) => d,
@@ -741,6 +746,7 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
                 text: String::new(),
                 file_type: "pdf".into(),
                 page_count: 0,
+                ocr_used: false,
             };
         }
     };
@@ -761,6 +767,27 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
             }
         }
     }
+
+    // OCR fallback for scanned PDFs (little or no extractable text)
+    if text.trim().len() < pdf_ocr::SCANNED_PDF_TEXT_THRESHOLD {
+        if let Some(ocr) = pdf_ocr::run_pdf_ocr(path) {
+            if !ocr.text.trim().is_empty() {
+                tracing::info!(path = %path.display(), pages = ocr.page_count, "OCR fallback recovered text from scanned PDF");
+                let truncated = if ocr.text.len() > MAX_DOCUMENT_TEXT_BYTES {
+                    ocr.text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
+                } else {
+                    ocr.text
+                };
+                return ExtractResult {
+                    text: truncated,
+                    file_type: "pdf".into(),
+                    page_count: ocr.page_count,
+                    ocr_used: true,
+                };
+            }
+        }
+    }
+
     let truncated = if text.len() > MAX_DOCUMENT_TEXT_BYTES {
         text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
     } else {
@@ -770,6 +797,7 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
         text: truncated,
         file_type: "pdf".into(),
         page_count,
+        ocr_used: false,
     }
 }
 
@@ -786,6 +814,7 @@ fn extract_text_from_file(path: &Path) -> ExtractResult {
             text: fs::read_to_string(path).unwrap_or_default(),
             file_type,
             page_count: 0,
+            ocr_used: false,
         },
         "pdf" => extract_pdf_text(path),
         "docx" => ExtractResult {
@@ -798,11 +827,13 @@ fn extract_text_from_file(path: &Path) -> ExtractResult {
             },
             file_type,
             page_count: 0,
+            ocr_used: false,
         },
         _ => ExtractResult {
             text: String::new(),
             file_type,
             page_count: 0,
+            ocr_used: false,
         },
     };
 
@@ -815,6 +846,7 @@ fn extract_text_from_file(path: &Path) -> ExtractResult {
         text: truncated,
         file_type: result.file_type,
         page_count: result.page_count,
+        ocr_used: result.ocr_used,
     }
 }
 
@@ -923,6 +955,12 @@ impl Connector for DocumentConnector {
                 nullable: true,
                 is_primary_key: false,
             },
+            SchemaColumn {
+                name: "ocr_used".into(),
+                data_type: "INTEGER".into(),
+                nullable: true,
+                is_primary_key: false,
+            },
         ];
 
         Ok(vec![TableInfo {
@@ -981,6 +1019,10 @@ impl Connector for DocumentConnector {
                 columns.insert("file_type".into(), extract.file_type.clone());
                 columns.insert("file_size_bytes".into(), file_size.to_string());
                 columns.insert("content_text".into(), chunk_text);
+                columns.insert(
+                    "ocr_used".into(),
+                    if extract.ocr_used { "1" } else { "0" }.to_string(),
+                );
 
                 let entity_id = format!("{}::chunk::{}", document_id, chunk_idx);
                 all_chunks.push(IngestRow { entity_id, columns });
@@ -1390,6 +1432,68 @@ mod tests {
             "all chunks from same document"
         );
         assert_eq!(batch.rows[1].columns["chunk_index"], "1");
+    }
+
+    #[test]
+    fn test_ocr_used_column() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("hello.txt"), b"Hello, world!").unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 10).unwrap();
+
+        assert_eq!(batch.rows.len(), 1);
+        assert!(batch.rows[0].columns.contains_key("ocr_used"));
+        assert_eq!(
+            batch.rows[0].columns["ocr_used"], "0",
+            "txt files do not use OCR"
+        );
+    }
+
+    #[test]
+    fn test_scanned_pdf_ocr_path() {
+        // Use minimal PDF with short text (< 200 chars) to trigger OCR path.
+        // When pdftoppm/tesseract are available, OCR runs; otherwise we use pdf_oxide text.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("minimal.pdf");
+        if !fixture_path.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("minimal.pdf");
+        fs::copy(&fixture_path, &dest).unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 10).unwrap();
+
+        assert!(!batch.rows.is_empty(), "scanned PDF should produce chunks");
+        assert_eq!(batch.rows[0].columns["file_type"], "pdf");
+        assert!(batch.rows[0].columns.contains_key("ocr_used"));
+        // Chunk text should contain content (from pdf_oxide or OCR)
+        assert!(
+            !batch.rows[0].columns["chunk_text"].is_empty(),
+            "chunk_text should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_document_ingest_with_ocr_metadata() {
+        // Verify entity extraction pipeline receives ocr_used in columns.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("invoice.txt"),
+            b"INVOICE #001\nAcme Corp\ncontact@acme.com\nTotal: $500",
+        )
+        .unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 10).unwrap();
+
+        assert_eq!(batch.rows.len(), 1);
+        assert_eq!(batch.rows[0].columns["ocr_used"], "0");
+        assert!(batch.rows[0].columns["chunk_text"].contains("Acme"));
     }
 
     #[test]

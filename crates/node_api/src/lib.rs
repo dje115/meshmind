@@ -49,6 +49,21 @@ use node_connectors::{
 };
 use sha2::Digest;
 
+/// Returns true if a local file path exists on disk. For URIs (http, etc.) returns true.
+fn path_exists_on_disk(path_or_uri: &str) -> bool {
+    let s = path_or_uri.trim();
+    if s.is_empty() {
+        return true;
+    }
+    // Only check local file paths (Windows C:\ or Unix /)
+    let is_file_path = s.starts_with('/')
+        || (s.len() >= 2 && s.chars().nth(1) == Some(':') && s.chars().next().map(|c| c.is_ascii_alphabetic()) == Some(true));
+    if !is_file_path {
+        return true; // URI or unknown - assume exists
+    }
+    std::path::Path::new(s).exists()
+}
+
 async fn serve_fallback_landing() -> impl IntoResponse {
     let html = r##"<!DOCTYPE html>
 <html>
@@ -106,12 +121,14 @@ fn connector_for_onedrive(data_dir: &std::path::Path) -> (Box<dyn Connector>, &'
     };
     (connector, "onedrive")
 }
+use node_ask::{collect_evidence, AskPlanner};
 use node_datasets::{DatasetBuildConfig, DatasetPreset};
 use node_discovery::{build_discovered_event, scan_directory, DiscoveryConfig};
 use node_ingest::{IngestConfig, IngestJob};
 use node_mesh::transport::Transport;
 use node_mesh::{ConsultConfig, PeerDirectory};
 use node_storage::cas::CasStore;
+use node_storage::debug;
 use node_storage::event_log::EventLog;
 use node_storage::insights;
 use node_storage::mergeable;
@@ -328,6 +345,8 @@ fn classify_business_intent(question: &str) -> BusinessIntent {
 }
 
 /// Document entity intent: questions about extracted entities in documents.
+/// Kept for reference; planner handles equivalent logic.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum DocumentEntityIntent {
     ListPeople,
@@ -338,6 +357,7 @@ enum DocumentEntityIntent {
     DocumentsMentioning(String),
 }
 
+#[allow(dead_code)]
 fn classify_document_entity_intent(question: &str) -> Option<DocumentEntityIntent> {
     let lower = question.trim().to_lowercase();
     if lower.contains("who appears")
@@ -684,6 +704,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/sources", get(handle_admin_sources))
         .route("/admin/sources/approve", post(handle_admin_approve_source))
         .route("/admin/sources/remove", post(handle_admin_remove_source))
+        .route("/admin/sources/remove-by-path", post(handle_admin_remove_source_by_path))
+        .route("/admin/sources/remove-missing", post(handle_admin_remove_missing_sources))
         .route("/admin/train", post(handle_admin_train))
         .route("/admin/train/status", get(handle_admin_train_status))
         .route("/admin/train/export", post(handle_admin_train_export))
@@ -744,6 +766,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/admin/config/onedrive/oauth/start",
             get(handle_admin_config_onedrive_oauth_start),
         )
+        .route("/debug/documents", get(handle_debug_documents))
+        .route("/debug/documents/:id", get(handle_debug_document_detail))
+        .route(
+            "/debug/documents/:id/chunks",
+            get(handle_debug_document_chunks),
+        )
+        .route(
+            "/debug/documents/:id/entities",
+            get(handle_debug_document_entities),
+        )
+        .route(
+            "/debug/documents/:id/entities/correct",
+            post(handle_debug_entity_correct),
+        )
+        .route(
+            "/debug/documents/:id/chunks/:chunk_index/correct",
+            post(handle_debug_chunk_correct),
+        )
+        .route(
+            "/debug/documents/:id/classification/correct",
+            post(handle_debug_classification_correct),
+        )
+        .route("/debug/ask/:case_id", get(handle_debug_ask_session))
+        .route("/debug/entities", get(handle_debug_entities))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     let oauth_public_routes = Router::new().route(
@@ -1027,8 +1073,13 @@ struct SourceRow {
     last_ingest_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_ingest_rows: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ingest_documents: Option<i64>,
     /// Path or URI (for tree grouping)
     path_or_uri: String,
+    /// False if path no longer exists on disk (e.g. folder was deleted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_exists: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1048,6 +1099,13 @@ struct ApproveSourceResponse {
 #[derive(Deserialize)]
 struct RemoveSourceRequest {
     source_id: String,
+}
+
+#[derive(Deserialize)]
+struct RemoveByPathRequest {
+    path_or_uri: String,
+    #[serde(default)]
+    connector_type: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1567,143 +1625,25 @@ async fn handle_ask(
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let fts_query = to_fts5_query(&req.question);
-    let search_limit = 100; // More documents for trends, summaries, cross-doc analysis
-    let mut context_hits = search::search_all(&conn, &fts_query, search_limit)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // Planner-first flow: build plan, then collect evidence
+    let planner = AskPlanner::new();
+    let plan = planner.plan(&req.question);
+    let budget = &plan.retrieval_budget;
+    let evidence = collect_evidence(
+        &conn,
+        &state.cas,
+        &plan,
+        &req.question,
+        budget.max_chunk_chars,
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    // Business intelligence: augment with entity graph and facts when intent matches
+    let mut context_hits = evidence.search_hits.clone();
+    let entity_evidence_ids = evidence.entity_ids.clone();
+    let mut context_bullets = evidence.context_bullets.clone();
+
+    // Intent kept for quote_guidance and missing_data_warnings (business intent detection)
     let intent = classify_business_intent(&req.question);
-    let mut entity_fact_bullets: Vec<String> = Vec::new();
-    let mut entity_evidence_ids: Vec<String> = Vec::new();
-
-    for et in &intent.entity_types {
-        if let Ok(hits) = search::search_entity_cards(&conn, Some(et), 20) {
-            for h in hits {
-                entity_evidence_ids.push(h.entity_id.clone());
-                entity_fact_bullets.push(format!(
-                    "[Entity {} {}] {}",
-                    h.entity_type, h.entity_id, h.attributes_json
-                ));
-            }
-        }
-    }
-    for m in &intent.metrics {
-        if let Ok(hits) = search::query_facts(&conn, Some(m), 15) {
-            for h in hits {
-                entity_evidence_ids.push(h.fact_id.clone());
-                entity_fact_bullets.push(format!(
-                    "[Fact {}] metric={} value={} dimensions={}",
-                    h.fact_id, h.metric, h.value_json, h.dimensions_json
-                ));
-            }
-        }
-    }
-    // If no metric filter matched, try broader facts query for revenue/profit/margin questions
-    if intent.metrics.is_empty()
-        && (req.question.to_lowercase().contains("revenue")
-            || req.question.to_lowercase().contains("profit")
-            || req.question.to_lowercase().contains("margin"))
-    {
-        if let Ok(hits) = search::query_facts(&conn, None, 15) {
-            for h in hits {
-                entity_evidence_ids.push(h.fact_id.clone());
-                entity_fact_bullets.push(format!(
-                    "[Fact {}] metric={} value={} dimensions={}",
-                    h.fact_id, h.metric, h.value_json, h.dimensions_json
-                ));
-            }
-        }
-    }
-
-    // Document entity intent: structured queries over extracted entities (people, companies, emails, etc.)
-    if let Some(doc_entity_intent) = classify_document_entity_intent(&req.question) {
-        let mut doc_entity_bullets: Vec<String> = Vec::new();
-        match doc_entity_intent {
-            DocumentEntityIntent::ListPeople => {
-                if let Ok(entities) = search::list_entities_by_type(&conn, "person", 50) {
-                    let unique: std::collections::HashSet<_> = entities
-                        .iter()
-                        .map(|e| e.normalized_value.as_str())
-                        .collect();
-                    for v in unique.into_iter().take(30) {
-                        doc_entity_bullets.push(format!("- Person: {}", v));
-                        entity_evidence_ids.push(format!("person:{}", v));
-                    }
-                }
-            }
-            DocumentEntityIntent::ListCompanies => {
-                if let Ok(entities) = search::list_entities_by_type(&conn, "company", 50) {
-                    let unique: std::collections::HashSet<_> = entities
-                        .iter()
-                        .map(|e| e.normalized_value.as_str())
-                        .collect();
-                    for v in unique.into_iter().take(30) {
-                        doc_entity_bullets.push(format!("- Company: {}", v));
-                        entity_evidence_ids.push(format!("company:{}", v));
-                    }
-                }
-            }
-            DocumentEntityIntent::ListEmails => {
-                if let Ok(entities) = search::list_entities_by_type(&conn, "email", 50) {
-                    for e in entities.into_iter().take(30) {
-                        doc_entity_bullets.push(format!("- Email: {}", e.entity_value));
-                        entity_evidence_ids.push(e.entity_id);
-                    }
-                }
-            }
-            DocumentEntityIntent::ListInvoiceNumbers => {
-                if let Ok(entities) = search::list_entities_by_type(&conn, "invoice_number", 50) {
-                    for e in entities.into_iter().take(30) {
-                        doc_entity_bullets.push(format!("- Invoice: {}", e.entity_value));
-                        entity_evidence_ids.push(e.entity_id);
-                    }
-                }
-            }
-            DocumentEntityIntent::ListQuoteNumbers => {
-                if let Ok(entities) = search::list_entities_by_type(&conn, "quote_number", 50) {
-                    for e in entities.into_iter().take(30) {
-                        doc_entity_bullets.push(format!("- Quote: {}", e.entity_value));
-                        entity_evidence_ids.push(e.entity_id);
-                    }
-                }
-            }
-            DocumentEntityIntent::DocumentsMentioning(mention) => {
-                let norm = node_extraction::normalize_value("company", &mention);
-                if let Ok(docs) = search::list_documents_for_entity(&conn, &norm, None, 20) {
-                    for (doc_id, etype, eval) in docs {
-                        doc_entity_bullets.push(format!(
-                            "- Document '{}' mentions {}: {}",
-                            doc_id, etype, eval
-                        ));
-                        entity_evidence_ids.push(format!("doc:{}", doc_id));
-                    }
-                }
-                if doc_entity_bullets.is_empty() {
-                    if let Ok(docs) =
-                        search::list_documents_for_entity(&conn, &mention.to_lowercase(), None, 20)
-                    {
-                        for (doc_id, etype, eval) in docs {
-                            doc_entity_bullets.push(format!(
-                                "- Document '{}' mentions {}: {}",
-                                doc_id, etype, eval
-                            ));
-                            entity_evidence_ids.push(format!("doc:{}", doc_id));
-                        }
-                    }
-                }
-            }
-        }
-        if !doc_entity_bullets.is_empty() {
-            entity_fact_bullets.insert(
-                0,
-                format!(
-                    "Extracted entities from documents:\n{}",
-                    doc_entity_bullets.join("\n")
-                ),
-            );
-        }
-    }
 
     // Fallback: for broad questions (summarize, trends, all docs) with no/few hits, retry with wider match
     let lower_q = req.question.to_lowercase();
@@ -1712,19 +1652,44 @@ async fn handle_ask(
         || lower_q.contains("across all")
         || lower_q.contains("all documents")
         || (lower_q.contains("document") && (lower_q.contains("list") || lower_q.contains("show")));
+    let search_limit = budget.max_hits.min(100);
     if context_hits.len() < 3 && is_broad_request {
         if let Ok(fallback_hits) =
             search::search_all(&conn, "document OR file OR content", search_limit)
         {
             if !fallback_hits.is_empty() {
                 context_hits = fallback_hits;
+                // Rebuild context bullets: entity/fact block + doc bullets from fallback hits
+                let entity_fact_block: Vec<String> = evidence
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i.source_type.as_str(), "entity" | "entity_card" | "fact"))
+                    .map(|i| i.payload.clone())
+                    .collect();
+                let mut doc_bullets =
+                    build_context_bullets(&context_hits, &state.cas, &req.question);
+                if !entity_fact_block.is_empty() {
+                    doc_bullets.insert(
+                        0,
+                        format!("Entity graph and facts:\n{}", entity_fact_block.join("\n")),
+                    );
+                }
+                context_bullets = doc_bullets;
             }
         }
     }
 
+    // Entity/fact content for quote_guidance (planner already collected via evidence)
+    let has_entity_fact = evidence
+        .items
+        .iter()
+        .any(|i| matches!(i.source_type.as_str(), "entity" | "entity_card" | "fact"));
+
+    // Web fallback: planner-controlled
     let mut web_search_context = String::new();
-    let do_web_search = wants_web_search(&req.question)
-        || (context_hits.is_empty() && looks_like_general_knowledge_question(&req.question));
+    let do_web_search = plan.allows_web_fallback
+        && (wants_web_search(&req.question)
+            || (context_hits.is_empty() && looks_like_general_knowledge_question(&req.question)));
     if do_web_search {
         let query = extract_search_query(&req.question, &[])
             .or_else(|| Some(req.question.trim().to_string()))
@@ -1752,43 +1717,37 @@ async fn handle_ask(
         }
     }
 
-    let mut context_bullets: Vec<String> =
-        build_context_bullets(&context_hits, &state.cas, &req.question);
-    if !entity_fact_bullets.is_empty() {
-        context_bullets.insert(
-            0,
-            format!(
-                "Entity graph and facts:\n{}",
-                entity_fact_bullets.join("\n")
-            ),
-        );
-    }
+    // Build structured prompt: plan summary, evidence sections, then question.
+    // LLM's role: explain, summarize, format — not guess evidence source.
+    let plan_summary = plan.plan_summary();
 
     let prompt = if !web_search_context.is_empty() {
         let kb = if context_bullets.is_empty() {
-            String::new()
+            format!("Plan: {}\n\n", plan_summary)
         } else {
             format!(
-                "Context from local knowledge base:\n{}\n\n",
+                "Plan: {}\n\n--- Local knowledge base (entity, fact, document evidence) ---\n{}\n\n",
+                plan_summary,
                 context_bullets.join("\n")
             )
         };
         format!(
-            "{}{}\nQuestion: {}\n\nAnswer based on the web search results above. {} Be concise and specific.",
+            "{}\n--- Web search results ---\n{}\n\nQuestion: {}\n\nAnswer based on the evidence above. {} Be concise and specific.",
             kb,
             web_search_context,
             req.question,
-            if kb.is_empty() { "" } else { "Use local context if relevant. " }
+            if context_bullets.is_empty() { "" } else { "Use local context if relevant. " }
         )
     } else if context_bullets.is_empty() {
         format!(
-            "The user asked: \"{}\"\n\nNo matching data was found in the local knowledge base. \
+            "Plan: {}\n\nThe user asked: \"{}\"\n\nNo matching data was found in the local knowledge base. \
              Tell the user you searched but found no relevant results. Suggest they scan and ingest \
              their local data sources first using the Sources panel, then try again.",
+            plan_summary,
             req.question
         )
     } else {
-        let quote_guidance = if !entity_fact_bullets.is_empty()
+        let quote_guidance = if has_entity_fact
             && (intent
                 .entity_types
                 .iter()
@@ -1800,7 +1759,8 @@ async fn handle_ask(
             ""
         };
         format!(
-            "Context from the user's local knowledge base:\n{}\n\nQuestion: {}\n\nAnswer based on the context above. Be concise and specific.{}",
+            "Plan: {}\n\n--- Evidence (entity, fact, document) ---\n{}\n\nQuestion: {}\n\nAnswer based on the evidence above. Be concise and specific.{}",
+            plan_summary,
             context_bullets.join("\n"),
             req.question,
             quote_guidance
@@ -1880,9 +1840,9 @@ async fn handle_ask(
         missing_data_warnings.push("Business intent detected but no entity/fact data matched. Ingest customer, invoice, or quote data for better answers.".to_string());
     }
 
-    // If local confidence is low and we have a transport, consult peers
+    // Planner-controlled peer consult: only when plan allows and confidence is low
     let mut peer_answers = Vec::new();
-    if local_confidence < 0.6 {
+    if local_confidence < 0.6 && plan.requires_peer_consult {
         if let Some(ref transport) = state.transport {
             let shard_peers = shards::peers_for_question(&conn, &req.question)
                 .ok()
@@ -1920,6 +1880,22 @@ async fn handle_ask(
                 if best.confidence > local_confidence {
                     let mut context_used = best.evidence_refs.clone();
                     context_used.push(best.peer_id.clone());
+                    let plan_json = serde_json::to_string(&plan).unwrap_or_else(|_| "{}".into());
+                    let evidence_json =
+                        serde_json::to_string(&evidence).unwrap_or_else(|_| "[]".into());
+                    let source_types_json =
+                        serde_json::to_string(&source_types).unwrap_or_else(|_| "[]".into());
+                    let _ = debug::store_debug_ask_session(
+                        &conn,
+                        &case_id,
+                        &req.question,
+                        &plan_json,
+                        &evidence_json,
+                        best.confidence as f64,
+                        &source_types_json,
+                        !web_search_context.is_empty(),
+                        true,
+                    );
                     return Ok(Json(AskResponse {
                         answer: best.answer,
                         confidence: best.confidence,
@@ -1951,6 +1927,21 @@ async fn handle_ask(
 
     let mut context_used: Vec<String> = context_hits.iter().map(|h| h.id.clone()).collect();
     context_used.extend(entity_evidence_ids.clone());
+
+    let plan_json = serde_json::to_string(&plan).unwrap_or_else(|_| "{}".into());
+    let evidence_json = serde_json::to_string(&evidence).unwrap_or_else(|_| "[]".into());
+    let source_types_json = serde_json::to_string(&source_types).unwrap_or_else(|_| "[]".into());
+    let _ = debug::store_debug_ask_session(
+        &conn,
+        &case_id,
+        &req.question,
+        &plan_json,
+        &evidence_json,
+        local_confidence as f64,
+        &source_types_json,
+        !web_search_context.is_empty(),
+        !peer_answers.is_empty(),
+    );
 
     Ok(Json(AskResponse {
         answer,
@@ -2002,6 +1993,228 @@ async fn handle_ask_confirm(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------- Debug handlers (localhost-only, admin-protected) ----------
+
+#[derive(Deserialize)]
+struct DebugEntitiesQuery {
+    entity_type: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn handle_debug_documents(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<debug::DebugDocumentSummary>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let list = debug::list_debug_documents(&conn).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(list))
+}
+
+async fn handle_debug_document_detail(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let (summary, chunks, entities) =
+        debug::get_debug_document(&conn, &id).map_err(|e| ApiError::internal(e.to_string()))?;
+    let summary = summary.ok_or_else(|| ApiError::not_found("document not found".to_string()))?;
+    Ok(Json(serde_json::json!({
+        "metadata": {
+            "document_id": summary.document_id,
+            "filename": summary.filename,
+            "ocr_used": summary.ocr_used,
+            "chunk_count": summary.chunk_count,
+            "entity_count": summary.entity_count,
+            "created_at_ms": summary.created_at_ms,
+        },
+        "chunks": chunks,
+        "entities": entities,
+    })))
+}
+
+async fn handle_debug_document_chunks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<debug::DebugChunkInfo>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let chunks =
+        debug::list_debug_chunks(&conn, &id).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(chunks))
+}
+
+async fn handle_debug_document_entities(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<debug::DebugEntityInfo>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let entities = debug::list_debug_entities_for_document(&conn, &id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(entities))
+}
+
+async fn handle_debug_ask_session(
+    State(state): State<Arc<AppState>>,
+    Path(case_id): Path<String>,
+) -> Result<Json<debug::DebugAskSession>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let session = debug::get_debug_ask_session(&conn, &case_id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    session
+        .ok_or_else(|| ApiError::not_found("ask session not found".to_string()))
+        .map(Json)
+}
+
+#[derive(Deserialize)]
+struct EntityCorrectRequest {
+    entity_id: String,
+    corrected_type: Option<String>,
+    corrected_value: Option<String>,
+    is_valid: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ChunkCorrectRequest {
+    corrected_text: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClassificationCorrectRequest {
+    corrected_document_type: Option<String>,
+    corrected_entity_type: Option<String>,
+}
+
+async fn handle_debug_entity_correct(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<EntityCorrectRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let (original_value, chunk_index) = entities_view_entity(&conn, &req.entity_id, &id)?;
+    let correction_id = debug::store_entity_correction(
+        &conn,
+        &id,
+        &req.entity_id,
+        chunk_index,
+        &original_value,
+        req.corrected_type.as_deref(),
+        req.corrected_value.as_deref(),
+        req.is_valid.unwrap_or(true),
+        "admin",
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "correction_id": correction_id })))
+}
+
+fn entities_view_entity(
+    conn: &rusqlite::Connection,
+    entity_id: &str,
+    document_id: &str,
+) -> Result<(String, i64), ApiError> {
+    let (entity_value, chunk_index): (String, i64) = conn
+        .query_row(
+            "SELECT entity_value, chunk_index FROM entities_view WHERE entity_id = ?1 AND document_id = ?2 LIMIT 1",
+            rusqlite::params![entity_id, document_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| ApiError::not_found("entity not found".to_string()))?;
+    Ok((entity_value, chunk_index))
+}
+
+#[derive(Deserialize)]
+struct ChunkPathParams {
+    id: String,
+    chunk_index: String,
+}
+
+async fn handle_debug_chunk_correct(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<ChunkPathParams>,
+    Json(req): Json<ChunkCorrectRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = params.id;
+    let chunk_index = params.chunk_index;
+    let chunk_idx: i64 = chunk_index
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid chunk_index"))?;
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let original = get_chunk_text(&conn, &id, chunk_idx).unwrap_or_default();
+    let correction_id = debug::store_chunk_correction(
+        &conn,
+        &id,
+        chunk_idx,
+        &original,
+        &req.corrected_text,
+        &req.note.unwrap_or_default(),
+        "admin",
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "correction_id": correction_id })))
+}
+
+fn get_chunk_text(
+    conn: &rusqlite::Connection,
+    document_id: &str,
+    chunk_index: i64,
+) -> Option<String> {
+    let has_dcv: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_chunks_view'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if has_dcv {
+        conn.query_row(
+            "SELECT chunk_text FROM document_chunks_view WHERE document_id = ?1 AND chunk_index = ?2 LIMIT 1",
+            rusqlite::params![document_id, chunk_index],
+            |r| r.get(0),
+        )
+        .ok()
+    } else {
+        conn.query_row(
+            "SELECT chunk_text FROM documents_fts WHERE document_id = ?1 AND chunk_index = ?2 LIMIT 1",
+            rusqlite::params![document_id, chunk_index.to_string()],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+}
+
+async fn handle_debug_classification_correct(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ClassificationCorrectRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let doc_type = req.corrected_document_type.as_deref().unwrap_or("document");
+    let entity_type = req.corrected_entity_type.as_deref().unwrap_or("");
+    let correction_id =
+        debug::store_classification_correction(&conn, &id, doc_type, entity_type, "admin")
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "correction_id": correction_id })))
+}
+
+async fn handle_debug_entities(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DebugEntitiesQuery>,
+) -> Result<Json<Vec<debug::DebugEntityInfo>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = q.limit.unwrap_or(100);
+    let entity_type = q.entity_type.as_deref();
+    let list = debug::list_debug_entities(&conn, entity_type, limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(list))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2903,14 +3116,14 @@ async fn handle_admin_sources(
     let mut stmt = conn
         .prepare(
             "WITH latest_ingest AS (
-                SELECT source_id, status, rows_ingested,
+                SELECT source_id, status, rows_ingested, documents_created,
                        ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY COALESCE(completed_at_ms, 0) DESC, started_at_ms DESC) AS rn
                 FROM ingests_view
             )
             SELECT sv.source_id, sv.display_name, sv.connector_type, sv.status, sv.pii_detected, sv.estimated_size_bytes,
-                   li.status AS last_ingest_status, li.rows_ingested AS last_ingest_rows, sv.path_or_uri
+                   li.status AS last_ingest_status, li.rows_ingested AS last_ingest_rows, li.documents_created AS last_ingest_documents, sv.path_or_uri
             FROM sources_view sv
-            LEFT JOIN (SELECT source_id, status, rows_ingested FROM latest_ingest WHERE rn = 1) li ON sv.source_id = li.source_id
+            LEFT JOIN (SELECT source_id, status, rows_ingested, documents_created FROM latest_ingest WHERE rn = 1) li ON sv.source_id = li.source_id
             WHERE sv.status != 'removed'
             ORDER BY sv.source_id",
         )
@@ -2918,6 +3131,8 @@ async fn handle_admin_sources(
 
     let rows: Vec<SourceRow> = stmt
         .query_map([], |row| {
+            let path_or_uri: String = row.get(9)?;
+            let path_exists = path_exists_on_disk(&path_or_uri);
             Ok(SourceRow {
                 source_id: row.get(0)?,
                 display_name: row.get(1)?,
@@ -2927,7 +3142,9 @@ async fn handle_admin_sources(
                 estimated_size_bytes: row.get(5)?,
                 last_ingest_status: row.get::<_, Option<String>>(6).ok().flatten(),
                 last_ingest_rows: row.get::<_, Option<i64>>(7).ok().flatten(),
-                path_or_uri: row.get(8)?,
+                last_ingest_documents: row.get::<_, Option<i64>>(8).ok().flatten(),
+                path_or_uri,
+                path_exists: Some(path_exists),
             })
         })
         .map_err(|e| ApiError::internal(e.to_string()))?
@@ -2980,6 +3197,130 @@ async fn handle_admin_approve_source(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(ApproveSourceResponse { event_id }))
+}
+
+#[derive(Serialize)]
+struct RemoveByPathResponse {
+    removed_count: usize,
+}
+
+async fn handle_admin_remove_source_by_path(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RemoveByPathRequest>,
+) -> Result<Json<RemoveByPathResponse>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let source_ids: Vec<String> = if let Some(ct) = req.connector_type {
+        conn.prepare(
+            "SELECT source_id FROM sources_view WHERE path_or_uri = ?1 AND connector_type = ?2 AND status != 'removed'",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map(rusqlite::params![&req.path_or_uri, ct], |row| row.get(0))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect()
+    } else {
+        conn.prepare(
+            "SELECT source_id FROM sources_view WHERE path_or_uri = ?1 AND status != 'removed'",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map([&req.path_or_uri], |row| row.get(0))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+
+    let mut log = state.event_log.write().await;
+    for source_id in &source_ids {
+        let event_id = format!("evt-remove-{}", uuid::Uuid::new_v4());
+        let event = EventEnvelope {
+            event_id: event_id.clone(),
+            r#type: EventType::DataSourceRemoved as i32,
+            node_id: Some(NodeId {
+                value: state.node_id.clone(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
+            sensitivity: Sensitivity::Public as i32,
+            payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
+                source_id: source_id.clone(),
+            })),
+            ..Default::default()
+        };
+        let stored = log
+            .append(event)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let conn = rusqlite::Connection::open(&state.db_path)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        node_storage::projector::apply_event(&conn, &stored)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+    }
+
+    Ok(Json(RemoveByPathResponse {
+        removed_count: source_ids.len(),
+    }))
+}
+
+#[derive(Serialize)]
+struct RemoveMissingResponse {
+    removed_count: usize,
+}
+
+async fn handle_admin_remove_missing_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<RemoveMissingResponse>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let source_ids: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT source_id, path_or_uri FROM sources_view WHERE status != 'removed'",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .filter(|(_, path)| !path_exists_on_disk(path))
+        .collect();
+
+    let mut log = state.event_log.write().await;
+    for (source_id, _) in &source_ids {
+        let event_id = format!("evt-remove-{}", uuid::Uuid::new_v4());
+        let event = EventEnvelope {
+            event_id: event_id.clone(),
+            r#type: EventType::DataSourceRemoved as i32,
+            node_id: Some(NodeId {
+                value: state.node_id.clone(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".into(),
+            }),
+            sensitivity: Sensitivity::Public as i32,
+            payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
+                source_id: source_id.clone(),
+            })),
+            ..Default::default()
+        };
+        let stored = log
+            .append(event)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let conn = rusqlite::Connection::open(&state.db_path)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        node_storage::projector::apply_event(&conn, &stored)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+    }
+
+    Ok(Json(RemoveMissingResponse {
+        removed_count: source_ids.len(),
+    }))
 }
 
 async fn handle_admin_remove_source(
@@ -3132,6 +3473,19 @@ async fn handle_admin_scan(
         let found = scan_directory(dir, &config);
         all_sources.extend(found);
     }
+
+    // Deduplicate by canonical path + connector (Windows treats Invoices/InvoicES as same folder)
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
+    all_sources.retain(|s| {
+        let canon = s.path.canonicalize().unwrap_or_else(|_| s.path.clone());
+        let key = (canon.to_string_lossy().to_lowercase(), s.connector_type);
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.insert(key);
+            true
+        }
+    });
 
     let mut log = state.event_log.write().await;
     let conn = rusqlite::Connection::open(&state.db_path)

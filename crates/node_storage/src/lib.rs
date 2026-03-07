@@ -1,6 +1,7 @@
 //! CAS, event log, SQLite materialized views, and snapshot support.
 
 pub mod cas;
+pub mod debug;
 pub mod event_log;
 pub mod insights;
 pub mod mergeable;

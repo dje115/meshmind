@@ -57,6 +57,7 @@ Complete index of all documentation sections. Use this as a map to find what you
 
 | Document | Description |
 |----------|-------------|
+| [ask-planner.md](ask-planner.md) | Planner-first ask flow, AskPlan, evidence collection (Phase C) |
 | [workflows/ask-flow.md](workflows/ask-flow.md) | Decision ladder, evidence, confirmation |
 | [workflows/web-research.md](workflows/web-research.md) | Web fallback, gates, flow |
 | [workflows/peer-consult.md](workflows/peer-consult.md) | Peer forwarding, budgets |
