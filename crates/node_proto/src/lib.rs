@@ -1494,6 +1494,7 @@ mod tests {
             (EventType::IngestStarted, 80),
             (EventType::IngestCompleted, 81),
             (EventType::DatasetManifestCreated, 82),
+            (EventType::EntityRelationshipRecorded, 94),
             (EventType::TrainDeltaPublished, 90),
             (EventType::TrainDeltaApplied, 91),
             (EventType::FederatedRoundStarted, 92),

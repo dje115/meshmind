@@ -225,6 +225,40 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             created_at_ms   INTEGER NOT NULL,
             PRIMARY KEY (fact_id, version)
         );
+
+        -- Entity intelligence graph
+        CREATE TABLE IF NOT EXISTS entity_cards_view (
+            entity_id       TEXT PRIMARY KEY,
+            entity_type     TEXT NOT NULL,
+            attributes_json TEXT NOT NULL DEFAULT '{}',
+            content_hash    TEXT,
+            source_id       TEXT NOT NULL DEFAULT '',
+            table_name      TEXT NOT NULL DEFAULT '',
+            created_at_ms   INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS entity_relationships_view (
+            from_entity_id  TEXT NOT NULL,
+            to_entity_id    TEXT NOT NULL,
+            relationship_type TEXT NOT NULL DEFAULT '',
+            source_id       TEXT NOT NULL DEFAULT '',
+            table_name      TEXT NOT NULL DEFAULT '',
+            created_at_ms   INTEGER NOT NULL,
+            PRIMARY KEY (from_entity_id, to_entity_id, relationship_type)
+        );
+
+        -- Type-specific views (aliases for entity_cards_view)
+        CREATE VIEW IF NOT EXISTS customers_view AS
+            SELECT * FROM entity_cards_view WHERE entity_type = 'customer';
+
+        CREATE VIEW IF NOT EXISTS quotes_view AS
+            SELECT * FROM entity_cards_view WHERE entity_type = 'quote';
+
+        CREATE VIEW IF NOT EXISTS invoices_view AS
+            SELECT * FROM entity_cards_view WHERE entity_type = 'invoice';
+
+        CREATE VIEW IF NOT EXISTS accounts_view AS
+            SELECT * FROM entity_cards_view WHERE entity_type = 'account';
         ",
     )?;
 
@@ -360,6 +394,44 @@ mod tests {
         assert!(tables.contains(&"messages_view".to_string()));
         assert!(tables.contains(&"documents_view".to_string()));
         assert!(tables.contains(&"facts_view".to_string()));
+        assert!(tables.contains(&"entity_cards_view".to_string()));
+        assert!(tables.contains(&"entity_relationships_view".to_string()));
+    }
+
+    #[test]
+    fn entity_graph_views_exist() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entity_cards_view", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let _: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_relationships_view",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM customers_view", [], |row| row.get(0))
+            .unwrap();
+
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM quotes_view", [], |row| row.get(0))
+            .unwrap();
+
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM invoices_view", [], |row| row.get(0))
+            .unwrap();
+
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts_view", [], |row| row.get(0))
+            .unwrap();
     }
 
     #[test]

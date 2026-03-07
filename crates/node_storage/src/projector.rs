@@ -145,6 +145,29 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                             ts,
                         ],
                     )?;
+                    // Populate entity_cards_view for entity_card documents
+                    if doc_type == "entity_card" && !ap.entity_type.is_empty() {
+                        let entity_id = format!("{}:{}", ap.entity_type, ap.entity_key);
+                        let attrs_json = if ap.entity_attributes_json.is_empty() {
+                            "{}"
+                        } else {
+                            &ap.entity_attributes_json
+                        };
+                        conn.execute(
+                            "INSERT OR REPLACE INTO entity_cards_view
+                             (entity_id, entity_type, attributes_json, content_hash, source_id, table_name, created_at_ms)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                entity_id,
+                                ap.entity_type,
+                                attrs_json,
+                                ap.content_ref.as_ref().map(|h| &h.sha256),
+                                ap.source_ref,
+                                ap.table_name,
+                                ts,
+                            ],
+                        )?;
+                    }
                 }
                 if ap.artifact_type == ARTIFACT_TYPE_FACT && !ap.metric.is_empty() {
                     conn.execute(
@@ -382,6 +405,21 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::EntityRelationshipRecorded(err) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO entity_relationships_view
+                     (from_entity_id, to_entity_id, relationship_type, source_id, table_name, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        err.from_entity_id,
+                        err.to_entity_id,
+                        err.relationship_type,
+                        err.source_id,
+                        err.table_name,
+                        ts,
+                    ],
+                )?;
+            }
             Payload::DatasetManifestCreated(dm) => {
                 conn.execute(
                     "INSERT OR REPLACE INTO datasets_view
@@ -510,6 +548,12 @@ fn event_summary(event: &EventEnvelope) -> String {
         Some(Payload::DataSourceRemoved(r)) => format!("data source removed: {}", r.source_id),
         Some(Payload::DataSourceApproved(a)) => {
             format!("data source approved: {}", a.source_id)
+        }
+        Some(Payload::EntityRelationshipRecorded(err)) => {
+            format!(
+                "entity relationship: {} -[{}]-> {}",
+                err.from_entity_id, err.relationship_type, err.to_entity_id
+            )
         }
         Some(Payload::IngestStarted(i)) => format!("ingest started: {}", i.ingest_id),
         Some(Payload::IngestCompleted(i)) => {
@@ -929,6 +973,150 @@ mod tests {
         let (hash, count) = get_checkpoint(&conn).unwrap().unwrap();
         assert_eq!(hash, "hash-e1");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn project_entity_card() {
+        let conn = setup();
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "ing-1-invoices-inv001".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Invoice inv001".into(),
+                    summary: "Invoice for customer".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch-inv".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "entity_card".into(),
+                    entity_type: "invoice".into(),
+                    entity_key: "inv001".into(),
+                    source_ref: "src-1".into(),
+                    table_name: "invoices".into(),
+                    entity_attributes_json: r#"{"amount":1500,"customer_id":"cust-1"}"#.into(),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .unwrap();
+
+        let (entity_id, entity_type, attrs): (String, String, String) = conn
+            .query_row(
+                "SELECT entity_id, entity_type, attributes_json FROM entity_cards_view WHERE entity_id = 'invoice:inv001'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(entity_id, "invoice:inv001");
+        assert_eq!(entity_type, "invoice");
+        assert!(attrs.contains("1500"));
+        assert!(attrs.contains("cust-1"));
+    }
+
+    #[test]
+    fn project_entity_relationship() {
+        let conn = setup();
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::EntityRelationshipRecorded(EntityRelationshipRecorded {
+                    from_entity_id: "invoice:inv001".into(),
+                    to_entity_id: "customer:cust-1".into(),
+                    relationship_type: "belongs_to_customer".into(),
+                    source_id: "src-1".into(),
+                    table_name: "invoices".into(),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let (from_id, to_id, rel_type): (String, String, String) = conn
+            .query_row(
+                "SELECT from_entity_id, to_entity_id, relationship_type FROM entity_relationships_view WHERE from_entity_id = 'invoice:inv001'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(from_id, "invoice:inv001");
+        assert_eq!(to_id, "customer:cust-1");
+        assert_eq!(rel_type, "belongs_to_customer");
+    }
+
+    #[test]
+    fn project_entity_graph_rebuild() {
+        let conn = setup();
+        let events = [
+            make_event(
+                "e1",
+                Payload::ArtifactPublished(ArtifactPublished {
+                    artifact_id: "art-cust-1".into(),
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title: "Customer ABC".into(),
+                    summary: "ABC Ltd".into(),
+                    content_ref: Some(HashRef {
+                        sha256: "ch-cust".into(),
+                    }),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    document_subtype: "entity_card".into(),
+                    entity_type: "customer".into(),
+                    entity_key: "cust-1".into(),
+                    source_ref: "src-1".into(),
+                    table_name: "customers".into(),
+                    entity_attributes_json: r#"{"revenue_total":140000,"jobs_completed":9}"#.into(),
+                    ..Default::default()
+                }),
+            ),
+            make_event(
+                "e2",
+                Payload::EntityRelationshipRecorded(EntityRelationshipRecorded {
+                    from_entity_id: "quote:q-001".into(),
+                    to_entity_id: "customer:cust-1".into(),
+                    relationship_type: "belongs_to_customer".into(),
+                    source_id: "src-1".into(),
+                    table_name: "quotes".into(),
+                }),
+            ),
+        ];
+        replay_events(&conn, &events).unwrap();
+
+        let card_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entity_cards_view", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(card_count, 1);
+
+        let rel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_relationships_view",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rel_count, 1);
+
+        let customer_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM customers_view", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(customer_count, 1);
+
+        let attrs: String = conn
+            .query_row(
+                "SELECT attributes_json FROM entity_cards_view WHERE entity_type = 'customer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(attrs.contains("140000"));
+        assert!(attrs.contains("9"));
     }
 
     #[test]

@@ -23,8 +23,8 @@ use uuid::Uuid;
 use node_connectors::Connector;
 use node_proto::common::{NodeId, Sensitivity, TenantId, Timestamp};
 use node_proto::events::{
-    event_envelope, ArtifactPublished, ArtifactType, ConnectorType, EventEnvelope, EventType,
-    IngestCompleted, IngestStarted,
+    event_envelope, ArtifactPublished, ArtifactType, ConnectorType, EntityRelationshipRecorded,
+    EventEnvelope, EventType, IngestCompleted, IngestStarted,
 };
 use node_storage::cas::CasStore;
 use node_storage::event_log::EventLog;
@@ -347,6 +347,18 @@ fn build_artifact_summary(columns: &BTreeMap<String, String>, max_len: usize) ->
     truncate_str(&parts.join(" | "), max_len)
 }
 
+/// FK column -> target entity type for relationship inference
+const FK_RELATIONSHIPS: &[(&str, &str)] = &[
+    ("customer_id", "customer"),
+    ("quote_id", "quote"),
+    ("invoice_id", "invoice"),
+    ("account_id", "account"),
+    ("supplier_id", "supplier"),
+    ("product_id", "product"),
+    ("job_id", "job"),
+    ("project_id", "project"),
+];
+
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
@@ -513,6 +525,8 @@ pub fn run_ingest(
                             ),
                             source_ref: job.source_id.clone(),
                             table_name: table.to_string(),
+                            entity_attributes_json: serde_json::to_string(&row.columns)
+                                .unwrap_or_else(|_| "{}".into()),
                             ..Default::default()
                         },
                     )),
@@ -524,6 +538,43 @@ pub fn run_ingest(
 
                 total_bytes += json_len;
                 total_docs += 1;
+
+                // Emit relationship events for FK columns
+                let from_entity_id = format!(
+                    "{}:{}",
+                    infer_entity_type(table, mapping_hints.and_then(|m| m.get(table)),),
+                    infer_entity_key(row, mapping_hints.and_then(|m| m.get(table)),),
+                );
+                for (fk_col, target_type) in FK_RELATIONSHIPS {
+                    if let Some(ref to_key) = row.columns.get(*fk_col) {
+                        if !to_key.is_empty() {
+                            let to_entity_id = format!("{target_type}:{to_key}");
+                            let rel_event = EventEnvelope {
+                                event_id: Uuid::new_v4().to_string(),
+                                r#type: EventType::EntityRelationshipRecorded as i32,
+                                node_id: Some(NodeId {
+                                    value: node_id.to_string(),
+                                }),
+                                tenant_id: Some(TenantId {
+                                    value: "public".to_string(),
+                                }),
+                                sensitivity: Sensitivity::Public as i32,
+                                payload: Some(event_envelope::Payload::EntityRelationshipRecorded(
+                                    EntityRelationshipRecorded {
+                                        from_entity_id: from_entity_id.clone(),
+                                        to_entity_id: to_entity_id.clone(),
+                                        relationship_type: format!("belongs_to_{target_type}"),
+                                        source_id: job.source_id.clone(),
+                                        table_name: table.to_string(),
+                                    },
+                                )),
+                                ..Default::default()
+                            };
+                            let rel_event = event_log.append(rel_event)?;
+                            node_storage::projector::apply_event(&proj_conn, &rel_event)?;
+                        }
+                    }
+                }
             }
 
             let batch_len = batch.rows.len() as u64;
@@ -847,5 +898,105 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row_count_facts, 1);
+    }
+
+    #[test]
+    fn test_entity_graph_from_ingest() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let db_path = dir.join("invoices.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT, amount REAL);
+             INSERT INTO invoices VALUES ('inv-1', 'cust-a', 1200.50);
+             INSERT INTO invoices VALUES ('inv-2', 'cust-a', 800.00);
+             INSERT INTO invoices VALUES ('inv-3', 'cust-b', 2500.00);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let (cas, mut event_log, proj_db) = setup_infra(dir);
+        let connector = SQLiteConnector::new("sqlite-entity");
+        let job = IngestJob {
+            ingest_id: "ing-entity".into(),
+            source_id: "src-entity".into(),
+            connector_type: "sqlite".into(),
+        };
+
+        let mut hints = MappingHints::new();
+        hints.insert(
+            "invoices".to_string(),
+            TableMapping {
+                entity_type: Some("invoice".to_string()),
+                entity_key_col: Some("id".to_string()),
+                ..Default::default()
+            },
+        );
+
+        run_ingest(
+            &job,
+            &connector,
+            &db_path,
+            &["invoices".to_string()],
+            &IngestConfig::default(),
+            &cas,
+            &mut event_log,
+            &proj_db,
+            "node-test",
+            Some(&hints),
+        )
+        .unwrap();
+
+        let conn = sqlite_views::open_db(&proj_db).unwrap();
+
+        let entity_card_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entity_cards_view", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            entity_card_count, 3,
+            "expect 3 entity cards for 3 invoice rows"
+        );
+
+        let rel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_relationships_view",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            rel_count >= 3,
+            "expect at least 3 relationships (invoice->customer for each row)"
+        );
+
+        let invoice_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM invoices_view", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(invoice_count, 3);
+
+        let attrs: String = conn
+            .query_row(
+                "SELECT attributes_json FROM entity_cards_view WHERE entity_id = 'invoice:inv-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            attrs.contains("1200") || attrs.contains("1200.5"),
+            "attributes should contain amount"
+        );
+        assert!(attrs.contains("cust-a"));
+
+        let (from_id, to_id): (String, String) = conn
+            .query_row(
+                "SELECT from_entity_id, to_entity_id FROM entity_relationships_view WHERE from_entity_id = 'invoice:inv-1' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(from_id, "invoice:inv-1");
+        assert_eq!(to_id, "customer:cust-a");
     }
 }

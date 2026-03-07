@@ -30,6 +30,9 @@ enum EventType {
   INGEST_COMPLETED = 81;
   DATASET_MANIFEST_CREATED = 82;
 
+  // Entity intelligence graph
+  ENTITY_RELATIONSHIP_RECORDED = 94;
+
   // Federated learning
   TRAIN_DELTA_PUBLISHED = 90;
   TRAIN_DELTA_APPLIED = 91;
@@ -94,6 +97,8 @@ message EventEnvelope {
     IngestCompleted ingest_completed = 171;
     DatasetManifestCreated dataset_manifest_created = 172;
 
+    EntityRelationshipRecorded entity_relationship_recorded = 173;
+
     // Federated learning payloads
     TrainDeltaPublished train_delta_published = 180;
     TrainDeltaApplied train_delta_applied = 181;
@@ -131,6 +136,7 @@ message ArtifactPublished {
   string entity_key = 11;       // stable identifier
   string source_ref = 12;       // source_id
   string table_name = 13;       // source table name
+  string entity_attributes_json = 19;  // JSON attributes for entity cards (revenue_total, jobs_completed, etc.)
   // Fact metadata (for FACT artifact_type)
   string metric = 14;           // e.g. row_count, sum_amount
   string value_json = 15;       // JSON value
@@ -266,6 +272,14 @@ message IngestCompleted {
   uint64 bytes_stored = 7;
   uint32 duration_ms = 8;
   string notes = 9;
+}
+
+message EntityRelationshipRecorded {
+  string from_entity_id = 1;    // e.g. customer:abc-ltd
+  string to_entity_id = 2;      // e.g. quote:q-001
+  string relationship_type = 3; // e.g. has_quotes, has_line_items, belongs_to
+  string source_id = 4;
+  string table_name = 5;
 }
 
 message DatasetManifestCreated {
