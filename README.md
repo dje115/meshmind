@@ -35,9 +35,10 @@ A production-grade, local-first, cross-platform distributed AI node system built
 ## Features
 
 - **Hybrid Memory Engine** — Append-only event log + content-addressed store (CAS) + SQLite materialized views with FTS5 full-text search
+- **Document Intelligence** — Chunking for long documents (1500 chars, 200 overlap), full chunk text in FTS5, entity extraction (people, companies, emails, phones, money, invoices) with optional LLM augmentation
 - **Peer-to-Peer Mesh** — mDNS LAN discovery, membership states (Alive/Suspect/Dead/Quarantined), pull-based replication
 - **Policy Engine** — Tenant isolation, sensitivity levels, default-deny replication, ingestion approval, column redaction, dataset presets
-- **Data Pipeline** — Source discovery (SQLite/CSV/JSON), schema inspection, PII/secrets classification, batched ingestion with checkpointing
+- **Data Pipeline** — Connectors: SQLite, CSV, JSON, Document (PDF/DOCX/TXT/MD), Image (EXIF), OneDrive; schema inspection, PII/secrets classification, batched ingestion with checkpointing
 - **Dataset Manifests** — Reproducible training datasets with 5 presets, provenance tracking, CAS-stored manifests
 - **Pluggable AI Inference** — Swap backends at runtime (Ollama, mock, future: llama.cpp)
 - **Peer Consult** — ASK/ANSWER forwarding across nodes with budget enforcement (TTL hops, deadlines, context limits)
@@ -71,12 +72,15 @@ A production-grade, local-first, cross-platform distributed AI node system built
 │   (policy gates, eval gates, models, federated learning) │
 ├──────────────────────────────────────────────────────────┤
 │                    node_storage                           │
-│      (CAS + EventLog + SQLite + FTS5 + Snapshots)        │
+│   (CAS + EventLog + SQLite + FTS5 + entities_view)       │
 ├──────────────────────────────────────────────────────────┤
-│ node_discovery → node_connectors → node_ingest           │
-│ (scan sources)   (inspect + PII)   (pipeline + batch)    │
-│                                      → node_datasets     │
-│                                        (manifests)       │
+│ node_discovery → node_connectors → node_extraction       │
+│ (scan sources)   (SQLite/CSV/JSON/  (rule-based +        │
+│                  Document/Image/     optional LLM         │
+│                  OneDrive + PII)     entity extraction)   │
+│                                      → node_ingest       │
+│                                        (pipeline+batch)  │
+│                                        → node_datasets   │
 ├──────────────────────────────────────────────────────────┤
 │    node_proto (protobuf)    │    node_crypto (mTLS)      │
 └──────────────────────────────────────────────────────────┘
@@ -91,6 +95,8 @@ Full documentation is in `docs/`. See **[docs/DOCUMENTATION_INDEX.md](docs/DOCUM
 | Section | Description |
 |---------|-------------|
 | [Architecture](docs/architecture/overview.md) | Overview, storage, event log, CAS, replication, mesh, security |
+| [Document Intelligence](docs/document-intelligence.md) | Chunking, FTS5 indexing, entity extraction (Phase A+B) |
+| [Entity Graph](docs/entity-graph.md) | Document-derived entities, rule-based/LLM extraction, queries |
 | [Ingestion](docs/ingestion/discovery.md) | Discovery, connectors, normalization, entity cards |
 | [Intelligence](docs/intelligence/business-intelligence.md) | Business intelligence, training, router/tagger/ranker models |
 | [Workflows](docs/workflows/ask-flow.md) | Ask flow, web research, peer consult, dataset manifests |
@@ -376,7 +382,7 @@ Returns list of known peers and their membership state.
 ```
 
 #### `GET /search?q=<query>&limit=<n>`
-Full-text search across the knowledge base using SQLite FTS5.
+Full-text search across cases, artifacts, and document chunks using SQLite FTS5. Ask also supports entity-aware queries (people, companies, emails, invoice numbers, documents mentioning X).
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
@@ -384,7 +390,7 @@ Full-text search across the knowledge base using SQLite FTS5.
 | `limit` | no | 20 | Max results |
 
 #### `POST /ask`
-Ask a question. The node retrieves relevant context from FTS5, assembles a prompt, and calls the inference backend.
+Ask a question. The node retrieves relevant context from FTS5 and entity queries (people, companies, emails, invoice numbers, documents mentioning X), assembles a prompt, and calls the inference backend.
 
 **Request:**
 ```json
@@ -447,7 +453,7 @@ List all dataset manifests with source, preset, item count, and size.
 ## Testing
 
 ```bash
-# Run all tests (246 tests across 19 crates)
+# Run all tests (270+ tests across 20 crates)
 cargo test --workspace
 
 # Run tests for a specific crate
@@ -470,26 +476,27 @@ cargo clippy --workspace --all-targets -- -D warnings
 | Crate | Tests | Coverage |
 |---|---|---|
 | `node_proto` | 55 | Protobuf roundtrip serialization, enum coverage, all message types incl. relay |
-| `node_storage` | 39 | CAS put/get/dedup, event log append/replay/chain, projector, FTS search, snapshots |
+| `node_storage` | 57 | CAS, event log, projector, FTS search, entities_view, snapshots |
 | `node_policy` | 31 | Tenant, sensitivity, share, web, train, ingest, redaction, dataset, delta gates |
 | `node_mesh` | 26 | Membership states, peer directory, transport mock, peer consult, mTLS TCP, hybrid relay |
 | `node_repl` | 8 | Gossip, segment pull, CAS pull, full A→B replication, policy gates |
 | `node_crypto` | 7 | CA generation, node certs, mTLS server/client config |
-| `node_connectors` | 9 | SQLite/CSV/JSON inspect + ingest, PII/secrets classifier |
-| `node_api` | 10 | All 12 HTTP endpoints via tower::ServiceExt |
+| `node_connectors` | 21 | SQLite/CSV/JSON/Document/Image inspect + ingest, PII/secrets classifier |
+| `node_api` | 15 | All HTTP endpoints via tower::ServiceExt |
 | `node_ai` | 2 | Default config/request validation |
 | `node_ai_mock` | 6 | Health check, deterministic responses |
 | `node_ai_ollama` | 3 | Backend config, timeout handling |
 | `node_app` | 6 | Seed data, config loading, 4 e2e mesh integration tests |
 | `node_discovery` | 5 | Scan SQLite/CSV/JSON sources, disable flag, event building |
-| `node_ingest` | 3 | Pipeline execution, row limits, event verification |
+| `node_extraction` | 14 | Rule-based + LLM entity extraction, normalization, parse tests |
+| `node_ingest` | 7 | Pipeline execution, entity extraction integration, row limits |
 | `node_datasets` | 4 | Empty/filtered/no-restricted datasets, CAS storage |
 | `node_federated` | 5 | Round lifecycle, delta submission, FedAvg aggregation, policy integration |
 | `node_trainer` | 6 | Model registry, versioning, rollback, eval gates |
 | `node_research` | 2 | Source extraction, policy gating |
 | `node_relay` | 10 | Rendezvous directory, registration, discovery, frame handling, mTLS server |
 | `node_mesh` (integration) | 4 | Two-node mTLS ping/pong, ask/answer, bidirectional, concurrent |
-| **Total** | **246** | **0 failures, 0 clippy warnings** |
+| **Total** | **270+** | **0 failures, 0 clippy warnings** |
 
 ---
 
@@ -509,9 +516,9 @@ meshmind/
 │   │   └── src/
 │   │       ├── cas.rs        # Content-addressed store
 │   │       ├── event_log.rs  # Append-only event log with hash chain
-│   │       ├── sqlite_views.rs # Schema (12 tables incl. sources, ingests, datasets)
+│   │       ├── sqlite_views.rs # Schema (entities_view, documents_fts, sources, ingests, datasets)
 │   │       ├── projector.rs  # Event → SQLite materialization
-│   │       ├── search.rs     # FTS5 full-text search
+│   │       ├── search.rs     # FTS5 search, entity queries (list_entities_by_type, list_documents_for_entity)
 │   │       └── snapshot.rs   # Snapshot create/restore
 │   ├── node_policy/          # Policy evaluation (ingest, redaction, datasets, deltas)
 │   ├── node_repl/            # Pull-based replication
@@ -527,9 +534,10 @@ meshmind/
 │   ├── node_ai_ollama/       # Ollama HTTP client
 │   ├── node_ai_mock/         # Deterministic mock backend
 │   ├── node_research/        # Web research + WebBrief
-│   ├── node_discovery/       # Data source scanning (SQLite, CSV, JSON)
-│   ├── node_connectors/      # Connector trait + 3 impls + PII classifier
-│   ├── node_ingest/          # Ingestion pipelines with batching
+│   ├── node_discovery/       # Data source scanning (SQLite, CSV, JSON, Document, Image)
+│   ├── node_connectors/      # SQLite, CSV, JSON, Document (PDF/DOCX/TXT), Image (EXIF), OneDrive + PII classifier
+│   ├── node_extraction/      # Entity extraction (rule-based + optional LLM) from document chunks
+│   ├── node_ingest/          # Ingestion pipelines with batching, entity extraction
 │   ├── node_datasets/        # Dataset manifest builder (5 presets)
 │   ├── node_trainer/         # Training jobs, model registry
 │   ├── node_federated/       # Federated learning coordinator (FedAvg)
@@ -546,6 +554,8 @@ meshmind/
 │   └── package.json          # Vite + Tauri dependencies
 ├── docs/
 │   ├── DOCUMENTATION_INDEX.md # Complete documentation index
+│   ├── document-intelligence.md # Chunking, FTS5, entity extraction (Phase A+B)
+│   ├── entity-graph.md       # Document-derived entities, extraction, queries
 │   ├── architecture/         # Overview, storage, event-log, cas, replication, mesh, security
 │   ├── ingestion/            # Discovery, connectors, normalization, entity-cards
 │   ├── intelligence/         # Business intelligence, training, router/tagger/ranker
@@ -589,9 +599,10 @@ meshmind/
 | `node_ai_ollama` | reqwest, node_ai | Ollama HTTP API client |
 | `node_ai_mock` | node_ai | Deterministic mock for testing |
 | `node_research` | node_ai, node_storage, reqwest | Web fetch, AI summarization, WebBrief events |
-| `node_discovery` | node_storage, node_policy | Scan directories for SQLite, CSV, JSON data sources |
-| `node_connectors` | rusqlite, node_policy | Connector trait + SQLite/CSV/JSON impls + PII/secrets classifier |
-| `node_ingest` | node_connectors, node_storage | Ingestion pipelines with batching, checkpointing, CAS storage |
+| `node_discovery` | node_storage, node_policy | Scan directories for SQLite, CSV, JSON, Document, Image sources |
+| `node_connectors` | rusqlite, node_policy | Connector trait + SQLite/CSV/JSON/Document/Image/OneDrive + PII/secrets classifier |
+| `node_extraction` | node_ai, regex, serde | Rule-based + optional LLM entity extraction from document chunks |
+| `node_ingest` | node_connectors, node_extraction, node_storage | Ingestion pipelines with batching, entity extraction, CAS storage |
 | `node_datasets` | node_storage, node_policy | Dataset manifest builder with 5 presets and provenance tracking |
 | `node_trainer` | node_policy | Model registry, training jobs, eval gates, rollback |
 | `node_federated` | node_mesh, node_trainer | Federated learning coordinator, FedAvg aggregation, delta publishing |
@@ -608,23 +619,28 @@ meshmind/
 - **CAS**: Content-addressed by SHA-256. Deduplication is inherent. Integrity checked on every read.
 - **SQLite**: Materialized views rebuilt from events. FTS5 for full-text search. Projector applies events to views.
 
-### 2. Scalability
+### 2. Document Intelligence
+- **Chunking**: Documents split into 1500-char chunks with 200-char overlap; full text indexed in `documents_fts`.
+- **Entity Extraction**: Rule-based extraction (people, companies, emails, phones, money, invoice numbers) during ingest; optional LLM augmentation for long chunks with few entities.
+- **Entity Queries**: `list_entities_by_type`, `search_entities_by_value`, `list_documents_for_entity` for structured questions ("Who appears in my documents?", "Show documents mentioning ABC Ltd").
+
+### 3. Scalability
 - Partial peer view capped at 30 (configurable `max_peers`).
 - Membership state machine: Alive → Suspect → Dead, with Quarantined for misbehaving peers.
 - Hard budgets: `ttl_hops`, `deadline_ms`, `max_context_bytes`, `max_answer_bytes`.
 
-### 3. Security & Policy
+### 4. Security & Policy
 - Every artifact carries `tenant_id` + `sensitivity` (Public/Internal/Restricted).
 - Default-deny replication: only `tenant_id="public"` replicates by default.
 - Web research requires explicit policy flag + node capability + redaction.
 - Training requires explicit policy flag + dataset provenance.
 
-### 4. Swap-friendly Inference
+### 5. Swap-friendly Inference
 - `InferenceBackend` trait with `health_check()` and `generate()`.
 - No direct DB/mesh access from backends — prompt assembly lives in the API layer.
 - Currently ships Ollama (HTTP) and Mock backends.
 
-### 5. On-device Training
+### 6. On-device Training
 - Bounded CPU jobs with time/step/data caps.
 - Eval gates: new model must beat baseline by configurable threshold.
 - Versioned model bundles in CAS with instant rollback.
@@ -639,7 +655,7 @@ All wire messages use Protocol Buffers. See the `proto/` directory for full sche
 | Schema | Contents |
 |---|---|
 | `common.proto` | Timestamp, Sensitivity, TenantId, NodeId, HashRef, Budget |
-| `events.proto` | EventEnvelope with 25+ event types (cases, artifacts, web briefs, peers, training, data pipeline, federated, audit) |
+| `events.proto` | EventEnvelope with 25+ event types (cases, artifacts, web briefs, peers, training, ExtractedEntityRecorded, federated, audit) |
 | `cas.proto` | CAS object headers and manifests |
 | `snapshot.proto` | Snapshot file format |
 | `replication.proto` | GossipMeta, PullSegments, PullCasObjects |
@@ -719,6 +735,7 @@ See [docs/roadmap.md](docs/roadmap.md) for detailed progress. For documentation 
 | 14. Federated Learning | Done | FedAvg coordinator, delta publishing — 5 tests |
 | 15. Tauri UI | Done | 7-page desktop app, dark theme, status polling |
 | 16. Internet Mode | Done | Rendezvous + relay server, WAN discovery, HybridTransport — 12 tests |
+| 17. Document Entity Extraction (Phase B) | Done | Entity extraction from chunks (person, company, email, phone, money, invoice), entities_view, optional LLM augmentation |
 
 ---
 
