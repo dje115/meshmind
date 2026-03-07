@@ -630,6 +630,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/search", get(handle_search))
         .route("/insights", get(handle_insights))
         .route("/ask", post(handle_ask))
+        .route("/ask/confirm", post(handle_ask_confirm))
         .route(
             "/conversations",
             get(handle_list_conversations).post(handle_create_conversation),
@@ -795,6 +796,16 @@ struct AskResponse {
     confidence: f32,
     model: String,
     context_used: Vec<String>,
+    /// ID for outcome confirmation (POST /v1/ask/confirm)
+    case_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AskConfirmRequest {
+    case_id: String,
+    outcome: String, // e.g. "accepted", "rejected", "edited"
+    #[serde(default)]
+    confidence: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1078,6 +1089,7 @@ async fn handle_ask(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AskRequest>,
 ) -> Result<Json<AskResponse>, ApiError> {
+    let case_id = format!("ask-{}", uuid::Uuid::new_v4());
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1273,6 +1285,7 @@ async fn handle_ask(
                         confidence: best.confidence,
                         model: format!("peer:{}", best.peer_id),
                         context_used: best.evidence_refs,
+                        case_id: case_id.clone(),
                     }));
                 }
             }
@@ -1297,7 +1310,48 @@ async fn handle_ask(
         confidence: local_confidence,
         model: gen_resp.model,
         context_used,
+        case_id,
     }))
+}
+
+async fn handle_ask_confirm(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AskConfirmRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use node_proto::common::*;
+    use node_proto::events::*;
+
+    let confidence = req.confidence.unwrap_or(1.0);
+    let event = EventEnvelope {
+        event_id: format!("confirm-{}", uuid::Uuid::new_v4()),
+        r#type: EventType::CaseConfirmed as i32,
+        node_id: Some(NodeId {
+            value: state.node_id.clone(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".into(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::CaseConfirmed(CaseConfirmed {
+            case_id: req.case_id,
+            outcome: req.outcome,
+            confidence,
+        })),
+        ..Default::default()
+    };
+
+    let mut log = state.event_log.write().await;
+    let stored = log
+        .append(event)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(log);
+
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    node_storage::projector::apply_event(&conn, &stored)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ---------- Conversation types ----------
