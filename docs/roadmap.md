@@ -100,12 +100,24 @@
 
 ---
 
-**Current status**: 246 tests, 0 failures, 0 clippy warnings across 19 crates.
-All phases complete (v2 spec + Internet Mode).
+**Current status**: All phases complete (v2 spec + Internet Mode + BI extensions).
+
+## BI Extensions (Phases 2–9)
+
+| Phase | Description |
+|-------|-------------|
+| Phase 2 | Business Intelligence Question Engine — Intent classification, entity/fact retrieval in ask |
+| Phase 3 | Quote Intelligence — Quote/job entity types, quote-specific LLM guidance |
+| Phase 4 | Proactive Insight Engine — GET /v1/insights (overdue invoices, quotes, financial metrics) |
+| Phase 5 | Outcome-Driven Learning — case_id in AskResponse, POST /v1/ask/confirm for CaseConfirmed |
+| Phase 6 | Internet-Scale Node Network — Already implemented (relay, hybrid transport) |
+| Phase 7 | Autonomous Knowledge Evolution — CaseConfirmed feeds this_tenant_confirmed training |
+| Phase 8 | Documentation — ask-flow, workflows updated |
+| Phase 9 | Test coverage — entity/fact search, insights, ask/confirm tests |
 
 **API endpoints implemented**:
-- GET /status, /peers, /search, /admin/sources, /admin/models, /admin/datasets, /admin/logs
-- POST /ask, /admin/event, /admin/sources/approve, /admin/train, /admin/models/rollback
+- GET /status, /peers, /search, /insights, /admin/sources, /admin/models, /admin/datasets, /admin/logs
+- POST /ask, /ask/confirm, /admin/event, /admin/sources/approve, /admin/train, /admin/models/rollback
 
 **Crate summary (19 crates)**:
 | Crate | Purpose | Tests |

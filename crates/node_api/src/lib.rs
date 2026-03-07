@@ -3861,6 +3861,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_confirm_endpoint() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "case_id": "ask-test-123",
+            "outcome": "accepted",
+            "confidence": 0.95
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/v1/ask/confirm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
     async fn insights_endpoint() {
         let state = create_test_state();
         let app = build_router(state);
