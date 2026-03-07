@@ -256,6 +256,56 @@ fn is_follow_up_message(content: &str, history: &[(String, String)]) -> bool {
 }
 
 /// True if the question looks like a general-knowledge query (who/what/when/where) that would benefit from web search.
+/// Business intent classification for routing queries to entity graph or facts.
+struct BusinessIntent {
+    entity_types: Vec<String>,
+    metrics: Vec<String>,
+}
+
+fn classify_business_intent(question: &str) -> BusinessIntent {
+    let lower = question.trim().to_lowercase();
+    let mut entity_types = Vec::new();
+    let mut metrics = Vec::new();
+
+    // Entity types
+    if lower.contains("customer") || lower.contains("customers") {
+        entity_types.push("customer".into());
+    }
+    if lower.contains("invoice") || lower.contains("invoices") || lower.contains("overdue") {
+        entity_types.push("invoice".into());
+    }
+    if lower.contains("quote") || lower.contains("quotes") || lower.contains("proposal") || lower.contains("proposals") {
+        entity_types.push("quote".into());
+    }
+    if lower.contains("line item") || lower.contains("line items") || lower.contains("breakdown")
+        || (lower.contains("quote") && (lower.contains("similar") || lower.contains("margin") || lower.contains("charged")))
+    {
+        entity_types.push("quote_line_item".into());
+    }
+    if lower.contains("account") || lower.contains("accounts") {
+        entity_types.push("account".into());
+    }
+    if lower.contains("job") || lower.contains("jobs") || lower.contains("install") || lower.contains("work order") {
+        entity_types.push("job".into());
+    }
+
+    // Metrics
+    if lower.contains("revenue") || lower.contains("revenues") {
+        metrics.push("revenue".into());
+    }
+    if lower.contains("profit") || lower.contains("profits") {
+        metrics.push("profit".into());
+    }
+    if lower.contains("margin") || lower.contains("margins") {
+        metrics.push("margin".into());
+    }
+    if lower.contains("charge") || lower.contains("charge for") || lower.contains("pricing") || lower.contains("price") {
+        metrics.push("pricing".into());
+    }
+
+    BusinessIntent { entity_types, metrics }
+}
+
 fn looks_like_general_knowledge_question(content: &str) -> bool {
     let lower = content.trim().to_lowercase();
     if lower.len() < 8 || lower.len() > 120 {
@@ -941,6 +991,51 @@ async fn handle_ask(
     let mut context_hits = search::search_all(&conn, &fts_query, search_limit)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
+    // Business intelligence: augment with entity graph and facts when intent matches
+    let intent = classify_business_intent(&req.question);
+    let mut entity_fact_bullets: Vec<String> = Vec::new();
+    let mut entity_evidence_ids: Vec<String> = Vec::new();
+
+    for et in &intent.entity_types {
+        if let Ok(hits) = search::search_entity_cards(&conn, Some(et), 20) {
+            for h in hits {
+                entity_evidence_ids.push(h.entity_id.clone());
+                entity_fact_bullets.push(format!(
+                    "[Entity {} {}] {}",
+                    h.entity_type,
+                    h.entity_id,
+                    h.attributes_json
+                ));
+            }
+        }
+    }
+    for m in &intent.metrics {
+        if let Ok(hits) = search::query_facts(&conn, Some(m), 15) {
+            for h in hits {
+                entity_evidence_ids.push(h.fact_id.clone());
+                entity_fact_bullets.push(format!(
+                    "[Fact {}] metric={} value={} dimensions={}",
+                    h.fact_id, h.metric, h.value_json, h.dimensions_json
+                ));
+            }
+        }
+    }
+    // If no metric filter matched, try broader facts query for revenue/profit/margin questions
+    if intent.metrics.is_empty() && (req.question.to_lowercase().contains("revenue")
+        || req.question.to_lowercase().contains("profit")
+        || req.question.to_lowercase().contains("margin"))
+    {
+        if let Ok(hits) = search::query_facts(&conn, None, 15) {
+            for h in hits {
+                entity_evidence_ids.push(h.fact_id.clone());
+                entity_fact_bullets.push(format!(
+                    "[Fact {}] metric={} value={} dimensions={}",
+                    h.fact_id, h.metric, h.value_json, h.dimensions_json
+                ));
+            }
+        }
+    }
+
     // Fallback: for broad questions (summarize, trends, all docs) with no/few hits, retry with wider match
     let lower_q = req.question.to_lowercase();
     let is_broad_request = lower_q.contains("summarize")
@@ -988,8 +1083,17 @@ async fn handle_ask(
         }
     }
 
-    let context_bullets: Vec<String> =
+    let mut context_bullets: Vec<String> =
         build_context_bullets(&context_hits, &state.cas, &req.question);
+    if !entity_fact_bullets.is_empty() {
+        context_bullets.insert(
+            0,
+            format!(
+                "Entity graph and facts:\n{}",
+                entity_fact_bullets.join("\n")
+            ),
+        );
+    }
 
     let prompt = if !web_search_context.is_empty() {
         let kb = if context_bullets.is_empty() {
@@ -1015,10 +1119,19 @@ async fn handle_ask(
             req.question
         )
     } else {
+        let quote_guidance = if !entity_fact_bullets.is_empty()
+            && (intent.entity_types.iter().any(|e| e == "quote" || e == "quote_line_item")
+                || intent.metrics.iter().any(|m| m == "pricing"))
+        {
+            " When answering about quotes or pricing, cite similar historical jobs/line items where relevant and note variance from typical ranges if evident."
+        } else {
+            ""
+        };
         format!(
-            "Context from the user's local knowledge base:\n{}\n\nQuestion: {}\n\nAnswer based on the context above. Be concise and specific.",
+            "Context from the user's local knowledge base:\n{}\n\nQuestion: {}\n\nAnswer based on the context above. Be concise and specific.{}",
             context_bullets.join("\n"),
-            req.question
+            req.question,
+            quote_guidance
         )
     };
 
@@ -1081,11 +1194,14 @@ async fn handle_ask(
         )
     };
 
+    let mut context_used: Vec<String> = context_hits.iter().map(|h| h.id.clone()).collect();
+    context_used.extend(entity_evidence_ids);
+
     Ok(Json(AskResponse {
         answer,
         confidence: local_confidence,
         model: gen_resp.model,
-        context_used: context_hits.iter().map(|h| h.id.clone()).collect(),
+        context_used,
     }))
 }
 

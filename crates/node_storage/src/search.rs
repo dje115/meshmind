@@ -92,6 +92,105 @@ pub fn search_artifacts(conn: &Connection, query: &str, limit: usize) -> Result<
     Ok(hits)
 }
 
+/// Entity card hit for business queries.
+#[derive(Debug, Clone)]
+pub struct EntityCardHit {
+    pub entity_id: String,
+    pub entity_type: String,
+    pub attributes_json: String,
+}
+
+/// Query entity cards by entity_type (optional filter).
+pub fn search_entity_cards(
+    conn: &Connection,
+    entity_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<EntityCardHit>> {
+    let limit_i64 = limit as i64;
+    if let Some(et) = entity_type {
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, entity_type, attributes_json FROM entity_cards_view
+             WHERE entity_type = ?1 ORDER BY created_at_ms DESC LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![et, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(EntityCardHit {
+                entity_id: row.get(0)?,
+                entity_type: row.get(1)?,
+                attributes_json: row.get(2)?,
+            });
+        }
+        Ok(out)
+    } else {
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, entity_type, attributes_json FROM entity_cards_view
+             ORDER BY created_at_ms DESC LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(EntityCardHit {
+                entity_id: row.get(0)?,
+                entity_type: row.get(1)?,
+                attributes_json: row.get(2)?,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Fact record for business queries.
+#[derive(Debug, Clone)]
+pub struct FactHit {
+    pub fact_id: String,
+    pub metric: String,
+    pub value_json: String,
+    pub dimensions_json: String,
+}
+
+/// Query facts by metric (optional filter).
+pub fn query_facts(
+    conn: &Connection,
+    metric_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<FactHit>> {
+    let limit_i64 = limit as i64;
+    if let Some(m) = metric_filter {
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT fact_id, metric, value_json, dimensions_json FROM facts_view
+             WHERE metric = ?1 ORDER BY created_at_ms DESC LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![m, limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(FactHit {
+                fact_id: row.get(0)?,
+                metric: row.get(1)?,
+                value_json: row.get(2)?,
+                dimensions_json: row.get(3)?,
+            });
+        }
+        Ok(out)
+    } else {
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT fact_id, metric, value_json, dimensions_json FROM facts_view
+             ORDER BY created_at_ms DESC LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![limit_i64])?;
+        while let Some(row) = rows.next()? {
+            out.push(FactHit {
+                fact_id: row.get(0)?,
+                metric: row.get(1)?,
+                value_json: row.get(2)?,
+                dimensions_json: row.get(3)?,
+            });
+        }
+        Ok(out)
+    }
+}
+
 /// Unified search across both cases and artifacts, merged by rank.
 pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let cases = search_cases(conn, query, limit)?;
@@ -320,5 +419,38 @@ mod tests {
         let hits = search_artifacts(&conn, "database failover", 10).unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().any(|h| h.artifact_id == "a3"));
+    }
+
+    #[test]
+    fn search_entity_cards_and_query_facts() {
+        let conn = Connection::open_in_memory().unwrap();
+        sqlite_views::create_schema(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO entity_cards_view (entity_id, entity_type, attributes_json, created_at_ms)
+             VALUES ('customer:1', 'customer', '{\"name\":\"Acme\"}', 1000),
+                    ('invoice:1', 'invoice', '{\"total\":100}', 2000)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO facts_view (fact_id, version, metric, value_json, dimensions_json, created_at_ms)
+             VALUES ('f1', 1, 'revenue', '{\"amount\":5000}', '{}', 3000)",
+            [],
+        )
+        .unwrap();
+
+        let customers = search_entity_cards(&conn, Some("customer"), 10).unwrap();
+        assert_eq!(customers.len(), 1);
+        assert_eq!(customers[0].entity_id, "customer:1");
+        assert!(customers[0].attributes_json.contains("Acme"));
+
+        let all = search_entity_cards(&conn, None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let facts = query_facts(&conn, Some("revenue"), 10).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].metric, "revenue");
     }
 }
