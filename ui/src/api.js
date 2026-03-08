@@ -157,6 +157,18 @@ export const api = {
   getDebugDocument: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}`),
   getDebugDocumentChunks: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}/chunks`),
   getDebugDocumentEntities: (id) => request('GET', `/debug/documents/${encodeURIComponent(id)}/entities`),
+  getDebugIngestResults: (sourceId) => request('GET', `/debug/ingest-results?source_id=${encodeURIComponent(sourceId)}`),
+  getDebugIngestSources: () => request('GET', '/debug/ingest/sources'),
+  getDebugIngestJobs: () => request('GET', '/debug/ingest/jobs'),
+  getDebugIngestItems: (opts = {}) => {
+    const params = new URLSearchParams();
+    if (opts.source_id) params.set('source_id', opts.source_id);
+    if (opts.ingest_id) params.set('ingest_id', opts.ingest_id);
+    if (opts.limit) params.set('limit', String(opts.limit));
+    const q = params.toString();
+    return request('GET', `/debug/ingest/items${q ? '?' + q : ''}`);
+  },
+  getDebugIngestItem: (id) => request('GET', `/debug/ingest/items/${encodeURIComponent(id)}`),
   getDebugAskSession: (caseId) => request('GET', `/debug/ask/${encodeURIComponent(caseId)}`),
   getDebugEntities: (entityType, limit = 100) =>
     request('GET', `/debug/entities?limit=${limit}${entityType ? `&entity_type=${encodeURIComponent(entityType)}` : ''}`),

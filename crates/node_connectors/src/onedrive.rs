@@ -396,6 +396,7 @@ impl Connector for OneDriveConnector {
             table_name: table.to_string(),
             rows,
             offset,
+            file_results: None,
         })
     }
 }

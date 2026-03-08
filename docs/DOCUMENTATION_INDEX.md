@@ -38,6 +38,8 @@ Complete index of all documentation sections. Use this as a map to find what you
 | [ingestion/connectors.md](ingestion/connectors.md) | Connector interface, SQLite/CSV/JSON/Document |
 | [ingestion/normalization.md](ingestion/normalization.md) | Entity cards, facts, document summaries |
 | [ingestion/entity-cards.md](ingestion/entity-cards.md) | Entity card schema, mapping rules |
+| [INGESTION_AGENT_ARCHITECTURE.md](INGESTION_AGENT_ARCHITECTURE.md) | Agent boundaries, IngestedItem contract, core vs agent responsibilities |
+| [source-provenance.md](source-provenance.md) | Source locators, evidence provenance, open targets |
 
 ---
 
@@ -94,8 +96,17 @@ Complete index of all documentation sections. Use this as a map to find what you
 |----------|-------------|
 | [development/crate-architecture.md](development/crate-architecture.md) | Crate map, project structure |
 | [development/adding-connectors.md](development/adding-connectors.md) | How to add a connector |
+| [development/source-agents.md](development/source-agents.md) | Source agent model (FilesystemAgent, XeroAgent, etc.) |
 | [development/adding-models.md](development/adding-models.md) | How to add an ML model |
 | [development/testing.md](development/testing.md) | Test structure, commands |
+
+---
+
+## Debug & Operations
+
+| Document | Description |
+|----------|-------------|
+| [debug-panel.md](debug-panel.md) | Debug UI, ingestion tab, documents/chunks/entities, ask sessions |
 
 ---
 

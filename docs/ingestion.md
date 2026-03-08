@@ -34,7 +34,7 @@ Scans configured directories for data sources. Emits `DATA_SOURCE_DISCOVERED` fo
 | 5 | MYSQL | (future) |
 | 6 | ODBC | (future) |
 | 7 | IMAGE_FOLDER | jpg, png, tiff, heic, webp |
-| 8 | DOCUMENT_FOLDER | pdf, docx, txt, md, rtf |
+| 8 | DOCUMENT_FOLDER | pdf, docx, doc, xls, xlsx, pptx, ppt, txt, md, rtf (see Supported Document Formats) |
 | 9 | ONEDRIVE | OAuth-based |
 
 **Configuration** (`DiscoveryConfig`):
@@ -133,7 +133,9 @@ Admin approves a source with a `SourceProfile` (or defaults). Emits `DATA_SOURCE
 
 ## 4. Ingest
 
-**Component**: `node_ingest` + `node_connectors`
+**Component**: `node_ingest` + `node_connectors` (legacy) **or** source agents (agent path)
+
+### Legacy Path (Admin Ingest)
 
 Runs per approved source. Uses connector’s `inspect_schema` and `ingest_batch`.
 
@@ -155,12 +157,64 @@ Runs per approved source. Uses connector’s `inspect_schema` and `ingest_batch`
 - `batch_size`: Rows per batch (default 100)
 - `max_rows_per_table`: Cap per table (default 10_000)
 
+### Agent Path (Source Agents)
+
+Source agents (e.g. `agents/filesystem_ingestion_agent/`) run as separate processes. They:
+
+1. Discover items (e.g. scan folders)
+2. Extract content (PDF, Office, OCR)
+3. Normalize to `IngestedItem` contract
+4. POST to `POST /v1/ingest/items/batch`
+
+See [INGESTION_AGENT_ARCHITECTURE.md](INGESTION_AGENT_ARCHITECTURE.md) and [development/source-agents.md](development/source-agents.md).
+
 ---
 
 ## 5. Normalize / Learn
 
 - **Normalize**: Artifacts are stored as JSON blobs. Title/summary built from columns (e.g. `content_text`, `filename`).
 - **Learn**: `node_datasets` builds dataset manifests from artifacts for training. See `docs/training.md`.
+
+---
+
+## Document Folder Ingest
+
+When ingesting a document folder source, the DocumentConnector:
+
+1. **Recursively scans** the folder and all subfolders for document files
+2. **Processes every supported file** in the tree
+3. **Reports unsupported files** as `skipped_unsupported` (not silently ignored)
+4. **Records failed extractions** (empty files, OCR failures) with status and reason
+5. **Uses unique document IDs** (relative path, e.g. `subdir/report.pdf`) to avoid collisions
+
+Per-file results are stored in `ingest_file_results` and visible in the Debug panel **Ingest Results** tab.
+
+### Supported Document Formats
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| PDF | `.pdf` | Text extraction; OCR fallback for scanned PDFs (requires pdftoppm + tesseract) |
+| Word | `.docx` | Supported (docx-rust) |
+| Legacy Word | `.doc` | Supported (litchi) — experimental |
+| Excel | `.xls`, `.xlsx` | Supported (calamine) — cell values extracted as text |
+| PowerPoint | `.pptx` | Supported (undoc) |
+| Legacy PowerPoint | `.ppt` | Supported (litchi) — experimental |
+| Plain text | `.txt`, `.md`, `.rtf` | Supported |
+| Visio | `.vsd`, `.vsdx` | **Not supported** — no mature Rust parser; use external tool to convert |
+
+### Failure Reporting
+
+Each candidate file gets a status:
+
+| Status | Meaning |
+|--------|---------|
+| `ingested` | Text extracted and chunks created |
+| `skipped_unsupported` | Format not supported (e.g. .vsd, .vsdx) |
+| `failed_extraction` | Extraction attempted but yielded no text |
+| `failed_ocr` | Scanned PDF; OCR attempted but failed or yielded nothing |
+| `failed_unknown` | Other failure |
+
+Failed files produce a visible record in the ingest results, including `failure_reason` and `ocr_attempted`. See Debug panel → Ingest Results.
 
 ---
 
@@ -183,7 +237,7 @@ pub trait Connector: Send + Sync {
 - `CsvFolderConnector`
 - `JsonFolderConnector`
 - `ImageConnector` (EXIF/GPS metadata)
-- `DocumentConnector` (PDF, DOCX, TXT, Markdown text extraction)
+- `DocumentConnector` (PDF, DOCX, DOC, XLS, XLSX, PPTX, PPT, TXT, Markdown, RTF text extraction)
 - `OneDriveConnector` (OAuth, file listing)
 
 ---

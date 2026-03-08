@@ -8,6 +8,8 @@ use std::sync::Arc;
 use node_ai::{GenerateRequest, InferenceBackend};
 
 use super::extract::{extract_entities, merge_entities, ExtractionConfig, ExtractionResult};
+use super::relationships::{ExtractedRelationship, RELATIONSHIP_TYPES};
+use crate::classify::ClassificationMethod;
 use crate::{normalize::normalize_value, ExtractedEntity, ExtractionMethod};
 
 const ENTITY_EXTRACTION_PROMPT: &str = r#"Extract entities from the following document text.
@@ -108,10 +110,54 @@ pub fn parse_llm_entity_json(json: &str) -> Vec<ExtractedEntity> {
                 normalized_value: normalized,
                 confidence: 0.7, // Lower than rule-based; LLM may hallucinate
                 extraction_method: ExtractionMethod::LlmAssisted,
+                classification_method: ClassificationMethod::LlmAssisted,
             });
         }
     }
     entities
+}
+
+/// Call LLM to classify a single phrase. Returns (entity_type, confidence) or None.
+pub async fn classify_phrase_llm_async(
+    backend: &Arc<dyn InferenceBackend>,
+    phrase: &str,
+    context: &str,
+) -> Option<(String, f32)> {
+    let context_trim: String = context.chars().take(300).collect();
+    let prompt = format!(
+        r#"Classify the entity type of this phrase extracted from a business document.
+
+Phrase:
+"{phrase}"
+
+Context:
+"{context_trim}"
+
+Choose one type: person, company, product, location, money, email, phone, date, quote_number, invoice_number, unknown.
+
+Return ONLY valid JSON with no other text:
+{{"type": "<type>", "confidence": <0-1>}}"#
+    );
+    let req = GenerateRequest {
+        prompt,
+        system: Some(
+            "You are an entity classification assistant. Reply only with valid JSON.".into(),
+        ),
+        max_tokens: 64,
+        temperature: 0.1,
+        stop: vec![],
+    };
+    let resp = backend.generate(req).await.ok()?;
+    let text = resp.text.trim();
+    #[derive(serde::Deserialize)]
+    struct ClassifyResponse {
+        #[serde(rename = "type")]
+        entity_type: String,
+        confidence: f32,
+    }
+    let parsed: ClassifyResponse = serde_json::from_str(text).ok()?;
+    let confidence = parsed.confidence.clamp(0.0, 1.0);
+    Some((parsed.entity_type.trim().to_lowercase(), confidence))
 }
 
 /// Call LLM to extract entities from text. Returns entities with extraction_method = llm_assisted.
@@ -158,6 +204,166 @@ pub async fn extract_entities_with_llm(
     let llm_entities = extract_entities_llm_async(backend, text).await;
     let merged = merge_entities(rule_entities, llm_entities);
     ExtractionResult { entities: merged }
+}
+
+const RELATIONSHIP_EXTRACTION_PROMPT: &str = r#"Given document text and a list of extracted entities, identify relationships between them.
+
+Entities (format: "value" [type]):
+"#;
+
+/// LLM returns JSON: [{"from": "entity value", "relationship": "type", "to": "entity value", "confidence": 0.0-1.0}]
+#[derive(serde::Deserialize)]
+struct LlmRelationshipItem {
+    from: String,
+    relationship: String,
+    to: String,
+    #[serde(default = "default_confidence")]
+    confidence: f32,
+}
+
+fn default_confidence() -> f32 {
+    0.6
+}
+
+/// Parse LLM relationship JSON and validate against entities. Returns only valid relationships
+/// where both from and to match an entity in the chunk.
+pub fn parse_llm_relationship_json(
+    json: &str,
+    entities: &[ExtractedEntity],
+) -> Vec<ExtractedRelationship> {
+    let parsed: Vec<LlmRelationshipItem> = match serde_json::from_str(json) {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+    let allowed: std::collections::HashSet<&str> = RELATIONSHIP_TYPES.iter().copied().collect();
+
+    let find_entity = |value: &str| -> Option<&ExtractedEntity> {
+        let v = value.trim();
+        if v.is_empty() {
+            return None;
+        }
+        let v_lower = v.to_lowercase();
+        entities.iter().find(|e| {
+            e.entity_value.eq_ignore_ascii_case(v) || e.entity_value.to_lowercase() == v_lower
+        })
+    };
+
+    let mut out = Vec::new();
+    for item in parsed {
+        let from_trim = item.from.trim();
+        let to_trim = item.to.trim();
+        if from_trim.is_empty() || to_trim.is_empty() || from_trim.eq_ignore_ascii_case(to_trim) {
+            continue;
+        }
+        let rel_lower = item.relationship.trim().to_lowercase();
+        let rel = rel_lower.as_str();
+        if !allowed.contains(rel) {
+            continue;
+        }
+        let Some(from_e) = find_entity(from_trim) else {
+            continue;
+        };
+        let Some(to_e) = find_entity(to_trim) else {
+            continue;
+        };
+        let confidence = item.confidence.clamp(0.0, 1.0);
+        out.push(ExtractedRelationship {
+            from_entity_id: from_e.entity_id(),
+            from_entity_value: from_e.entity_value.clone(),
+            relationship_type: rel.to_string(),
+            to_entity_id: to_e.entity_id(),
+            to_entity_value: to_e.entity_value.clone(),
+            confidence,
+            extraction_method: "llm_assisted".to_string(),
+        });
+    }
+    out
+}
+
+/// Call LLM to extract relationships. Returns only relationships validated against entities.
+pub async fn extract_relationships_llm_async(
+    backend: &Arc<dyn InferenceBackend>,
+    chunk_text: &str,
+    entities: &[ExtractedEntity],
+) -> Vec<ExtractedRelationship> {
+    if entities.len() < 2 {
+        return vec![];
+    }
+    let entity_list: String = entities
+        .iter()
+        .map(|e| format!(r#"  "{}" [{}]"#, e.entity_value, e.entity_type))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rel_types = RELATIONSHIP_TYPES.join(", ");
+    let prompt = format!(
+        r#"{RELATIONSHIP_EXTRACTION_PROMPT}
+{entity_list}
+
+Allowed relationship types: {rel_types}
+
+Return ONLY a JSON array of relationships. Each item: {{"from": "<entity value>", "relationship": "<type>", "to": "<entity value>", "confidence": <0-1>}}
+Use only entity values from the list above. No fabrication.
+
+Text:
+"{chunk_text}""#
+    );
+    let req = GenerateRequest {
+        prompt,
+        system: Some(
+            "You are a relationship extraction assistant. Reply only with a valid JSON array."
+                .into(),
+        ),
+        max_tokens: 512,
+        temperature: 0.1,
+        stop: vec![],
+    };
+    match backend.generate(req).await {
+        Ok(resp) => parse_llm_relationship_json(resp.text.trim(), entities),
+        Err(_) => vec![],
+    }
+}
+
+/// Extract relationships with optional LLM augmentation.
+/// When config enables LLM, entities >= 2, and rule-based found few, calls backend and merges.
+pub async fn extract_relationships_with_llm(
+    backend: Option<&Arc<dyn InferenceBackend>>,
+    chunk_text: &str,
+    entities: &[ExtractedEntity],
+    rule_based: Vec<ExtractedRelationship>,
+    config: &ExtractionConfig,
+) -> Vec<ExtractedRelationship> {
+    let use_llm = config.enable_llm_relationship_extraction
+        && backend.is_some()
+        && entities.len() >= 2
+        && rule_based.len() < config.llm_relationship_count_threshold;
+
+    if !use_llm {
+        return rule_based;
+    }
+
+    let backend = backend.unwrap();
+    let llm_rels = extract_relationships_llm_async(backend, chunk_text, entities).await;
+    let mut seen = std::collections::HashSet::new();
+    for r in &rule_based {
+        seen.insert((
+            r.from_entity_id.clone(),
+            r.relationship_type.clone(),
+            r.to_entity_id.clone(),
+        ));
+    }
+    let mut merged = rule_based;
+    for r in llm_rels {
+        let key = (
+            r.from_entity_id.clone(),
+            r.relationship_type.clone(),
+            r.to_entity_id.clone(),
+        );
+        if !seen.contains(&key) {
+            seen.insert(key);
+            merged.push(r);
+        }
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -221,5 +427,121 @@ mod tests {
         assert!(entities
             .iter()
             .all(|e| e.extraction_method == ExtractionMethod::LlmAssisted));
+    }
+
+    #[test]
+    fn parse_llm_relationship_json_valid() {
+        use crate::classify::ClassificationMethod;
+        use crate::ExtractedEntity;
+
+        let entities = vec![
+            ExtractedEntity {
+                entity_type: "person".into(),
+                entity_value: "Alice Smith".into(),
+                normalized_value: "alice smith".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+            ExtractedEntity {
+                entity_type: "company".into(),
+                entity_value: "Test Corp".into(),
+                normalized_value: "test corp".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+        ];
+        let json = r#"[{"from":"Alice Smith","relationship":"works_for","to":"Test Corp","confidence":0.85}]"#;
+        let rels = parse_llm_relationship_json(json, &entities);
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].relationship_type, "works_for");
+        assert_eq!(rels[0].from_entity_value, "Alice Smith");
+        assert_eq!(rels[0].to_entity_value, "Test Corp");
+        assert_eq!(rels[0].extraction_method, "llm_assisted");
+        assert!((rels[0].confidence - 0.85).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_llm_relationship_json_rejects_unmatched_entities() {
+        use crate::classify::ClassificationMethod;
+        use crate::ExtractedEntity;
+
+        let entities = vec![ExtractedEntity {
+            entity_type: "person".into(),
+            entity_value: "Alice Smith".into(),
+            normalized_value: "alice smith".into(),
+            confidence: 0.9,
+            extraction_method: ExtractionMethod::RuleBased,
+            classification_method: ClassificationMethod::RuleBased,
+        }];
+        // "Test Corp" is not in entities - should reject
+        let json = r#"[{"from":"Alice Smith","relationship":"works_for","to":"Test Corp","confidence":0.85}]"#;
+        let rels = parse_llm_relationship_json(json, &entities);
+        assert!(rels.is_empty());
+    }
+
+    #[test]
+    fn parse_llm_relationship_json_rejects_invalid_relationship_type() {
+        use crate::classify::ClassificationMethod;
+        use crate::ExtractedEntity;
+
+        let entities = vec![
+            ExtractedEntity {
+                entity_type: "person".into(),
+                entity_value: "Alice".into(),
+                normalized_value: "alice".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+            ExtractedEntity {
+                entity_type: "company".into(),
+                entity_value: "Acme".into(),
+                normalized_value: "acme".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+        ];
+        let json =
+            r#"[{"from":"Alice","relationship":"invalid_type","to":"Acme","confidence":0.8}]"#;
+        let rels = parse_llm_relationship_json(json, &entities);
+        assert!(rels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_relationships_llm_mock_backend() {
+        use node_ai_mock::MockBackend;
+        use std::sync::Arc;
+
+        use crate::classify::ClassificationMethod;
+        use crate::ExtractedEntity;
+
+        let backend: Arc<dyn InferenceBackend> = Arc::new(MockBackend::new());
+        let entities = vec![
+            ExtractedEntity {
+                entity_type: "person".into(),
+                entity_value: "Alice Smith".into(),
+                normalized_value: "alice smith".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+            ExtractedEntity {
+                entity_type: "company".into(),
+                entity_value: "Test Corp".into(),
+                normalized_value: "test corp".into(),
+                confidence: 0.9,
+                extraction_method: ExtractionMethod::RuleBased,
+                classification_method: ClassificationMethod::RuleBased,
+            },
+        ];
+        let chunk_text = "Alice Smith works at Test Corp.";
+        let rels = extract_relationships_llm_async(&backend, chunk_text, &entities).await;
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].relationship_type, "works_for");
+        assert_eq!(rels[0].from_entity_value, "Alice Smith");
+        assert_eq!(rels[0].to_entity_value, "Test Corp");
     }
 }

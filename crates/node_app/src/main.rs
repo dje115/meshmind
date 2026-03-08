@@ -529,6 +529,7 @@ async fn main() -> Result<()> {
         federated_rounds: Arc::new(RwLock::new(std::collections::HashMap::new())),
         federated_config: FederatedConfig::new("router"),
         federated_policy: train_policy,
+        ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     // Start TCP mesh server

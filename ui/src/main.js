@@ -1347,20 +1347,62 @@ async function renderDebug(el) {
     <div class="debug-tabs">
       <button class="debug-tab active" data-tab="documents">Documents</button>
       <button class="debug-tab" data-tab="document-detail">Document Detail</button>
+      <button class="debug-tab" data-tab="ingestion">Ingestion</button>
+      <button class="debug-tab" data-tab="ingest-results">Ingest Results</button>
       <button class="debug-tab" data-tab="ask">Ask Debug</button>
       <button class="debug-tab" data-tab="entities">Entities</button>
     </div>
     <div id="debug-documents" class="debug-panel active">
       <div class="card"><div id="debug-docs-list"><div class="spinner"></div></div></div>
     </div>
+    <div id="debug-ingestion" class="debug-panel">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Ingestion Overview</span></div>
+        <p class="text-muted" style="margin-bottom:12px">Sources, jobs, and per-file items. Agent ingest and legacy connector results.</p>
+        <div class="ingestion-tabs">
+          <button class="ingestion-tab active" data-subtab="sources">Sources</button>
+          <button class="ingestion-tab" data-subtab="jobs">Jobs</button>
+          <button class="ingestion-tab" data-subtab="items">Items</button>
+        </div>
+        <div id="ingestion-sources" class="ingestion-subpanel active">
+          <div id="ingestion-sources-body"><div class="spinner"></div></div>
+        </div>
+        <div id="ingestion-jobs" class="ingestion-subpanel">
+          <div id="ingestion-jobs-body"><div class="empty-state"><div class="empty-state-text">Click Jobs tab</div></div></div>
+        </div>
+        <div id="ingestion-items" class="ingestion-subpanel">
+          <div class="form-group" style="margin-bottom:12px">
+            <label>Filter by source</label>
+            <select id="ingestion-items-source" class="form-input" style="max-width:300px">
+              <option value="">— All —</option>
+            </select>
+            <button class="btn btn-primary" id="ingestion-items-load" style="margin-left:8px">Load</button>
+          </div>
+          <div id="ingestion-items-body"><div class="empty-state"><div class="empty-state-text">Click Load to fetch items</div></div></div>
+        </div>
+      </div>
+    </div>
     <div id="debug-document-detail" class="debug-panel">
       <div class="card">
         <div class="form-group">
           <label>Document ID</label>
-          <input type="text" id="debug-doc-id" class="form-input" placeholder="e.g. invoice.pdf" />
+          <input type="text" id="debug-doc-id" class="form-input" placeholder="e.g. invoice.pdf or subdir/report.pdf" />
           <button class="btn btn-primary" id="debug-load-doc">Load</button>
         </div>
         <div id="debug-doc-detail-body"></div>
+      </div>
+    </div>
+    <div id="debug-ingest-results" class="debug-panel">
+      <div class="card">
+        <p class="text-muted" style="margin-bottom:12px">Per-file results from the last document folder ingest. Shows ingested, skipped (unsupported), and failed files.</p>
+        <div class="form-group">
+          <label>Source</label>
+          <select id="debug-ingest-source-select" class="form-input" style="max-width:400px">
+            <option value="">— Select a document source —</option>
+          </select>
+          <button class="btn btn-primary" id="debug-load-ingest-results" style="margin-left:8px">Load</button>
+        </div>
+        <div id="debug-ingest-results-body"></div>
       </div>
     </div>
     <div id="debug-ask" class="debug-panel">
@@ -1399,7 +1441,121 @@ async function renderDebug(el) {
       tab.classList.add('active');
       const panelId = 'debug-' + tab.dataset.tab;
       document.getElementById(panelId)?.classList.add('active');
+      if (tab.dataset.tab === 'ingestion') loadIngestionSources();
     });
+  });
+
+  el.querySelectorAll('.ingestion-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      el.querySelectorAll('.ingestion-tab').forEach(t => t.classList.remove('active'));
+      el.querySelectorAll('.ingestion-subpanel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const subId = 'ingestion-' + tab.dataset.subtab;
+      document.getElementById(subId)?.classList.add('active');
+      if (tab.dataset.subtab === 'sources') loadIngestionSources();
+      if (tab.dataset.subtab === 'jobs') loadIngestionJobs();
+    });
+  });
+
+  async function loadIngestionSources() {
+    const body = document.getElementById('ingestion-sources-body');
+    if (!body) return;
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const { sources } = await api.getDebugIngestSources();
+      const sel = document.getElementById('ingestion-items-source');
+      if (sel) {
+        sel.innerHTML = '<option value="">— All —</option>' +
+          (sources || []).map(s => `<option value="${escapeHtml(s.source_id)}">${escapeHtml(s.display_name || s.source_id)}</option>`).join('');
+      }
+      if (!sources || sources.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-text">No sources</div></div>';
+        return;
+      }
+      body.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Source</th><th>Type</th><th>Status</th><th>Last Ingest</th><th>Docs</th><th>Path</th></tr></thead>
+          <tbody>${(sources || []).map(s => `
+            <tr>
+              <td>${escapeHtml(s.display_name || s.source_id)}</td>
+              <td><span class="badge badge-blue">${escapeHtml(String(s.connector_type || ''))}</span></td>
+              <td>${statusBadge(s.status)}</td>
+              <td>${s.last_ingest_status ? statusBadge(s.last_ingest_status) : '—'}</td>
+              <td>${s.last_ingest_documents ?? '—'}</td>
+              <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(s.path_or_uri || '')}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  }
+
+  async function loadIngestionJobs() {
+    const body = document.getElementById('ingestion-jobs-body');
+    if (!body) return;
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const { jobs } = await api.getDebugIngestJobs();
+      if (!jobs || jobs.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-text">No ingest jobs</div></div>';
+        return;
+      }
+      body.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Job ID</th><th>Source</th><th>Status</th><th>Rows</th><th>Docs</th><th>Started</th></tr></thead>
+          <tbody>${jobs.map(j => `
+            <tr>
+              <td style="font-family:var(--font-mono);font-size:11px">${escapeHtml(j.ingest_id).slice(0, 24)}…</td>
+              <td>${escapeHtml(j.source_id)}</td>
+              <td>${statusBadge(j.status)}</td>
+              <td>${j.rows_ingested}</td>
+              <td>${j.documents_created}</td>
+              <td>${j.started_at_ms ? formatTime(j.started_at_ms) : '—'}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  }
+
+  document.getElementById('ingestion-items-load')?.addEventListener('click', async () => {
+    const body = document.getElementById('ingestion-items-body');
+    const sourceId = document.getElementById('ingestion-items-source')?.value?.trim() || undefined;
+    if (!body) return;
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const { items } = await api.getDebugIngestItems({ source_id: sourceId, limit: 100 });
+      if (!items || items.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-text">No ingest items</div></div>';
+        return;
+      }
+      const statusBadgeLocal = (s) => {
+        if (s === 'ingested') return '<span class="badge badge-green">Ingested</span>';
+        if (s === 'skipped_unsupported') return '<span class="badge badge-muted">Skipped</span>';
+        if (s === 'failed_ocr' || s === 'failed_extraction' || s === 'failed_unknown') return '<span class="badge badge-red">Failed</span>';
+        return `<span class="badge">${escapeHtml(s)}</span>`;
+      };
+      body.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Filename</th><th>Source</th><th>Status</th><th>Chunks</th><th>OCR</th></tr></thead>
+          <tbody>${items.map(i => `
+            <tr>
+              <td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(i.filename)}</td>
+              <td>${escapeHtml(i.source_id)}</td>
+              <td>${statusBadgeLocal(i.status)}</td>
+              <td>${i.chunks_created}</td>
+              <td>${i.ocr_attempted ? 'Yes' : 'No'}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
   });
 
   try {
@@ -1434,6 +1590,14 @@ async function renderDebug(el) {
     document.getElementById('debug-docs-list').innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
   }
 
+  try {
+    const sources = await api.getSources();
+    const docSources = sources.filter(s => s.connector_type === 8);
+    const select = document.getElementById('debug-ingest-source-select');
+    select.innerHTML = '<option value="">— Select a document source —</option>' +
+      docSources.map(s => `<option value="${escapeHtml(s.source_id)}">${escapeHtml(s.display_name || s.path_or_uri || s.source_id)}</option>`).join('');
+  } catch (_) {}
+
   document.getElementById('debug-load-doc').addEventListener('click', async () => {
     const id = document.getElementById('debug-doc-id').value.trim();
     if (!id) { toast('Enter document ID', 'error'); return; }
@@ -1467,6 +1631,45 @@ async function renderDebug(el) {
               <td>${escapeHtml(e.entity_value)}</td>
               <td>${escapeHtml(e.extraction_method)}</td>
               <td>${(e.confidence * 100).toFixed(0)}%</td>
+            </tr>
+          `).join('')}</tbody>
+        </table></div>
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  });
+
+  document.getElementById('debug-load-ingest-results').addEventListener('click', async () => {
+    const sourceId = document.getElementById('debug-ingest-source-select').value.trim();
+    if (!sourceId) { toast('Enter source ID', 'error'); return; }
+    const body = document.getElementById('debug-ingest-results-body');
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const results = await api.getDebugIngestResults(sourceId);
+      if (results.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-text">No ingest results for this source. Run an ingest first.</div></div>';
+        return;
+      }
+      const statusBadge = (s) => {
+        if (s === 'ingested') return '<span class="badge badge-green">Ingested</span>';
+        if (s === 'skipped_unsupported') return '<span class="badge badge-muted">Skipped</span>';
+        if (s === 'failed_ocr') return '<span class="badge badge-red">Failed OCR</span>';
+        if (s === 'failed_extraction') return '<span class="badge badge-red">Failed</span>';
+        if (s === 'failed_unknown') return '<span class="badge badge-red">Unknown</span>';
+        return `<span class="badge">${escapeHtml(s)}</span>`;
+      };
+      body.innerHTML = `
+        <div class="table-container"><table>
+          <thead><tr><th>Filename</th><th>Type</th><th>Status</th><th>OCR attempted</th><th>Chunks</th><th>Failure reason</th></tr></thead>
+          <tbody>${results.map(r => `
+            <tr>
+              <td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(r.filename)}</td>
+              <td>${escapeHtml(r.detected_type)}</td>
+              <td>${statusBadge(r.status)}</td>
+              <td>${r.ocr_attempted ? 'Yes' : 'No'}</td>
+              <td>${r.chunks_created}</td>
+              <td style="font-size:12px;color:var(--text-muted)">${r.failure_reason ? escapeHtml(r.failure_reason) : '—'}</td>
             </tr>
           `).join('')}</tbody>
         </table></div>

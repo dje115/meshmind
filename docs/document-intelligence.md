@@ -152,6 +152,10 @@ When OCR is used, chunk metadata includes `ocr_used = true` and `page_number` fo
 |--------|-----------|-------------------|
 | PDF | `.pdf` | pdf_oxide (direct) → OCR fallback if &lt; 200 chars |
 | Word | `.docx` | docx-rust (paragraph/run text) |
+| Legacy Word | `.doc` | litchi (experimental) |
+| Excel | `.xls`, `.xlsx` | calamine (cell values) |
+| PowerPoint | `.pptx` | undoc |
+| Legacy PowerPoint | `.ppt` | litchi (experimental) |
 | Plain text | `.txt`, `.md`, `.rtf` | Direct file read |
 
 ---
@@ -173,21 +177,34 @@ When OCR is used, chunk metadata includes `ocr_used = true` and `page_number` fo
 
 Document chunks are now processed for **entity extraction** during ingestion. Extracted entities (people, companies, emails, phones, money, dates, invoice/quote numbers) are stored in `entities_view` and linked to documents via `documents_entities_view`.
 
-### Extraction Flow
+### Hybrid Classification Pipeline
 
-1. **Rule-based** (primary): Deterministic patterns for email, phone, money, date, company (Ltd/Inc/Corp), person (title + name), quote/invoice numbers.
-2. **Optional LLM-assisted**: When `enable_llm_entity_extraction` is true and a chunk is long with few rule-based entities, the LLM augments extraction. Default: off.
-3. **Merge**: Rule-based and LLM results are merged; rule-based wins on conflict.
+1. **Candidate extraction** — Regexes and span detection; title-case 2–3 word phrases are emitted as *unknown* (not assumed person).
+2. **Strong rule classification** — Company (Ltd, Inc, Systems, …), organization/legal scheme (Tenancy Deposit Scheme, Property Ombudsman), location (room, office, …), address (street, lane, harborough, farm, …), product (conduit, panel, cable, …), money, email, phone, date.
+3. **Context-aware person** — When context contains tenant, landlord, signed, witness, contact, etc., and phrase looks like a 2–3 word name, classify as person.
+4. **Vocabulary lookup** — Normalized phrase is looked up in `entity_vocabulary`. If found with confidence ≥ 0.8, that type is reused.
+5. **LLM-assisted classification** — **Unknown entities fall through to the LLM** when rules and vocabulary fail. The LLM is enabled by default (`enable_llm_entity_extraction = true`) when a backend is configured. Phrase length &lt; 60 chars, under per-chunk safety threshold. Result is cached in vocabulary.
+6. **Vocabulary learning** — After classification, phrase and type are stored in `entity_vocabulary` (or occurrence_count updated). User corrections set `source_method = corrected` and `confidence = 1.0`.
 
 ### Events
 
-- **ExtractedEntityRecorded**: Emitted per entity per chunk with `entity_id`, `entity_type`, `entity_value`, `normalized_value`, `source_document_id`, `chunk_index`, `confidence`, `extraction_method` (rule_based | llm_assisted).
+- **ExtractedEntityRecorded**: Emitted per entity per chunk with `entity_id`, `entity_type`, `entity_value`, `normalized_value`, `source_document_id`, `chunk_index`, `confidence`, `extraction_method` (rule_based | llm_assisted), `classification_method` (rule_based | vocabulary_lookup | llm_assisted | corrected).
+- **ExtractedRelationshipRecorded**: Emitted per relationship with `from_entity_id`, `to_entity_id`, `relationship_type` (works_for, for_customer, includes_product, has_total, etc.), `source_document_id`, `chunk_index`, `confidence`, `extraction_method` (rule_based | llm_assisted).
+
+### Relationship Extraction
+
+Relationships between entities (person → works_for → company, quote → for_customer → company, quote → includes_product → product) are extracted via:
+
+1. **Rule-based extraction** — Deterministic heuristics (proximity, context keywords like "prepared by", "bill to", "total", "qty", "install").
+2. **Optional LLM-assisted extraction** — When `enable_llm_relationship_extraction` is true, backend is configured, and rule-based finds few relationships in chunks with 2+ entities.
 
 ### Example Queries
 
 - "Who appears in my documents?" → `list_entities_by_type(conn, "person", 50)`
 - "Show documents mentioning ABC Ltd" → `list_documents_for_entity(conn, "abc corp ltd", Some("company"), 20)`
 - "List all emails found" → `list_entities_by_type(conn, "email", 100)`
+- "What is related to Becketts Foods?" → `list_related_entities(conn, "Becketts Foods", None, 50)`
+- "Which products are in quote 1234?" → `list_related_entities(conn, "1234", Some("includes_product"), 20)`
 
 See [entity-graph.md](entity-graph.md) for full details.
 
@@ -199,12 +216,19 @@ See [entity-graph.md](entity-graph.md) for full details.
 
 The Debug Panel allows inspection of:
 
+- **Relationships** — GET /v1/debug/documents/:id/relationships (per-document), GET /v1/debug/relationships (filterable by entity_type, relationship_type)
+
 - **OCR status** — Which documents used OCR, per-chunk OCR flags
 - **Chunks** — `document_id`, `chunk_index`, `chunk_text` preview, `source_file`, `page_number`
-- **Entities** — Extracted entities with type, value, confidence, extraction method
+- **Entities** — Extracted entities with type, value, confidence, extraction method, classification method
 - **Ask plan** — Intent, retrieval steps, evidence, source types, web/peer fallback
 
 See [debug-panel.md](debug-panel.md) for endpoints and usage.
+
+### Vocabulary and Corrections
+
+- **GET /v1/debug/vocabulary** — Returns learned phrase → type mappings (phrase, entity_type, confidence, occurrence_count, source_method).
+- When a user corrects an entity type via the Debug Panel, the correction is stored in `corrections_view` **and** the phrase is upserted into `entity_vocabulary` with `source_method = corrected` and `confidence = 1.0`, so future classifications reuse the corrected type.
 
 ### Correction Storage
 

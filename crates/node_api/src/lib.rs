@@ -57,7 +57,9 @@ fn path_exists_on_disk(path_or_uri: &str) -> bool {
     }
     // Only check local file paths (Windows C:\ or Unix /)
     let is_file_path = s.starts_with('/')
-        || (s.len() >= 2 && s.chars().nth(1) == Some(':') && s.chars().next().map(|c| c.is_ascii_alphabetic()) == Some(true));
+        || (s.len() >= 2
+            && s.chars().nth(1) == Some(':')
+            && s.chars().next().map(|c| c.is_ascii_alphabetic()) == Some(true));
     if !is_file_path {
         return true; // URI or unknown - assume exists
     }
@@ -641,6 +643,26 @@ pub struct AppState {
     pub federated_config: FederatedConfig,
     /// Policy for federated delta sharing (can_share_deltas).
     pub federated_policy: Arc<node_policy::PolicyEngine>,
+    /// Latest ingest progress for SSE streaming (job_id, processed, failed, current_file, etc.).
+    pub ingest_progress: Arc<tokio::sync::RwLock<Option<IngestProgress>>>,
+}
+
+/// Live ingest job progress (for SSE stream).
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestProgress {
+    pub job_id: String,
+    pub source_id: String,
+    pub status: String,
+    pub items_processed: u64,
+    pub items_failed: u64,
+    pub items_skipped: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
+    pub started_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 async fn admin_auth(
@@ -684,6 +706,243 @@ async fn rate_limit_ask_chat(
     Ok(next.run(request).await)
 }
 
+#[derive(Deserialize)]
+struct IngestJobRequest {
+    source_id: String,
+}
+
+#[derive(Serialize)]
+struct IngestJobResponse {
+    job_id: String,
+    source_id: String,
+    started_at: i64,
+}
+
+async fn handle_ingest_jobs_post(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<IngestJobRequest>,
+) -> Result<Json<IngestJobResponse>, ApiError> {
+    let job_id = format!("ing-agent-{}", uuid::Uuid::new_v4());
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    Ok(Json(IngestJobResponse {
+        job_id: job_id.clone(),
+        source_id: req.source_id,
+        started_at,
+    }))
+}
+
+async fn handle_ingest_items_post(
+    State(state): State<Arc<AppState>>,
+    Json(item): Json<node_ingest_contract::IngestedItem>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ingest_id = format!("ing-agent-{}", uuid::Uuid::new_v4());
+    let mut log = state.event_log.write().await;
+    let config = node_ingest::IngestConfig::default();
+    let docs = node_ingest::ingest_contract_item(
+        &item,
+        &ingest_id,
+        &state.cas,
+        &mut log,
+        &state.db_path,
+        &state.node_id,
+        &config,
+        Some(state.backend.clone()),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ingest_id": ingest_id,
+        "docs_created": docs
+    })))
+}
+
+#[derive(Deserialize)]
+struct IngestItemsBatchRequest {
+    items: Vec<node_ingest_contract::IngestedItem>,
+}
+
+async fn handle_ingest_items_batch_post(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestItemsBatchRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ingest_id = format!("ing-agent-{}", uuid::Uuid::new_v4());
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    {
+        let _ = state.ingest_progress.write().await.insert(IngestProgress {
+            job_id: ingest_id.clone(),
+            source_id: req
+                .items
+                .first()
+                .map(|i| i.source_id.clone())
+                .unwrap_or_default(),
+            status: "processing".to_string(),
+            items_processed: 0,
+            items_failed: 0,
+            items_skipped: 0,
+            current_file: None,
+            started_at_ms: started_at,
+            completed_at_ms: None,
+            warnings: vec![],
+        });
+    }
+    let mut log = state.event_log.write().await;
+    let mut config = node_ingest::IngestConfig::default();
+    config.extraction_config.enable_llm_entity_extraction = false;
+    let mut total = 0u64;
+    let mut failed = 0u64;
+    let mut skipped = 0u64;
+    for (idx, item) in req.items.iter().enumerate() {
+        let current_file = Some(item.source_display_name.clone());
+        let _ = state.ingest_progress.write().await.as_mut().map(|p| {
+            p.current_file = current_file;
+        });
+        let docs = node_ingest::ingest_contract_item(
+            item,
+            &ingest_id,
+            &state.cas,
+            &mut log,
+            &state.db_path,
+            &state.node_id,
+            &config,
+            Some(state.backend.clone()),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        total += docs;
+        if docs == 0 {
+            if matches!(
+                item.ingest_status,
+                node_ingest_contract::IngestItemStatus::SkippedUnsupported
+            ) {
+                skipped += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        let processed = (idx + 1) as u64;
+        let _ = state.ingest_progress.write().await.as_mut().map(|p| {
+            p.items_processed = processed;
+            p.items_failed = failed;
+            p.items_skipped = skipped;
+        });
+    }
+    let completed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let _ = state.ingest_progress.write().await.as_mut().map(|p| {
+        p.status = "completed".to_string();
+        p.completed_at_ms = Some(completed_at);
+        p.current_file = None;
+    });
+    Ok(Json(serde_json::json!({
+        "ingest_id": ingest_id,
+        "items_received": req.items.len(),
+        "docs_created": total
+    })))
+}
+
+async fn handle_ingest_stream_get(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> + Send> {
+    let state = state.clone();
+    let stream = async_stream::stream! {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let progress = state.ingest_progress.read().await.clone();
+            let data = serde_json::json!({
+                "progress": progress,
+                "ts_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            });
+            yield Ok(Event::default().data(data.to_string()));
+        }
+    };
+    Sse::new(stream)
+}
+
+async fn handle_ingest_status_get(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "status": "ready",
+        "agent_ingest_api_version": 1
+    })))
+}
+
+async fn handle_ingest_sources_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut stmt = conn
+        .prepare("SELECT source_id, connector_type, path_or_uri, display_name, status FROM sources_view WHERE status = 'approved'")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "source_id": row.get::<_, String>(0)?,
+                "connector_type": row.get::<_, i64>(1)?,
+                "path_or_uri": row.get::<_, String>(2)?,
+                "display_name": row.get::<_, String>(3)?,
+                "status": row.get::<_, String>(4)?
+            }))
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let sources: Vec<serde_json::Value> = rows.filter_map(Result::ok).collect();
+    Ok(Json(serde_json::json!({ "sources": sources })))
+}
+
+async fn handle_ingest_results_get(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source_id = params.get("source_id").cloned().unwrap_or_default();
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let results: Vec<serde_json::Value> = if source_id.is_empty() {
+        let mut stmt = conn
+            .prepare("SELECT ingest_id, filename, status, chunks_created, failure_reason FROM ingest_file_results ORDER BY created_at_ms DESC LIMIT 200")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "ingest_id": row.get::<_, String>(0)?,
+                    "filename": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "chunks_created": row.get::<_, i64>(3)?,
+                    "failure_reason": row.get::<_, Option<String>>(4)?
+                }))
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.filter_map(Result::ok).collect()
+    } else {
+        let mut stmt = conn
+            .prepare("SELECT ingest_id, filename, status, chunks_created, failure_reason FROM ingest_file_results WHERE source_id = ?1 ORDER BY created_at_ms DESC LIMIT 200")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![source_id], |row| {
+                Ok(serde_json::json!({
+                    "ingest_id": row.get::<_, String>(0)?,
+                    "filename": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "chunks_created": row.get::<_, i64>(3)?,
+                    "failure_reason": row.get::<_, Option<String>>(4)?
+                }))
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let localhost_origins = [
         "http://127.0.0.1:9900".parse().unwrap(),
@@ -704,8 +963,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/sources", get(handle_admin_sources))
         .route("/admin/sources/approve", post(handle_admin_approve_source))
         .route("/admin/sources/remove", post(handle_admin_remove_source))
-        .route("/admin/sources/remove-by-path", post(handle_admin_remove_source_by_path))
-        .route("/admin/sources/remove-missing", post(handle_admin_remove_missing_sources))
+        .route(
+            "/admin/sources/remove-by-path",
+            post(handle_admin_remove_source_by_path),
+        )
+        .route(
+            "/admin/sources/remove-missing",
+            post(handle_admin_remove_missing_sources),
+        )
         .route("/admin/train", post(handle_admin_train))
         .route("/admin/train/status", get(handle_admin_train_status))
         .route("/admin/train/export", post(handle_admin_train_export))
@@ -766,6 +1031,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/admin/config/onedrive/oauth/start",
             get(handle_admin_config_onedrive_oauth_start),
         )
+        .route("/ingest/jobs", post(handle_ingest_jobs_post))
+        .route("/ingest/items", post(handle_ingest_items_post))
+        .route("/ingest/items/batch", post(handle_ingest_items_batch_post))
+        .route("/ingest/status", get(handle_ingest_status_get))
+        .route("/ingest/stream", get(handle_ingest_stream_get))
+        .route("/ingest/sources", get(handle_ingest_sources_get))
+        .route("/ingest/results", get(handle_ingest_results_get))
         .route("/debug/documents", get(handle_debug_documents))
         .route("/debug/documents/:id", get(handle_debug_document_detail))
         .route(
@@ -775,6 +1047,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/debug/documents/:id/entities",
             get(handle_debug_document_entities),
+        )
+        .route(
+            "/debug/documents/:id/relationships",
+            get(handle_debug_document_relationships),
         )
         .route(
             "/debug/documents/:id/entities/correct",
@@ -790,6 +1066,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/debug/ask/:case_id", get(handle_debug_ask_session))
         .route("/debug/entities", get(handle_debug_entities))
+        .route("/debug/relationships", get(handle_debug_relationships))
+        .route("/debug/vocabulary", get(handle_debug_vocabulary))
+        .route("/debug/ingest-results", get(handle_debug_ingest_results))
+        .route("/debug/ingest/sources", get(handle_debug_ingest_sources))
+        .route("/debug/ingest/jobs", get(handle_debug_ingest_jobs))
+        .route("/debug/ingest/items", get(handle_debug_ingest_items))
+        .route(
+            "/debug/ingest/items/:id",
+            get(handle_debug_ingest_item_by_id),
+        )
+        .route("/evidence/:id/source", get(handle_evidence_source_get))
+        .route("/source-items/:id", get(handle_source_items_get))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     let oauth_public_routes = Router::new().route(
@@ -992,6 +1280,15 @@ struct EvidenceItem {
     source_type: String, // local | peer | web | insight | business_system
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// Machine-readable reference (path, id, key). For document_chunk evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_locator: Option<String>,
+    /// URI to open original (file://, outlook://, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_open_target: Option<String>,
+    /// Human-readable origin label
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_origin_label: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1794,10 +2091,28 @@ async fn handle_ask(
             source_types.push("local".to_string());
         }
         for h in &context_hits {
+            let (locator, open_target, origin_label) = if h.hit_type == "document_chunk" {
+                debug::get_evidence_source(&conn, &h.id)
+                    .ok()
+                    .flatten()
+                    .map(|p| {
+                        (
+                            Some(p.source_locator).filter(|s| !s.is_empty()),
+                            Some(p.source_open_target).filter(|s| !s.is_empty()),
+                            Some(p.source_origin_label).filter(|s| !s.is_empty()),
+                        )
+                    })
+                    .unwrap_or((None, None, None))
+            } else {
+                (None, None, None)
+            };
             evidence.push(EvidenceItem {
                 id: h.id.clone(),
                 source_type: "local".to_string(),
                 title: Some(h.title.clone()),
+                source_locator: locator,
+                source_open_target: open_target,
+                source_origin_label: origin_label,
             });
         }
     }
@@ -1810,6 +2125,9 @@ async fn handle_ask(
                 id: id.clone(),
                 source_type: "business_system".to_string(),
                 title: None,
+                source_locator: None,
+                source_open_target: None,
+                source_origin_label: None,
             });
         }
     }
@@ -1821,6 +2139,9 @@ async fn handle_ask(
             id: "web_search".to_string(),
             source_type: "web".to_string(),
             title: Some("Web search results".to_string()),
+            source_locator: None,
+            source_open_target: None,
+            source_origin_label: None,
         });
     }
     if context_bullets.is_empty() && !web_search_context.is_empty() {
@@ -1868,6 +2189,9 @@ async fn handle_ask(
                     id: pa.peer_id.clone(),
                     source_type: "peer".to_string(),
                     title: Some(pa.answer.chars().take(80).collect::<String>()),
+                    source_locator: None,
+                    source_open_target: None,
+                    source_origin_label: None,
                 });
             }
 
@@ -2003,6 +2327,13 @@ struct DebugEntitiesQuery {
     limit: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct DebugRelationshipsQuery {
+    entity_type: Option<String>,
+    relationship_type: Option<String>,
+    limit: Option<usize>,
+}
+
 async fn handle_debug_documents(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<debug::DebugDocumentSummary>>, ApiError> {
@@ -2021,6 +2352,15 @@ async fn handle_debug_document_detail(
     let (summary, chunks, entities) =
         debug::get_debug_document(&conn, &id).map_err(|e| ApiError::internal(e.to_string()))?;
     let summary = summary.ok_or_else(|| ApiError::not_found("document not found".to_string()))?;
+    let classification_summary = debug::list_debug_classification_summary(&conn, &id).unwrap_or(
+        debug::DebugClassificationSummary {
+            rule_based: 0,
+            vocabulary_lookup: 0,
+            llm_assisted: 0,
+            corrected: 0,
+            unknown_count: 0,
+        },
+    );
     Ok(Json(serde_json::json!({
         "metadata": {
             "document_id": summary.document_id,
@@ -2030,6 +2370,7 @@ async fn handle_debug_document_detail(
             "entity_count": summary.entity_count,
             "created_at_ms": summary.created_at_ms,
         },
+        "classification_summary": classification_summary,
         "chunks": chunks,
         "entities": entities,
     })))
@@ -2055,6 +2396,423 @@ async fn handle_debug_document_entities(
     let entities = debug::list_debug_entities_for_document(&conn, &id)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(entities))
+}
+
+async fn handle_debug_document_relationships(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<debug::DebugRelationshipInfo>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let relationships = debug::list_debug_relationships_for_document(&conn, &id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(relationships))
+}
+
+async fn handle_debug_relationships(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DebugRelationshipsQuery>,
+) -> Result<Json<Vec<debug::DebugRelationshipInfo>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = q.limit.unwrap_or(100);
+    let list = debug::list_debug_relationships(
+        &conn,
+        q.entity_type.as_deref(),
+        q.relationship_type.as_deref(),
+        limit,
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(list))
+}
+
+#[derive(Deserialize)]
+struct DebugIngestResultsQuery {
+    source_id: Option<String>,
+    ingest_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct IngestFileResultRow {
+    filename: String,
+    file_path: String,
+    detected_type: String,
+    status: String,
+    failure_reason: Option<String>,
+    ocr_attempted: bool,
+    chunks_created: u64,
+}
+
+async fn handle_debug_ingest_results(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DebugIngestResultsQuery>,
+) -> Result<Json<Vec<IngestFileResultRow>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let rows: Vec<IngestFileResultRow> = if let Some(ingest_id) = q.ingest_id {
+        conn.prepare(
+            "SELECT filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created
+             FROM ingest_file_results WHERE ingest_id = ?1 ORDER BY filename",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map([ingest_id], |row| {
+            Ok(IngestFileResultRow {
+                filename: row.get(0)?,
+                file_path: row.get(1)?,
+                detected_type: row.get(2)?,
+                status: row.get(3)?,
+                failure_reason: row.get(4)?,
+                ocr_attempted: row.get::<_, i64>(5)? != 0,
+                chunks_created: row.get::<_, i64>(6)? as u64,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect()
+    } else if let Some(source_id) = q.source_id {
+        conn.prepare(
+            "SELECT filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created
+             FROM ingest_file_results
+             WHERE source_id = ?1 AND created_at_ms = (SELECT MAX(created_at_ms) FROM ingest_file_results WHERE source_id = ?1)
+             ORDER BY filename",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map(rusqlite::params![source_id, source_id], |row| {
+            Ok(IngestFileResultRow {
+                filename: row.get(0)?,
+                file_path: row.get(1)?,
+                detected_type: row.get(2)?,
+                status: row.get(3)?,
+                failure_reason: row.get(4)?,
+                ocr_attempted: row.get::<_, i64>(5)? != 0,
+                chunks_created: row.get::<_, i64>(6)? as u64,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect()
+    } else {
+        return Err(ApiError::bad_request(
+            "query param source_id or ingest_id required".to_string(),
+        ));
+    };
+
+    Ok(Json(rows))
+}
+
+#[derive(Serialize)]
+struct DebugIngestSourceRow {
+    source_id: String,
+    display_name: String,
+    connector_type: i64,
+    status: String,
+    path_or_uri: String,
+    last_ingest_status: Option<String>,
+    last_ingest_rows: Option<i64>,
+    last_ingest_documents: Option<i64>,
+}
+
+async fn handle_debug_ingest_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut stmt = conn
+        .prepare(
+            "WITH latest_ingest AS (
+                SELECT source_id, status, rows_ingested, documents_created,
+                       ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY COALESCE(completed_at_ms, 0) DESC, started_at_ms DESC) AS rn
+                FROM ingests_view
+            )
+            SELECT sv.source_id, sv.display_name, sv.connector_type, sv.status, sv.path_or_uri,
+                   li.status AS last_ingest_status, li.rows_ingested AS last_ingest_rows, li.documents_created AS last_ingest_documents
+            FROM sources_view sv
+            LEFT JOIN (SELECT source_id, status, rows_ingested, documents_created FROM latest_ingest WHERE rn = 1) li ON sv.source_id = li.source_id
+            WHERE sv.status != 'removed'
+            ORDER BY sv.source_id",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows: Vec<DebugIngestSourceRow> = stmt
+        .query_map([], |row| {
+            Ok(DebugIngestSourceRow {
+                source_id: row.get(0)?,
+                display_name: row.get(1)?,
+                connector_type: row.get(2)?,
+                status: row.get(3)?,
+                path_or_uri: row.get(4)?,
+                last_ingest_status: row.get::<_, Option<String>>(5).ok().flatten(),
+                last_ingest_rows: row.get::<_, Option<i64>>(6).ok().flatten(),
+                last_ingest_documents: row.get::<_, Option<i64>>(7).ok().flatten(),
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(Json(serde_json::json!({ "sources": rows })))
+}
+
+#[derive(Serialize)]
+struct DebugIngestJobRow {
+    ingest_id: String,
+    source_id: String,
+    connector_type: i64,
+    status: String,
+    rows_ingested: i64,
+    documents_created: i64,
+    started_at_ms: i64,
+    completed_at_ms: Option<i64>,
+    duration_ms: i64,
+}
+
+async fn handle_debug_ingest_jobs(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT ingest_id, source_id, connector_type, status, rows_ingested, documents_created, started_at_ms, completed_at_ms, duration_ms
+             FROM ingests_view ORDER BY started_at_ms DESC LIMIT 100",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows: Vec<DebugIngestJobRow> = stmt
+        .query_map([], |row| {
+            Ok(DebugIngestJobRow {
+                ingest_id: row.get(0)?,
+                source_id: row.get(1)?,
+                connector_type: row.get(2)?,
+                status: row.get(3)?,
+                rows_ingested: row.get(4)?,
+                documents_created: row.get(5)?,
+                started_at_ms: row.get(6)?,
+                completed_at_ms: row.get(7)?,
+                duration_ms: row.get(8)?,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(Json(serde_json::json!({ "jobs": rows })))
+}
+
+#[derive(Deserialize)]
+struct DebugIngestItemsQuery {
+    source_id: Option<String>,
+    ingest_id: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct DebugIngestItemRow {
+    ingest_id: String,
+    source_id: String,
+    filename: String,
+    file_path: String,
+    detected_type: String,
+    status: String,
+    failure_reason: Option<String>,
+    ocr_attempted: bool,
+    chunks_created: u64,
+    created_at_ms: i64,
+}
+
+async fn handle_debug_ingest_items(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DebugIngestItemsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = q.limit.unwrap_or(100).min(500);
+
+    let rows: Vec<DebugIngestItemRow> = if let Some(ingest_id) = &q.ingest_id {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms
+                 FROM ingest_file_results WHERE ingest_id = ?1 ORDER BY filename LIMIT ?2",
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let mapped = stmt.query_map(rusqlite::params![ingest_id, limit], |row| {
+            Ok(DebugIngestItemRow {
+                ingest_id: row.get(0)?,
+                source_id: row.get(1)?,
+                filename: row.get(2)?,
+                file_path: row.get(3)?,
+                detected_type: row.get(4)?,
+                status: row.get(5)?,
+                failure_reason: row.get(6)?,
+                ocr_attempted: row.get::<_, i64>(7)? != 0,
+                chunks_created: row.get::<_, i64>(8)? as u64,
+                created_at_ms: row.get(9)?,
+            })
+        });
+        let out: Vec<DebugIngestItemRow> = mapped
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .filter_map(Result::ok)
+            .collect();
+        out
+    } else if let Some(source_id) = &q.source_id {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms
+                 FROM ingest_file_results WHERE source_id = ?1 ORDER BY created_at_ms DESC LIMIT ?2",
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let mapped = stmt.query_map(rusqlite::params![source_id, limit], |row| {
+            Ok(DebugIngestItemRow {
+                ingest_id: row.get(0)?,
+                source_id: row.get(1)?,
+                filename: row.get(2)?,
+                file_path: row.get(3)?,
+                detected_type: row.get(4)?,
+                status: row.get(5)?,
+                failure_reason: row.get(6)?,
+                ocr_attempted: row.get::<_, i64>(7)? != 0,
+                chunks_created: row.get::<_, i64>(8)? as u64,
+                created_at_ms: row.get(9)?,
+            })
+        });
+        let out: Vec<DebugIngestItemRow> = mapped
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .filter_map(Result::ok)
+            .collect();
+        out
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms
+                 FROM ingest_file_results ORDER BY created_at_ms DESC LIMIT ?1",
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let mapped = stmt.query_map([limit], |row| {
+            Ok(DebugIngestItemRow {
+                ingest_id: row.get(0)?,
+                source_id: row.get(1)?,
+                filename: row.get(2)?,
+                file_path: row.get(3)?,
+                detected_type: row.get(4)?,
+                status: row.get(5)?,
+                failure_reason: row.get(6)?,
+                ocr_attempted: row.get::<_, i64>(7)? != 0,
+                chunks_created: row.get::<_, i64>(8)? as u64,
+                created_at_ms: row.get(9)?,
+            })
+        });
+        let out: Vec<DebugIngestItemRow> = mapped
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .filter_map(Result::ok)
+            .collect();
+        out
+    };
+
+    Ok(Json(serde_json::json!({ "items": rows })))
+}
+
+async fn handle_debug_ingest_item_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let decoded = urlencoding::decode(&id).unwrap_or_default();
+    let file_path = decoded.to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms
+             FROM ingest_file_results WHERE file_path = ?1 OR filename = ?1 ORDER BY created_at_ms DESC LIMIT 1",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let result = stmt.query_row(
+        rusqlite::params![file_path.as_str(), file_path.as_str()],
+        |row| {
+            Ok(serde_json::json!({
+                "ingest_id": row.get::<_, String>(0)?,
+                "source_id": row.get::<_, String>(1)?,
+                "filename": row.get::<_, String>(2)?,
+                "file_path": row.get::<_, String>(3)?,
+                "detected_type": row.get::<_, String>(4)?,
+                "status": row.get::<_, String>(5)?,
+                "failure_reason": row.get::<_, Option<String>>(6)?,
+                "ocr_attempted": row.get::<_, i64>(7)? != 0,
+                "chunks_created": row.get::<_, i64>(8)?,
+                "created_at_ms": row.get::<_, i64>(9)?,
+            }))
+        },
+    );
+    match result {
+        Ok(item) => Ok(Json(item)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(ApiError::not_found("ingest item not found".to_string()))
+        }
+        Err(e) => Err(ApiError::internal(e.to_string())),
+    }
+}
+
+async fn handle_evidence_source_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let prov = debug::get_evidence_source(&conn, &id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    match prov {
+        Some(p) => Ok(Json(serde_json::json!({
+            "artifact_id": p.artifact_id,
+            "document_id": p.document_id,
+            "source_id": p.source_id,
+            "source_locator": p.source_locator,
+            "source_open_target": p.source_open_target,
+            "source_origin_label": p.source_origin_label,
+            "source_file": p.source_file,
+        }))),
+        None => Err(ApiError::not_found("evidence source not found".to_string())),
+    }
+}
+
+async fn handle_source_items_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let decoded = urlencoding::decode(&id).unwrap_or_default();
+    let doc_id = decoded.to_string();
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(document_chunks_view)")
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let has_cols = cols.contains(&"source_locator".to_string());
+    if !has_cols {
+        return Err(ApiError::not_found("source-items view not available".to_string()));
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT artifact_id, document_id, source_id, source_file, source_locator, source_open_target, source_origin_label
+             FROM document_chunks_view WHERE document_id = ?1 OR source_file = ?1 LIMIT 1",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let result = stmt.query_row(rusqlite::params![doc_id.as_str(), doc_id.as_str()], |r| {
+        Ok(serde_json::json!({
+            "artifact_id": r.get::<_, String>(0)?,
+            "document_id": r.get::<_, String>(1)?,
+            "source_id": r.get::<_, String>(2)?,
+            "source_file": r.get::<_, String>(3)?,
+            "source_locator": r.get::<_, String>(4)?,
+            "source_open_target": r.get::<_, String>(5)?,
+            "source_origin_label": r.get::<_, String>(6)?,
+        }))
+    });
+    match result {
+        Ok(item) => Ok(Json(item)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(ApiError::not_found("source item not found".to_string()))
+        }
+        Err(e) => Err(ApiError::internal(e.to_string())),
+    }
 }
 
 async fn handle_debug_ask_session(
@@ -2213,6 +2971,18 @@ async fn handle_debug_entities(
     let limit = q.limit.unwrap_or(100);
     let entity_type = q.entity_type.as_deref();
     let list = debug::list_debug_entities(&conn, entity_type, limit)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(list))
+}
+
+async fn handle_debug_vocabulary(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<debug::DebugVocabEntry>>, ApiError> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(200);
+    let list = debug::list_debug_vocabulary(&conn, limit)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(list))
 }
@@ -3247,9 +4017,11 @@ async fn handle_admin_remove_source_by_path(
                 value: "public".into(),
             }),
             sensitivity: Sensitivity::Public as i32,
-            payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
-                source_id: source_id.clone(),
-            })),
+            payload: Some(event_envelope::Payload::DataSourceRemoved(
+                DataSourceRemoved {
+                    source_id: source_id.clone(),
+                },
+            )),
             ..Default::default()
         };
         let stored = log
@@ -3281,11 +4053,11 @@ async fn handle_admin_remove_missing_sources(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let source_ids: Vec<(String, String)> = conn
-        .prepare(
-            "SELECT source_id, path_or_uri FROM sources_view WHERE status != 'removed'",
-        )
+        .prepare("SELECT source_id, path_or_uri FROM sources_view WHERE status != 'removed'")
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| ApiError::internal(e.to_string()))?
         .filter_map(|r| r.ok())
         .filter(|(_, path)| !path_exists_on_disk(path))
@@ -3304,9 +4076,11 @@ async fn handle_admin_remove_missing_sources(
                 value: "public".into(),
             }),
             sensitivity: Sensitivity::Public as i32,
-            payload: Some(event_envelope::Payload::DataSourceRemoved(DataSourceRemoved {
-                source_id: source_id.clone(),
-            })),
+            payload: Some(event_envelope::Payload::DataSourceRemoved(
+                DataSourceRemoved {
+                    source_id: source_id.clone(),
+                },
+            )),
             ..Default::default()
         };
         let stored = log
@@ -3718,6 +4492,36 @@ async fn handle_admin_ingest(
             format!("ingest failed: {e}"),
         )
     })?;
+
+    if let Some(ref file_results) = result.file_results {
+        let conn = rusqlite::Connection::open(&state.db_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")))?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        for fr in file_results {
+            let status_str = serde_json::to_string(&fr.status).unwrap_or_else(|_| "unknown".into());
+            let status_str = status_str.trim_matches('"');
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO ingest_file_results
+                 (ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    result.ingest_id,
+                    result.source_id,
+                    fr.filename,
+                    fr.file_path,
+                    fr.detected_type,
+                    status_str,
+                    fr.failure_reason,
+                    if fr.ocr_attempted { 1i64 } else { 0 },
+                    fr.chunks_created as i64,
+                    ts,
+                ],
+            );
+        }
+    }
 
     tracing::info!(
         source_id = %req.source_id,
@@ -4247,6 +5051,36 @@ async fn handle_admin_ingest_all(
                 total_rows += result.rows_ingested;
                 total_docs += result.documents_created;
                 ingested += 1;
+                if let Some(ref file_results) = result.file_results {
+                    if let Ok(db) = rusqlite::Connection::open(&state.db_path) {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        for fr in file_results {
+                            let status_str = serde_json::to_string(&fr.status)
+                                .unwrap_or_else(|_| "unknown".into());
+                            let status_str = status_str.trim_matches('"');
+                            let _ = db.execute(
+                                "INSERT OR REPLACE INTO ingest_file_results
+                                 (ingest_id, source_id, filename, file_path, detected_type, status, failure_reason, ocr_attempted, chunks_created, created_at_ms)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                rusqlite::params![
+                                    result.ingest_id,
+                                    result.source_id,
+                                    fr.filename,
+                                    fr.file_path,
+                                    fr.detected_type,
+                                    status_str,
+                                    fr.failure_reason,
+                                    if fr.ocr_attempted { 1i64 } else { 0 },
+                                    fr.chunks_created as i64,
+                                    ts,
+                                ],
+                            );
+                        }
+                    }
+                }
             }
             Err(_) => {
                 failed += 1;
@@ -5224,6 +6058,7 @@ mod tests {
                 allow_train: true,
                 ..Default::default()
             })),
+            ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
 
@@ -5448,6 +6283,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_ingest_sources_returns_empty() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/debug/ingest/sources")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(data.get("sources").is_some());
+    }
+
+    #[tokio::test]
+    async fn debug_ingest_jobs_returns_empty() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/debug/ingest/jobs")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(data.get("jobs").is_some());
+    }
+
+    #[tokio::test]
+    async fn ingest_stream_returns_sse() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/ingest/stream")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_items_batch_accepts_valid_payload() {
+        use node_ingest_contract::{IngestItemStatus, IngestedChunk, IngestedItem};
+
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let item = IngestedItem {
+            source_id: "agent-fs".into(),
+            source_type: "filesystem".into(),
+            item_id: "/tmp/test/doc.txt".into(),
+            source_display_name: "doc.txt".into(),
+            source_origin_label: "C:\\tmp\\test\\doc.txt".into(),
+            source_locator: "/tmp/test/doc.txt".into(),
+            source_open_target: "file:///tmp/test/doc.txt".into(),
+            source_parent: Some("/tmp/test".into()),
+            path_or_external_key: "/tmp/test/doc.txt".into(),
+            content_type: "text/plain".into(),
+            extracted_text: "Hello from agent".into(),
+            chunks: vec![IngestedChunk {
+                chunk_index: 0,
+                chunk_text: "Hello from agent".into(),
+                page_number: 1,
+            }],
+            metadata: serde_json::json!({}),
+            ocr_attempted: false,
+            ocr_used: false,
+            extraction_method: "text".into(),
+            warnings: vec![],
+            ingest_status: IngestItemStatus::Ingested,
+            failure_reason: None,
+            source_modified_at: 1700000000000,
+            ingested_at: 1700000001000,
+            content_hash: "abc123".into(),
+            pipeline_version: 1,
+        };
+
+        let payload = serde_json::json!({ "items": [item] });
+        let resp = app
+            .oneshot(
+                Request::post("/v1/ingest/items/batch")
+                    .header("authorization", TEST_AUTH)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data.get("items_received").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(data.get("docs_created").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[tokio::test]
     async fn test_admin_models_empty() {
         let state = create_test_state();
         let app = build_router(state);
@@ -5574,6 +6531,7 @@ mod tests {
                 allow_train: true,
                 ..Default::default()
             })),
+            ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
         });
 
         let app = build_router(state);

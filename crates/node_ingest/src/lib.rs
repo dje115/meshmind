@@ -24,7 +24,27 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use node_connectors::Connector;
-use node_extraction::{extract_entities, extract_entities_with_llm, ExtractionConfig};
+use node_extraction::{
+    classify_candidate, classify_phrase_llm_async, extract_candidates, ClassificationMethod,
+    ExtractedEntity, ExtractionConfig, VocabEntry, VocabularyLookup,
+};
+use node_ingest_contract::{IngestItemStatus, IngestedItem};
+use node_storage::vocabulary;
+use rusqlite::Connection;
+
+/// Vocabulary lookup using the projector connection.
+struct VocabLookupImpl<'a>(&'a Connection);
+impl VocabularyLookup for VocabLookupImpl<'_> {
+    fn lookup(&self, normalized_phrase: &str) -> Option<VocabEntry> {
+        vocabulary::vocab_lookup(self.0, normalized_phrase, 0.8)
+            .ok()
+            .flatten()
+            .map(|(entity_type, confidence)| VocabEntry {
+                entity_type,
+                confidence,
+            })
+    }
+}
 use node_proto::common::{NodeId, Sensitivity, TenantId, Timestamp};
 use node_proto::events::{
     event_envelope, ArtifactPublished, ArtifactType, ConnectorType, EntityRelationshipRecorded,
@@ -116,6 +136,8 @@ pub struct IngestResult {
     pub facts_created: u64,
     pub bytes_stored: u64,
     pub duration_ms: u32,
+    /// Per-file results from document folder ingestion (DocumentConnector only).
+    pub file_results: Option<Vec<node_connectors::FileIngestResult>>,
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -488,6 +510,8 @@ pub fn run_ingest(
     let mut total_facts: u64 = 0;
     let mut total_bytes: u64 = 0;
 
+    let mut collected_file_results: Option<Vec<node_connectors::FileIngestResult>> = None;
+
     for table in tables {
         let mut offset = 0u64;
         let mut table_rows = 0u64;
@@ -504,6 +528,10 @@ pub fn run_ingest(
             let batch = connector
                 .ingest_batch(source_path, table, offset, limit)
                 .with_context(|| format!("ingest_batch for table {table} at offset {offset}"))?;
+
+            if collected_file_results.is_none() {
+                collected_file_results = batch.file_results;
+            }
 
             if batch.rows.is_empty() {
                 break;
@@ -585,7 +613,7 @@ pub fn run_ingest(
                 total_bytes += json_len;
                 total_docs += 1;
 
-                // Extract entities from document chunks and emit ExtractedEntityRecorded
+                // Extract entities from document chunks: candidates -> classify (strong rules, vocab, optional LLM) -> learn -> emit
                 if is_document_chunk {
                     let chunk_text = row
                         .columns
@@ -604,20 +632,69 @@ pub fn run_ingest(
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
                     if !chunk_text.is_empty() && !document_id.is_empty() {
-                        let result = if config.extraction_config.enable_llm_entity_extraction
-                            && backend.is_some()
-                        {
-                            let rt = tokio::runtime::Runtime::new()
-                                .context("create tokio runtime for LLM extraction")?;
-                            rt.block_on(extract_entities_with_llm(
-                                backend.as_ref(),
+                        let candidates = extract_candidates(chunk_text);
+                        const MAX_PHRASE_LEN_FOR_LLM: usize = 60;
+                        const VOCAB_CONFIDENCE: f32 = 0.8;
+                        const MAX_ENTITY_LLM_PER_CHUNK: usize = 15;
+                        let vocab = VocabLookupImpl(&proj_conn);
+                        let rt = tokio::runtime::Runtime::new()
+                            .context("create tokio runtime for entity classification")?;
+                        let mut llm_count = 0usize;
+                        let mut chunk_entities: Vec<ExtractedEntity> = Vec::new();
+                        for candidate in candidates {
+                            let mut entity = classify_candidate(
+                                &candidate,
                                 chunk_text,
-                                &config.extraction_config,
-                            ))
-                        } else {
-                            extract_entities(chunk_text)
-                        };
-                        for entity in result.entities {
+                                Some(&vocab),
+                                None,
+                                MAX_PHRASE_LEN_FOR_LLM,
+                                VOCAB_CONFIDENCE,
+                            );
+                            if entity.entity_type == "unknown"
+                                && config.extraction_config.enable_llm_entity_extraction
+                                && candidate.entity_value.len() < MAX_PHRASE_LEN_FOR_LLM
+                                && llm_count < MAX_ENTITY_LLM_PER_CHUNK
+                            {
+                                if let Some(b) = backend.as_ref() {
+                                    if let Some((t, c)) = rt.block_on(classify_phrase_llm_async(
+                                        b,
+                                        &candidate.entity_value,
+                                        chunk_text,
+                                    )) {
+                                        let type_clean = t.trim().to_lowercase();
+                                        if type_clean != "unknown"
+                                            && node_extraction::ENTITY_TYPES
+                                                .contains(&type_clean.as_str())
+                                        {
+                                            tracing::debug!(
+                                                phrase = %candidate.entity_value,
+                                                resolved_type = %type_clean,
+                                                confidence = c,
+                                                "LLM classified unknown entity"
+                                            );
+                                            entity = ExtractedEntity {
+                                                entity_type: type_clean,
+                                                confidence: c,
+                                                classification_method:
+                                                    ClassificationMethod::LlmAssisted,
+                                                ..entity
+                                            };
+                                            llm_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            let source_method = entity.classification_method.to_string();
+                            if let Err(e) = vocabulary::vocab_learn(
+                                &proj_conn,
+                                &entity.normalized_value,
+                                &entity.entity_type,
+                                entity.confidence,
+                                &source_method,
+                            ) {
+                                tracing::warn!(error = %e, "vocab_learn failed");
+                            }
+                            chunk_entities.push(entity.clone());
                             let rel_event = EventEnvelope {
                                 event_id: Uuid::new_v4().to_string(),
                                 r#type: EventType::ExtractedEntityRecorded as i32,
@@ -638,8 +715,58 @@ pub fn run_ingest(
                                         chunk_index,
                                         confidence: entity.confidence,
                                         extraction_method: entity.extraction_method.to_string(),
+                                        classification_method: entity
+                                            .classification_method
+                                            .to_string(),
                                     },
                                 )),
+                                ..Default::default()
+                            };
+                            let rel_event = event_log.append(rel_event)?;
+                            node_storage::projector::apply_event(&proj_conn, &rel_event)?;
+                        }
+                        // Extract and emit entity-to-entity relationships
+                        let rule_relationships =
+                            node_extraction::extract_relationships(&chunk_entities, chunk_text);
+                        let relationships =
+                            rt.block_on(node_extraction::extract_relationships_with_llm(
+                                backend.as_ref(),
+                                chunk_text,
+                                &chunk_entities,
+                                rule_relationships,
+                                &config.extraction_config,
+                            ));
+                        for rel in relationships {
+                            use node_proto::events::ExtractedRelationshipRecorded;
+                            let rel_event = EventEnvelope {
+                                event_id: Uuid::new_v4().to_string(),
+                                r#type: EventType::ExtractedRelationshipRecorded as i32,
+                                node_id: Some(NodeId {
+                                    value: node_id.to_string(),
+                                }),
+                                tenant_id: Some(TenantId {
+                                    value: "public".to_string(),
+                                }),
+                                sensitivity: Sensitivity::Public as i32,
+                                payload: Some(
+                                    event_envelope::Payload::ExtractedRelationshipRecorded(
+                                        ExtractedRelationshipRecorded {
+                                            relationship_id: format!(
+                                                "rel-{}",
+                                                Uuid::new_v4().simple()
+                                            ),
+                                            from_entity_id: rel.from_entity_id,
+                                            from_entity_value: rel.from_entity_value,
+                                            relationship_type: rel.relationship_type,
+                                            to_entity_id: rel.to_entity_id,
+                                            to_entity_value: rel.to_entity_value,
+                                            source_document_id: document_id.to_string(),
+                                            chunk_index,
+                                            confidence: rel.confidence,
+                                            extraction_method: rel.extraction_method,
+                                        },
+                                    ),
+                                ),
                                 ..Default::default()
                             };
                             let rel_event = event_log.append(rel_event)?;
@@ -725,6 +852,7 @@ pub fn run_ingest(
         facts_created: total_facts,
         bytes_stored: total_bytes,
         duration_ms: duration.as_millis() as u32,
+        file_results: collected_file_results,
     };
 
     let completed_evt = build_ingest_completed_event(job, &result, node_id);
@@ -741,6 +869,210 @@ pub fn run_ingest(
     );
 
     Ok(result)
+}
+
+/// Ingest a single item from the normalized contract (agent-submitted).
+/// Writes CAS, events, projections. Runs entity extraction on document chunks.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_contract_item(
+    item: &IngestedItem,
+    ingest_id: &str,
+    cas: &CasStore,
+    event_log: &mut EventLog,
+    db_path: &Path,
+    node_id: &str,
+    config: &IngestConfig,
+    backend: Option<Arc<dyn InferenceBackend>>,
+) -> anyhow::Result<u64> {
+    if item.ingest_status != IngestItemStatus::Ingested || item.chunks.is_empty() {
+        return Ok(0);
+    }
+
+    let proj_conn =
+        node_storage::sqlite_views::open_db(db_path).context("open projector database")?;
+    let vocab = VocabLookupImpl(&proj_conn);
+    let mut docs_created = 0u64;
+
+    let document_id = item.item_id.clone();
+    let table = "documents".to_string();
+
+    for chunk in &item.chunks {
+        let mut columns = BTreeMap::new();
+        columns.insert("document_id".into(), document_id.clone());
+        columns.insert("chunk_index".into(), chunk.chunk_index.to_string());
+        columns.insert("chunk_text".into(), chunk.chunk_text.clone());
+        columns.insert("source_file".into(), item.source_locator.clone());
+        columns.insert("page_number".into(), chunk.page_number.to_string());
+        columns.insert("filename".into(), item.source_display_name.clone());
+        columns.insert("file_path".into(), item.path_or_external_key.clone());
+        columns.insert("file_type".into(), item.content_type.clone());
+        columns.insert("content_text".into(), item.extracted_text.clone());
+        columns.insert(
+            "ocr_used".into(),
+            if item.ocr_used {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        );
+        columns.insert("source_locator".into(), item.source_locator.clone());
+        columns.insert("source_open_target".into(), item.source_open_target.clone());
+        columns.insert(
+            "source_origin_label".into(),
+            item.source_origin_label.clone(),
+        );
+
+        let entity_id = format!("{}-chunk-{}", document_id, chunk.chunk_index);
+        let json = serde_json::to_vec(&columns)?;
+        let hash_ref = cas.put_bytes("application/json", &json)?;
+        let title = item.source_display_name.clone();
+        let summary = build_artifact_summary(&columns, SUMMARY_CAP);
+
+        let artifact_id = format!("{}-{}-{}", ingest_id, table, entity_id);
+        let evt = EventEnvelope {
+            event_id: Uuid::new_v4().to_string(),
+            r#type: EventType::ArtifactPublished as i32,
+            node_id: Some(NodeId {
+                value: node_id.to_string(),
+            }),
+            tenant_id: Some(TenantId {
+                value: "public".to_string(),
+            }),
+            sensitivity: Sensitivity::Public as i32,
+            payload: Some(event_envelope::Payload::ArtifactPublished(
+                ArtifactPublished {
+                    artifact_id,
+                    artifact_type: ArtifactType::Document as i32,
+                    version: 1,
+                    title,
+                    content_ref: Some(hash_ref),
+                    shareable: false,
+                    expires_unix_ms: 0,
+                    summary,
+                    document_subtype: "document_chunk".into(),
+                    entity_type: "document".into(),
+                    entity_key: document_id.clone(),
+                    source_ref: item.source_id.clone(),
+                    table_name: table.clone(),
+                    entity_attributes_json: serde_json::to_string(&columns)
+                        .unwrap_or_else(|_| "{}".into()),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let evt = event_log.append(evt)?;
+        node_storage::projector::apply_event(&proj_conn, &evt)?;
+        docs_created += 1;
+
+        if let Some(ref be) = backend {
+            let chunk_text = &chunk.chunk_text;
+            if !chunk_text.is_empty() {
+                let candidates = extract_candidates(chunk_text);
+                const MAX_PHRASE_LEN: usize = 60;
+                const VOCAB_CONF: f32 = 0.8;
+                let rt_opt: Option<tokio::runtime::Runtime> =
+                    if config.extraction_config.enable_llm_entity_extraction {
+                        Some(
+                            tokio::runtime::Runtime::new()
+                                .context("create tokio runtime for entity classification")?,
+                        )
+                    } else {
+                        None
+                    };
+                let mut llm_count = 0usize;
+                for candidate in candidates {
+                    let mut entity = classify_candidate(
+                        &candidate,
+                        chunk_text,
+                        Some(&vocab),
+                        None,
+                        MAX_PHRASE_LEN,
+                        VOCAB_CONF,
+                    );
+                    if entity.entity_type == "unknown"
+                        && config.extraction_config.enable_llm_entity_extraction
+                        && candidate.entity_value.len() < MAX_PHRASE_LEN
+                        && llm_count < 15
+                    {
+                        let rt = rt_opt.as_ref().unwrap();
+                        if let Some((t, c)) = rt.block_on(classify_phrase_llm_async(
+                            be,
+                            &candidate.entity_value,
+                            chunk_text,
+                        )) {
+                            let type_clean = t.trim().to_lowercase();
+                            if type_clean != "unknown"
+                                && node_extraction::ENTITY_TYPES.contains(&type_clean.as_str())
+                            {
+                                entity = ExtractedEntity {
+                                    entity_type: type_clean,
+                                    confidence: c,
+                                    classification_method: ClassificationMethod::LlmAssisted,
+                                    ..entity
+                                };
+                                llm_count += 1;
+                            }
+                        }
+                    }
+                    if entity.entity_type != "unknown" {
+                        let _ = vocabulary::vocab_learn(
+                            &proj_conn,
+                            &entity.normalized_value,
+                            &entity.entity_type,
+                            entity.confidence,
+                            &entity.classification_method.to_string(),
+                        );
+                        let evt = build_entity_recorded_event(
+                            &document_id,
+                            chunk.chunk_index as i32,
+                            &entity,
+                            node_id,
+                        );
+                        let evt = event_log.append(evt)?;
+                        node_storage::projector::apply_event(&proj_conn, &evt)?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(docs_created)
+}
+
+/// Build ExtractedEntityRecorded event (used by ingest_contract_item).
+fn build_entity_recorded_event(
+    document_id: &str,
+    chunk_index: i32,
+    entity: &node_extraction::ExtractedEntity,
+    node_id: &str,
+) -> EventEnvelope {
+    use node_proto::events::ExtractedEntityRecorded;
+    EventEnvelope {
+        event_id: Uuid::new_v4().to_string(),
+        r#type: EventType::ExtractedEntityRecorded as i32,
+        node_id: Some(NodeId {
+            value: node_id.to_string(),
+        }),
+        tenant_id: Some(TenantId {
+            value: "public".to_string(),
+        }),
+        sensitivity: Sensitivity::Public as i32,
+        payload: Some(event_envelope::Payload::ExtractedEntityRecorded(
+            ExtractedEntityRecorded {
+                entity_id: entity.entity_id(),
+                entity_type: entity.entity_type.clone(),
+                entity_value: entity.entity_value.clone(),
+                normalized_value: entity.normalized_value.clone(),
+                source_document_id: document_id.to_string(),
+                chunk_index,
+                confidence: entity.confidence,
+                extraction_method: entity.extraction_method.to_string(),
+                classification_method: entity.classification_method.to_string(),
+            },
+        )),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

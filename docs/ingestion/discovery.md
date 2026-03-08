@@ -33,7 +33,7 @@ Discover (scan dirs) → Classify → Approve → Ingest → Normalize → Learn
 | 2 | CSV_FOLDER | Folder of `.csv` |
 | 3 | JSON_FOLDER | Folder of `.json` |
 | 7 | IMAGE_FOLDER | jpg, png, tiff, heic, webp |
-| 8 | DOCUMENT_FOLDER | pdf, docx, txt, md, rtf |
+| 8 | DOCUMENT_FOLDER | pdf, docx, doc, xls, xlsx, pptx, ppt, txt, md, rtf |
 | 9 | ONEDRIVE | OAuth-based |
 
 ---

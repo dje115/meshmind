@@ -26,7 +26,23 @@ rustup target add x86_64-pc-windows-gnu
 
 The project uses `rust-toolchain.toml` to select this target automatically.
 
-### 3. Build and test
+### 3. Install OCR tools (for scanned PDF support)
+
+Document ingestion uses OCR when PDF text extraction yields little content. Install via winget:
+
+```powershell
+winget install -e --id UB-Mannheim.TesseractOCR
+winget install -e --id oschwartz10612.Poppler
+```
+
+Restart your terminal (or IDE) so PATH updates. Verify:
+
+```powershell
+pdftoppm -v
+tesseract --version
+```
+
+### 4. Build and test
 
 Ensure MinGW is first in PATH, then:
 

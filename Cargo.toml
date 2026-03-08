@@ -16,6 +16,7 @@ members = [
     "crates/node_connectors",
     "crates/node_extraction",
     "crates/node_ingest",
+    "crates/node_ingest_contract",
     "crates/node_datasets",
     "crates/node_trainer",
     "crates/node_federated",
@@ -104,6 +105,7 @@ node_discovery = { path = "crates/node_discovery" }
 node_connectors = { path = "crates/node_connectors" }
 node_extraction = { path = "crates/node_extraction" }
 node_ingest = { path = "crates/node_ingest" }
+node_ingest_contract = { path = "crates/node_ingest_contract" }
 node_datasets = { path = "crates/node_datasets" }
 node_trainer = { path = "crates/node_trainer" }
 node_federated = { path = "crates/node_federated" }

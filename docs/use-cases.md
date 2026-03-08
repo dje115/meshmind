@@ -97,10 +97,17 @@ See [docs/ask-planner.md](ask-planner.md) for full specification.
 | Phase | Description |
 |-------|-------------|
 | **Data Source** | PDF, DOCX, TXT in scan folders |
-| **Normalization** | Document artifacts (text extracted); entity cards per doc |
-| **Retrieval** | FTS over document text |
+| **Normalization** | Document artifacts (text extracted); entity cards per doc; entity-to-entity relationships (works_for, for_customer, includes_product, has_total, etc.) |
+| **Retrieval** | FTS over document text; relationship queries (`list_related_entities`, `list_relationships_for_entity`) |
 | **Training Signals** | User confirmations (CASE_CONFIRMED) |
 | **Outputs** | Answer with citations, related docs |
+
+**Business questions enabled by relationships:**
+
+- "What is related to Becketts Foods?" — Quotes, invoices, contacts, products
+- "Which products are in quote 1234?" — Line items linked via includes_product
+- "Who works for Complete Cabling Systems Ltd?" — Person → works_for → company
+- "What is the total for invoice 4567?" — Invoice → has_total → money
 
 ---
 
@@ -203,6 +210,7 @@ See [distributed-memory.md](distributed-memory.md), [proactive-insights.md](proa
 
 ## References
 
+- [entity-graph.md](entity-graph.md) — Relationship extraction pipeline, query helpers, debug visibility
 - `docs/ingestion.md` — Ingest lifecycle
 - `docs/business-intelligence.md` — Entity cards, facts
 - `docs/training.md` — Training pipeline

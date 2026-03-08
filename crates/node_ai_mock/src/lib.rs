@@ -50,6 +50,10 @@ impl InferenceBackend for MockBackend {
             || prompt_lower.contains("extract entities from")
         {
             r#"{"people":["Alice Smith"],"companies":["Test Corp"],"emails":["test@example.com"],"phones":[],"money":[],"dates":[],"locations":[],"products":[],"invoice_numbers":["INV-001"],"quote_numbers":[]}"#.into()
+        } else if prompt_lower.contains("relationship")
+            && (prompt_lower.contains("identify") || prompt_lower.contains("extract"))
+        {
+            r#"[{"from":"Alice Smith","relationship":"works_for","to":"Test Corp","confidence":0.85}]"#.into()
         } else if prompt_lower.contains("hello") {
             "Hello! I'm MeshMind's mock AI assistant. How can I help you today?".into()
         } else if prompt_lower.contains("error") || prompt_lower.contains("fix") {

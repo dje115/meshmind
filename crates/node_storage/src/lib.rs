@@ -10,3 +10,4 @@ pub mod search;
 pub mod shards;
 pub mod snapshot;
 pub mod sqlite_views;
+pub mod vocabulary;

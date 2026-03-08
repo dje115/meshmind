@@ -368,6 +368,129 @@ pub fn count_entity_mentions(conn: &Connection, entity_type: &str) -> Result<i64
     .map_err(Into::into)
 }
 
+/// Extracted entity relationship record.
+#[derive(Debug, Clone)]
+pub struct EntityRelationshipRow {
+    pub relationship_id: String,
+    pub from_entity_id: String,
+    pub from_entity_value: String,
+    pub relationship_type: String,
+    pub to_entity_id: String,
+    pub to_entity_value: String,
+    pub source_document_id: String,
+    pub chunk_index: i32,
+    pub confidence: f32,
+    pub extraction_method: String,
+}
+
+/// List relationships where the given entity_id is either from or to.
+pub fn list_relationships_for_entity(
+    conn: &Connection,
+    entity_id: &str,
+    limit: usize,
+) -> Result<Vec<EntityRelationshipRow>> {
+    let limit_i64 = limit as i64;
+    let mut stmt = conn.prepare(
+        "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                to_entity_id, to_entity_value, source_document_id, chunk_index,
+                confidence, extraction_method
+         FROM extracted_entity_relationships_view
+         WHERE from_entity_id = ?1 OR to_entity_id = ?1
+         ORDER BY created_at_ms DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![entity_id, entity_id, limit_i64],
+        map_relationship_row,
+    )?;
+    rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
+        .map_err(Into::into)
+}
+
+fn map_relationship_row(row: &rusqlite::Row) -> rusqlite::Result<EntityRelationshipRow> {
+    Ok(EntityRelationshipRow {
+        relationship_id: row.get(0)?,
+        from_entity_id: row.get(1)?,
+        from_entity_value: row.get(2)?,
+        relationship_type: row.get(3)?,
+        to_entity_id: row.get(4)?,
+        to_entity_value: row.get(5)?,
+        source_document_id: row.get(6)?,
+        chunk_index: row.get(7)?,
+        confidence: row.get(8)?,
+        extraction_method: row.get(9)?,
+    })
+}
+
+/// List related entities for a given entity value (exact match on from_entity_value or to_entity_value).
+/// Optionally filter by relationship_type.
+pub fn list_related_entities(
+    conn: &Connection,
+    entity_value: &str,
+    relationship_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<EntityRelationshipRow>> {
+    let limit_i64 = limit as i64;
+    let rows = if let Some(rt) = relationship_type {
+        let mut stmt = conn.prepare(
+            "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                    to_entity_id, to_entity_value, source_document_id, chunk_index,
+                    confidence, extraction_method
+             FROM extracted_entity_relationships_view
+             WHERE (from_entity_value = ?1 OR to_entity_value = ?1) AND relationship_type = ?2
+             ORDER BY confidence DESC, created_at_ms DESC
+             LIMIT ?3",
+        )?;
+        let iter = stmt.query_map(params![entity_value, rt, limit_i64], map_relationship_row)?;
+        iter.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                    to_entity_id, to_entity_value, source_document_id, chunk_index,
+                    confidence, extraction_method
+             FROM extracted_entity_relationships_view
+             WHERE from_entity_value = ?1 OR to_entity_value = ?1
+             ORDER BY confidence DESC, created_at_ms DESC
+             LIMIT ?2",
+        )?;
+        let iter = stmt.query_map(params![entity_value, limit_i64], map_relationship_row)?;
+        iter.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?
+    };
+    Ok(rows)
+}
+
+/// List documents that contain relationships involving the given entity value (exact match).
+pub fn list_documents_for_related_entities(
+    conn: &Connection,
+    entity_value: &str,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    let limit_i64 = limit as i64;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT source_document_id, relationship_type
+         FROM extracted_entity_relationships_view
+         WHERE from_entity_value = ?1 OR to_entity_value = ?1
+         ORDER BY source_document_id
+         LIMIT ?2",
+    )?;
+    let mut out = Vec::new();
+    let mut rows = stmt.query(params![entity_value, limit_i64])?;
+    while let Some(row) = rows.next()? {
+        out.push((row.get(0)?, row.get(1)?));
+    }
+    Ok(out)
+}
+
+/// Count relationships by type.
+pub fn count_relationships_by_type(conn: &Connection, relationship_type: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM extracted_entity_relationships_view WHERE relationship_type = ?1",
+        params![relationship_type],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 /// Unified search across cases, artifacts, and document chunks (documents_fts), merged by rank.
 /// Document chunk hits include chunk_text in summary so they can be used as context evidence.
 pub fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {

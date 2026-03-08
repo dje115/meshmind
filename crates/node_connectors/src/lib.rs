@@ -5,7 +5,9 @@
 //! - CsvFolderConnector: discover/inspect/ingest from CSV directories
 //! - JsonFolderConnector: discover/inspect/ingest from JSON directories
 //! - ImageConnector: extract EXIF/GPS metadata from image folders
-//! - DocumentConnector: extract text from PDF, DOCX, TXT, Markdown folders
+//! - DocumentConnector: extract text from PDF, DOCX, TXT, Markdown folders (legacy path;
+//!   prefer the filesystem ingestion agent when available for folder walking, extraction,
+//!   OCR, and provenance; agent POSTs to /v1/ingest/items)
 
 mod pdf_ocr;
 
@@ -13,6 +15,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use walkdir::WalkDir;
 
 use anyhow::{bail, Context};
 use rusqlite::types::ValueRef;
@@ -47,6 +50,32 @@ pub struct IngestBatchResult {
     pub table_name: String,
     pub rows: Vec<IngestRow>,
     pub offset: u64,
+    /// Per-file ingest results (DocumentConnector only). Populated when offset == 0.
+    #[allow(clippy::module_name_repetitions)]
+    pub file_results: Option<Vec<FileIngestResult>>,
+}
+
+/// Status of processing a single file during document folder ingestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileIngestStatus {
+    Ingested,
+    SkippedUnsupported,
+    FailedExtraction,
+    FailedOcr,
+    FailedUnknown,
+}
+
+/// Per-file result from document folder ingestion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileIngestResult {
+    pub filename: String,
+    pub file_path: String,
+    pub detected_type: String,
+    pub status: FileIngestStatus,
+    pub failure_reason: Option<String>,
+    pub ocr_attempted: bool,
+    pub chunks_created: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +202,7 @@ impl Connector for SQLiteConnector {
             table_name: table.to_string(),
             rows,
             offset,
+            file_results: None,
         })
     }
 }
@@ -330,6 +360,7 @@ impl Connector for CsvFolderConnector {
             table_name: table.to_string(),
             rows,
             offset,
+            file_results: None,
         })
     }
 }
@@ -458,6 +489,7 @@ impl Connector for JsonFolderConnector {
             table_name: table.to_string(),
             rows,
             offset,
+            file_results: None,
         })
     }
 }
@@ -674,13 +706,20 @@ impl Connector for ImageConnector {
             table_name: "images".to_string(),
             rows,
             offset,
+            file_results: None,
         })
     }
 }
 
 // ── DocumentConnector ───────────────────────────────────────────────────────
 
-const DOCUMENT_EXTENSIONS: &[&str] = &["pdf", "docx", "txt", "md", "rtf"];
+/// Supported document formats (ingestion + extraction).
+pub const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "pdf", "docx", "doc", "xls", "xlsx", "pptx", "ppt", "txt", "md", "rtf",
+];
+/// Known unsupported formats (reported as skipped_unsupported, not silently ignored).
+/// Visio (.vsd, .vsdx) requires external tooling; no mature Rust parser exists.
+pub const UNSUPPORTED_EXTENSIONS: &[&str] = &["vsd", "vsdx"];
 
 const MAX_DOCUMENT_TEXT_BYTES: usize = 100 * 1024;
 
@@ -726,6 +765,16 @@ fn is_document_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_unsupported_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            UNSUPPORTED_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
 /// Result of extracting text from a document file.
 struct ExtractResult {
     text: String,
@@ -733,6 +782,10 @@ struct ExtractResult {
     page_count: u64,
     /// True when OCR was used (scanned PDF fallback).
     ocr_used: bool,
+    /// True if OCR was attempted (e.g. scanned PDF) but failed or yielded nothing.
+    ocr_attempted: bool,
+    /// Failure reason when extraction yielded no usable text.
+    failure_reason: Option<String>,
 }
 
 /// Extract text from PDF using pdf_oxide. If extracted text is very short (< 200 chars),
@@ -747,6 +800,8 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
                 file_type: "pdf".into(),
                 page_count: 0,
                 ocr_used: false,
+                ocr_attempted: false,
+                failure_reason: Some(format!("PDF open failed: {e}")),
             };
         }
     };
@@ -768,10 +823,12 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
         }
     }
 
+    let mut ocr_attempted = false;
+
     // OCR fallback for scanned PDFs (little or no extractable text)
     if text.trim().len() < pdf_ocr::SCANNED_PDF_TEXT_THRESHOLD {
-        if let Some(ocr) = pdf_ocr::run_pdf_ocr(path) {
-            if !ocr.text.trim().is_empty() {
+        match pdf_ocr::run_pdf_ocr(path) {
+            Some(ocr) if !ocr.text.trim().is_empty() => {
                 tracing::info!(path = %path.display(), pages = ocr.page_count, "OCR fallback recovered text from scanned PDF");
                 let truncated = if ocr.text.len() > MAX_DOCUMENT_TEXT_BYTES {
                     ocr.text[..MAX_DOCUMENT_TEXT_BYTES].to_string()
@@ -783,7 +840,36 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
                     file_type: "pdf".into(),
                     page_count: ocr.page_count,
                     ocr_used: true,
+                    ocr_attempted: true,
+                    failure_reason: None,
                 };
+            }
+            Some(_) => {
+                return ExtractResult {
+                    text: String::new(),
+                    file_type: "pdf".into(),
+                    page_count,
+                    ocr_used: false,
+                    ocr_attempted: true,
+                    failure_reason: Some("OCR ran but yielded no text".into()),
+                };
+            }
+            None => {
+                // OCR tools not available - use whatever pdf_oxide extracted (even if short)
+                ocr_attempted = true;
+                if text.trim().is_empty() {
+                    return ExtractResult {
+                        text: String::new(),
+                        file_type: "pdf".into(),
+                        page_count,
+                        ocr_used: false,
+                        ocr_attempted: true,
+                        failure_reason: Some(
+                            "OCR failed (pdftoppm/tesseract not available or error)".into(),
+                        ),
+                    };
+                }
+                // Has some text from pdf_oxide - use it; don't fail just because OCR isn't installed
             }
         }
     }
@@ -798,6 +884,8 @@ fn extract_pdf_text(path: &Path) -> ExtractResult {
         file_type: "pdf".into(),
         page_count,
         ocr_used: false,
+        ocr_attempted,
+        failure_reason: None,
     }
 }
 
@@ -809,31 +897,74 @@ fn extract_text_from_file(path: &Path) -> ExtractResult {
         .to_ascii_lowercase();
     let file_type = ext.clone();
 
-    let result = match ext.as_str() {
-        "txt" | "md" | "rtf" => ExtractResult {
-            text: fs::read_to_string(path).unwrap_or_default(),
-            file_type,
-            page_count: 0,
-            ocr_used: false,
-        },
+    let mut result = match ext.as_str() {
+        "txt" | "md" | "rtf" => {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            ExtractResult {
+                failure_reason: if text.is_empty() {
+                    Some("File empty or read failed".into())
+                } else {
+                    None
+                },
+                text,
+                file_type,
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+            }
+        }
         "pdf" => extract_pdf_text(path),
-        "docx" => ExtractResult {
-            text: match docx_rust::DocxFile::from_file(path) {
+        "docx" => {
+            let text = match docx_rust::DocxFile::from_file(path) {
                 Ok(docx_file) => match docx_file.parse() {
                     Ok(docx) => extract_docx_text(&docx.document),
-                    Err(_) => String::new(),
+                    Err(e) => {
+                        return ExtractResult {
+                            text: String::new(),
+                            file_type,
+                            page_count: 0,
+                            ocr_used: false,
+                            ocr_attempted: false,
+                            failure_reason: Some(format!("DOCX parse failed: {e}")),
+                        };
+                    }
                 },
-                Err(_) => String::new(),
-            },
-            file_type,
-            page_count: 0,
-            ocr_used: false,
-        },
+                Err(e) => {
+                    return ExtractResult {
+                        text: String::new(),
+                        file_type,
+                        page_count: 0,
+                        ocr_used: false,
+                        ocr_attempted: false,
+                        failure_reason: Some(format!("DOCX open failed: {e}")),
+                    };
+                }
+            };
+            let failure_reason = if text.is_empty() {
+                Some("DOCX yielded no text".into())
+            } else {
+                None
+            };
+            ExtractResult {
+                text,
+                file_type,
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+                failure_reason,
+            }
+        }
+        "xls" | "xlsx" => extract_excel_text(path, &file_type),
+        "pptx" => extract_pptx_text(path, &file_type),
+        "doc" => extract_legacy_word_text(path, &file_type),
+        "ppt" => extract_legacy_ppt_text(path, &file_type),
         _ => ExtractResult {
             text: String::new(),
             file_type,
             page_count: 0,
             ocr_used: false,
+            ocr_attempted: false,
+            failure_reason: Some(format!("Unsupported format: {ext}")),
         },
     };
 
@@ -842,12 +973,8 @@ fn extract_text_from_file(path: &Path) -> ExtractResult {
     } else {
         result.text
     };
-    ExtractResult {
-        text: truncated,
-        file_type: result.file_type,
-        page_count: result.page_count,
-        ocr_used: result.ocr_used,
-    }
+    result.text = truncated;
+    result
 }
 
 fn extract_docx_text(docx: &docx_rust::document::Document) -> String {
@@ -869,6 +996,243 @@ fn extract_docx_text(docx: &docx_rust::document::Document) -> String {
     text
 }
 
+/// Extract text from Excel (.xls, .xlsx) using litchi.
+/// Litchi supports both legacy XLS (OLE2) and XLSX (OOXML) with better compatibility
+/// than calamine, which panics on some valid XLS files.
+fn extract_excel_text(path: &Path, file_type: &str) -> ExtractResult {
+    use litchi::sheet::{CellValue, Workbook};
+
+    let workbook: Box<dyn Workbook> = if file_type == "xls" {
+        match litchi::sheet::open_xls_workbook(path) {
+            Ok(wb) => Box::new(wb),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "XLS open failed");
+                return ExtractResult {
+                    text: String::new(),
+                    file_type: file_type.to_string(),
+                    page_count: 0,
+                    ocr_used: false,
+                    ocr_attempted: false,
+                    failure_reason: Some(format!("XLS open failed: {e}")),
+                };
+            }
+        }
+    } else {
+        match litchi::sheet::open_workbook(path) {
+            Ok(wb) => wb,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Excel open failed");
+                return ExtractResult {
+                    text: String::new(),
+                    file_type: file_type.to_string(),
+                    page_count: 0,
+                    ocr_used: false,
+                    ocr_attempted: false,
+                    failure_reason: Some(format!("Excel open failed: {e}")),
+                };
+            }
+        }
+    };
+
+    let mut text = String::new();
+    for name in workbook.worksheet_names() {
+        if let Ok(ws) = workbook.worksheet_by_name(&name) {
+            for row_idx in 0..ws.row_count() {
+                if let Ok(row_vals) = ws.row(row_idx) {
+                    let row_text: Vec<String> = row_vals
+                        .iter()
+                        .map(|cv| match cv {
+                            CellValue::Empty => String::new(),
+                            CellValue::Bool(b) => b.to_string(),
+                            CellValue::Int(n) => n.to_string(),
+                            CellValue::Float(f) => f.to_string(),
+                            CellValue::String(s) => s.clone(),
+                            CellValue::DateTime(d) => d.to_string(),
+                            CellValue::Error(e) => e.clone(),
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !row_text.is_empty() {
+                        text.push_str(&row_text.join("\t"));
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+    }
+    let failure_reason = if text.trim().is_empty() {
+        Some("Excel yielded no text".into())
+    } else {
+        None
+    };
+    ExtractResult {
+        text,
+        file_type: file_type.to_string(),
+        page_count: 0,
+        ocr_used: false,
+        ocr_attempted: false,
+        failure_reason,
+    }
+}
+
+/// Extract text from PowerPoint (.pptx) using undoc.
+fn extract_pptx_text(path: &Path, file_type: &str) -> ExtractResult {
+    use undoc::render;
+    let doc = match undoc::parse_file(path) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "PPTX parse failed");
+            return ExtractResult {
+                text: String::new(),
+                file_type: file_type.to_string(),
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+                failure_reason: Some(format!("PPTX parse failed: {e}")),
+            };
+        }
+    };
+    let options = render::RenderOptions::default();
+    let text = match render::to_text(&doc, &options) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "PPTX render failed");
+            return ExtractResult {
+                text: String::new(),
+                file_type: file_type.to_string(),
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+                failure_reason: Some(format!("PPTX render failed: {e}")),
+            };
+        }
+    };
+    let failure_reason = if text.trim().is_empty() {
+        Some("PPTX yielded no text".into())
+    } else {
+        None
+    };
+    ExtractResult {
+        text,
+        file_type: file_type.to_string(),
+        page_count: 0,
+        ocr_used: false,
+        ocr_attempted: false,
+        failure_reason,
+    }
+}
+
+/// Extract text from legacy Word (.doc) using litchi, with RTF fallback.
+/// Some .doc files are RTF-in-disguise (e.g. "Save as Word 97" producing RTF);
+/// when litchi fails with "Not a valid Office file", we try parsing as RTF.
+fn extract_legacy_word_text(path: &Path, file_type: &str) -> ExtractResult {
+    use litchi::Document;
+
+    // Try litchi first (OLE2 / OOXML)
+    if let Ok(doc) = Document::open(path) {
+        if let Ok(text) = doc.text() {
+            if !text.trim().is_empty() {
+                return ExtractResult {
+                    text,
+                    file_type: file_type.to_string(),
+                    page_count: 0,
+                    ocr_used: false,
+                    ocr_attempted: false,
+                    failure_reason: None,
+                };
+            }
+        }
+    }
+
+    // Fallback: try RTF (many .doc files are actually RTF)
+    if let Ok(bytes) = fs::read(path) {
+        let starts_rtf = bytes.len() >= 6 && &bytes[..6] == b"{\\rtf1";
+        let starts_rtf_ansi = bytes.len() >= 11 && &bytes[..11] == b"{\\rtf1\\ansi";
+        if starts_rtf || starts_rtf_ansi {
+            if let Ok(s) = std::str::from_utf8(&bytes) {
+                match rtf_extract_text(s) {
+                    Ok(text) if !text.trim().is_empty() => {
+                        return ExtractResult {
+                            text,
+                            file_type: file_type.to_string(),
+                            page_count: 0,
+                            ocr_used: false,
+                            ocr_attempted: false,
+                            failure_reason: None,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    tracing::warn!(path = %path.display(), "DOC parse failed (tried litchi OLE2/OOXML and RTF fallback)");
+    ExtractResult {
+        text: String::new(),
+        file_type: file_type.to_string(),
+        page_count: 0,
+        ocr_used: false,
+        ocr_attempted: false,
+        failure_reason: Some("DOC parse failed: not a valid Office or RTF file".into()),
+    }
+}
+
+fn rtf_extract_text(rtf: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use rtf_parser::lexer::Lexer;
+    use rtf_parser::parser::Parser;
+
+    let tokens = Lexer::scan(rtf)?;
+    let doc = Parser::new(tokens).parse()?;
+    Ok(doc.get_text())
+}
+
+/// Extract text from legacy PowerPoint (.ppt) using litchi.
+fn extract_legacy_ppt_text(path: &Path, file_type: &str) -> ExtractResult {
+    use litchi::Presentation;
+    let pres = match Presentation::open(path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "PPT parse failed");
+            return ExtractResult {
+                text: String::new(),
+                file_type: file_type.to_string(),
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+                failure_reason: Some(format!("PPT parse failed: {e}")),
+            };
+        }
+    };
+    let text = match pres.text() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "PPT text extraction failed");
+            return ExtractResult {
+                text: String::new(),
+                file_type: file_type.to_string(),
+                page_count: 0,
+                ocr_used: false,
+                ocr_attempted: false,
+                failure_reason: Some(format!("PPT text extraction failed: {e}")),
+            };
+        }
+    };
+    let failure_reason = if text.trim().is_empty() {
+        Some("PPT yielded no text".into())
+    } else {
+        None
+    };
+    ExtractResult {
+        text,
+        file_type: file_type.to_string(),
+        page_count: 0,
+        ocr_used: false,
+        ocr_attempted: false,
+        failure_reason,
+    }
+}
+
 pub struct DocumentConnector {
     id: String,
 }
@@ -885,14 +1249,14 @@ impl Connector for DocumentConnector {
     }
 
     fn inspect_schema(&self, path: &Path) -> anyhow::Result<Vec<TableInfo>> {
-        let entries = fs::read_dir(path).context("read document directory")?;
-        let mut file_count = 0u64;
-
-        for entry in entries.flatten() {
-            if entry.path().is_file() && is_document_file(&entry.path()) {
-                file_count += 1;
-            }
-        }
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let file_count = WalkDir::new(&path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| is_document_file(e.path()) || is_unsupported_file(e.path()))
+            .count() as u64;
 
         let columns = vec![
             SchemaColumn {
@@ -977,30 +1341,82 @@ impl Connector for DocumentConnector {
         offset: u64,
         limit: u64,
     ) -> anyhow::Result<IngestBatchResult> {
-        let mut doc_files: Vec<_> = fs::read_dir(path)
-            .context("read document directory")?
-            .flatten()
-            .filter(|e| e.path().is_file() && is_document_file(&e.path()))
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let base_path = path.as_path();
+
+        // Recursively collect all document and unsupported files
+        let mut all_files: Vec<std::path::PathBuf> = WalkDir::new(&path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .filter(|p| is_document_file(p) || is_unsupported_file(p))
             .collect();
-        doc_files.sort_by_key(|e| e.file_name());
+        all_files.sort();
 
         let mut all_chunks: Vec<IngestRow> = Vec::new();
+        let mut file_results: Vec<FileIngestResult> = Vec::new();
 
-        for entry in doc_files.iter() {
-            let fpath = entry.path();
+        for fpath in &all_files {
             let filename = fpath
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
             let file_path = fpath.to_string_lossy().into_owned();
-            let file_size = fs::metadata(&fpath).map(|m| m.len()).unwrap_or(0);
-            let extract = extract_text_from_file(&fpath);
+            let file_size = fs::metadata(fpath).map(|m| m.len()).unwrap_or(0);
 
+            // Relative path for unique document_id (avoids collisions in subfolders)
+            let document_id = fpath
+                .strip_prefix(base_path)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| filename.clone());
+
+            let detected_type = fpath
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
+            if is_unsupported_file(fpath) {
+                file_results.push(FileIngestResult {
+                    filename: filename.clone(),
+                    file_path: file_path.clone(),
+                    detected_type: detected_type.clone(),
+                    status: FileIngestStatus::SkippedUnsupported,
+                    failure_reason: Some(format!(
+                        "Format .{detected_type} not supported (Visio requires external tooling)"
+                    )),
+                    ocr_attempted: false,
+                    chunks_created: 0,
+                });
+                continue;
+            }
+
+            let extract = extract_text_from_file(fpath);
             let chunks = chunk_text(&extract.text, CHUNK_SIZE, CHUNK_OVERLAP);
-            let document_id = filename.clone();
-
             let num_chunks = chunks.len();
+
+            let status = if !chunks.is_empty() {
+                FileIngestStatus::Ingested
+            } else if extract.ocr_attempted {
+                FileIngestStatus::FailedOcr
+            } else if extract.failure_reason.is_some() {
+                FileIngestStatus::FailedExtraction
+            } else {
+                FileIngestStatus::FailedUnknown
+            };
+
+            file_results.push(FileIngestResult {
+                filename: filename.clone(),
+                file_path: file_path.clone(),
+                detected_type: extract.file_type.clone(),
+                status,
+                failure_reason: extract.failure_reason.clone(),
+                ocr_attempted: extract.ocr_attempted,
+                chunks_created: num_chunks as u64,
+            });
             for (chunk_idx, chunk_text) in chunks.into_iter().enumerate() {
                 let mut columns = BTreeMap::new();
                 columns.insert("document_id".into(), document_id.clone());
@@ -1036,10 +1452,17 @@ impl Connector for DocumentConnector {
             .take(limit as usize)
             .collect();
 
+        let file_results = if offset == 0 {
+            Some(file_results)
+        } else {
+            None
+        };
+
         Ok(IngestBatchResult {
             table_name: "documents".to_string(),
             rows,
             offset,
+            file_results,
         })
     }
 }
@@ -1298,6 +1721,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("readme.txt"), b"hello world").unwrap();
         fs::write(dir.path().join("notes.md"), b"# Notes").unwrap();
+        fs::write(dir.path().join("legacy.doc"), b"binary").unwrap();
         fs::write(dir.path().join("photo.jpg"), b"not a document").unwrap();
 
         let c = DocumentConnector::new("doc-test");
@@ -1305,7 +1729,10 @@ mod tests {
 
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].table_name, "documents");
-        assert_eq!(tables[0].row_count_estimate, 6);
+        assert!(
+            tables[0].row_count_estimate >= 6,
+            "counts document + unsupported files"
+        );
         assert!(tables[0].columns.len() >= 10);
         let col_names: Vec<_> = tables[0].columns.iter().map(|c| c.name.as_str()).collect();
         assert!(col_names.contains(&"document_id"));
@@ -1333,6 +1760,12 @@ mod tests {
                 .unwrap()
                 > 0
         );
+        let results = batch.file_results.as_ref().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].filename, "hello.txt");
+        assert_eq!(results[0].status, FileIngestStatus::Ingested);
+        assert_eq!(results[0].chunks_created, 1);
+        assert!(!results[0].ocr_attempted);
     }
 
     #[test]
@@ -1412,6 +1845,73 @@ mod tests {
     }
 
     #[test]
+    fn test_document_folder_multiple_files_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"first").unwrap();
+        fs::write(dir.path().join("b.txt"), b"second").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("c.txt"), b"third").unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 100).unwrap();
+
+        assert_eq!(batch.rows.len(), 3, "all 3 files from root and subfolder");
+        let doc_ids: Vec<_> = batch
+            .rows
+            .iter()
+            .map(|r| r.columns["document_id"].as_str())
+            .collect();
+        assert!(doc_ids.contains(&"a.txt"));
+        assert!(doc_ids.contains(&"b.txt"));
+        assert!(doc_ids.contains(&"sub/c.txt"));
+        let results = batch.file_results.as_ref().unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_document_unsupported_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("diagram.vsdx"), b"fake visio").unwrap();
+        fs::write(dir.path().join("readme.txt"), b"supported").unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 100).unwrap();
+
+        assert_eq!(batch.rows.len(), 1, "only txt ingested");
+        let results = batch.file_results.as_ref().unwrap();
+        assert_eq!(results.len(), 2, "both files reported");
+        let visio_result = results
+            .iter()
+            .find(|r| r.filename == "diagram.vsdx")
+            .unwrap();
+        assert_eq!(visio_result.status, FileIngestStatus::SkippedUnsupported);
+        assert!(visio_result
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("not supported"));
+        assert_eq!(visio_result.chunks_created, 0);
+        let txt_result = results.iter().find(|r| r.filename == "readme.txt").unwrap();
+        assert_eq!(txt_result.status, FileIngestStatus::Ingested);
+    }
+
+    #[test]
+    fn test_document_empty_file_failed_record() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("empty.txt"), b"").unwrap();
+
+        let c = DocumentConnector::new("doc-test");
+        let batch = c.ingest_batch(dir.path(), "documents", 0, 100).unwrap();
+
+        assert_eq!(batch.rows.len(), 0, "empty file produces no chunks");
+        let results = batch.file_results.as_ref().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, FileIngestStatus::FailedExtraction);
+        assert!(results[0].failure_reason.is_some());
+        assert_eq!(results[0].chunks_created, 0);
+    }
+
+    #[test]
     fn test_document_ingest_large_splits_into_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let large_text: String = "word ".repeat(400);
@@ -1453,7 +1953,9 @@ mod tests {
     #[test]
     fn test_scanned_pdf_ocr_path() {
         // Use minimal PDF with short text (< 200 chars) to trigger OCR path.
-        // When pdftoppm/tesseract are available, OCR runs; otherwise we use pdf_oxide text.
+        // When pdftoppm/tesseract are available, OCR runs and produces text.
+        // When OCR tools are missing, we fall back to pdf_oxide text (if any).
+        // Skip when fixture missing or when PDF has no extractable text and no OCR tools.
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")

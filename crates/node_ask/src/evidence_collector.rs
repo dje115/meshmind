@@ -337,9 +337,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         sqlite_views::create_schema(&conn).unwrap();
         conn.execute(
-            "INSERT INTO entities_view (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence, extraction_method, created_at_ms)
-             VALUES ('person:jane', 'person', 'Jane Doe', 'jane doe', 'doc1', 0, 0.9, 'rule', 1000),
-                    ('person:john', 'person', 'John Smith', 'john smith', 'doc1', 0, 0.9, 'rule', 1001)",
+            "INSERT INTO entities_view (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence, extraction_method, classification_method, created_at_ms)
+             VALUES ('person:jane', 'person', 'Jane Doe', 'jane doe', 'doc1', 0, 0.9, 'rule', 'rule_based', 1000),
+                    ('person:john', 'person', 'John Smith', 'john smith', 'doc1', 0, 0.9, 'rule', 'rule_based', 1001)",
             [],
         )
         .unwrap();

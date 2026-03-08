@@ -1239,6 +1239,42 @@ textarea {
   color: var(--text-muted);
 }
 
+/* Ingestion sub-tabs (inside debug panel) */
+.ingestion-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.ingestion-tab {
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ingestion-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ingestion-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.ingestion-subpanel {
+  display: none;
+}
+
+.ingestion-subpanel.active {
+  display: block;
+}
+
 .debug-panel pre {
   background: var(--bg-input);
   padding: 12px;

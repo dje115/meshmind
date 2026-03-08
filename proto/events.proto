@@ -36,6 +36,7 @@ enum EventType {
 
   // Entity intelligence graph
   ENTITY_RELATIONSHIP_RECORDED = 94;
+  EXTRACTED_RELATIONSHIP_RECORDED = 87;  // Document-derived entity-to-entity relationship
   EXTRACTED_ENTITY_RECORDED = 99;  // Document-derived entity (person, company, email, etc.)
 
   // Knowledge shards (distributed memory)
@@ -121,6 +122,7 @@ message EventEnvelope {
     DatasetManifestCreated dataset_manifest_created = 172;
 
     EntityRelationshipRecorded entity_relationship_recorded = 173;
+    ExtractedRelationshipRecorded extracted_relationship_recorded = 187;
     ExtractedEntityRecorded extracted_entity_recorded = 186;
 
     // Knowledge shards
@@ -325,6 +327,20 @@ message EntityRelationshipRecorded {
   string table_name = 5;
 }
 
+// Document-derived entity-to-entity relationship (extracted from chunks)
+message ExtractedRelationshipRecorded {
+  string relationship_id = 1;
+  string from_entity_id = 2;       // e.g. person:gavin-anthony
+  string from_entity_value = 9;    // raw value for display (e.g. Gavin Anthony)
+  string relationship_type = 3;    // works_for, for_customer, includes_product, etc.
+  string to_entity_id = 4;         // e.g. company:complete-cabling-systems-ltd
+  string to_entity_value = 10;     // raw value for display (e.g. Complete Cabling Systems Ltd)
+  string source_document_id = 5;
+  int32 chunk_index = 6;
+  float confidence = 7;            // 0.0–1.0
+  string extraction_method = 8;    // rule_based | llm_assisted | corrected
+}
+
 // Document-derived extracted entity (Phase B: entity extraction from chunks)
 message ExtractedEntityRecorded {
   string entity_id = 1;           // e.g. person:john-smith, email:john@example.com
@@ -335,6 +351,7 @@ message ExtractedEntityRecorded {
   int32 chunk_index = 6;          // chunk within document
   float confidence = 7;           // 0.0–1.0
   string extraction_method = 8;   // rule_based | llm_assisted
+  string classification_method = 9; // rule_based | vocabulary_lookup | llm_assisted | corrected
 }
 
 // Shard key format: tenant:X | entity_type:customer | site:UK | artifact_class:document | public

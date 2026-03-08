@@ -10,6 +10,7 @@ rusqlite = { workspace = true }
 node_policy = { workspace = true }
 node_ai = { path = "../node_ai" }
 node_connectors = { path = "../node_connectors" }
+node_ingest_contract = { path = "../node_ingest_contract" }
 node_extraction = { path = "../node_extraction" }
 tokio = { workspace = true }
 anyhow = { workspace = true }

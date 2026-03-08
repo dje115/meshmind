@@ -31,9 +31,98 @@ pub struct DebugEntityInfo {
     pub entity_value: String,
     pub normalized_value: String,
     pub extraction_method: String,
+    pub classification_method: String,
     pub confidence: f64,
     pub source_document_id: String,
     pub chunk_index: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugClassificationSummary {
+    pub rule_based: u64,
+    pub vocabulary_lookup: u64,
+    pub llm_assisted: u64,
+    pub corrected: u64,
+    pub unknown_count: u64,
+}
+
+/// Classification summary for a document's entities (counts by classification_method and unknown).
+pub fn list_debug_classification_summary(
+    conn: &Connection,
+    document_id: &str,
+) -> Result<DebugClassificationSummary, rusqlite::Error> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entities_view'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_table {
+        return Ok(DebugClassificationSummary {
+            rule_based: 0,
+            vocabulary_lookup: 0,
+            llm_assisted: 0,
+            corrected: 0,
+            unknown_count: 0,
+        });
+    }
+    let rule_based: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities_view WHERE document_id = ?1 AND classification_method = 'rule_based'",
+            [document_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let vocabulary_lookup: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities_view WHERE document_id = ?1 AND classification_method = 'vocabulary_lookup'",
+            [document_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let llm_assisted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities_view WHERE document_id = ?1 AND classification_method = 'llm_assisted'",
+            [document_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let corrected: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities_view WHERE document_id = ?1 AND classification_method = 'corrected'",
+            [document_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let unknown_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities_view WHERE document_id = ?1 AND entity_type = 'unknown'",
+            [document_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(DebugClassificationSummary {
+        rule_based: rule_based as u64,
+        vocabulary_lookup: vocabulary_lookup as u64,
+        llm_assisted: llm_assisted as u64,
+        corrected: corrected as u64,
+        unknown_count: unknown_count as u64,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugRelationshipInfo {
+    pub relationship_id: String,
+    pub from_entity_id: String,
+    pub from_entity_value: String,
+    pub relationship_type: String,
+    pub to_entity_id: String,
+    pub to_entity_value: String,
+    pub source_document_id: String,
+    pub chunk_index: i64,
+    pub confidence: f64,
+    pub extraction_method: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -266,7 +355,7 @@ pub fn list_debug_entities_for_document(
     document_id: &str,
 ) -> Result<Vec<DebugEntityInfo>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT entity_id, entity_type, entity_value, normalized_value, extraction_method, confidence, document_id, chunk_index
+        "SELECT entity_id, entity_type, entity_value, normalized_value, extraction_method, classification_method, confidence, document_id, chunk_index
          FROM entities_view
          WHERE document_id = ?1
          ORDER BY chunk_index, entity_type",
@@ -278,12 +367,146 @@ pub fn list_debug_entities_for_document(
             entity_value: row.get(2)?,
             normalized_value: row.get(3)?,
             extraction_method: row.get(4)?,
-            confidence: row.get(5)?,
-            source_document_id: row.get(6)?,
-            chunk_index: row.get(7)?,
+            classification_method: row.get(5)?,
+            confidence: row.get(6)?,
+            source_document_id: row.get(7)?,
+            chunk_index: row.get(8)?,
         })
     })?;
     rows.collect()
+}
+
+/// List relationships for a document.
+pub fn list_debug_relationships_for_document(
+    conn: &Connection,
+    document_id: &str,
+) -> Result<Vec<DebugRelationshipInfo>, rusqlite::Error> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='extracted_entity_relationships_view'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_table {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                to_entity_id, to_entity_value, source_document_id, chunk_index,
+                confidence, extraction_method
+         FROM extracted_entity_relationships_view
+         WHERE source_document_id = ?1
+         ORDER BY chunk_index, relationship_type",
+    )?;
+    let rows = stmt.query_map([document_id], |row| {
+        Ok(DebugRelationshipInfo {
+            relationship_id: row.get(0)?,
+            from_entity_id: row.get(1)?,
+            from_entity_value: row.get(2)?,
+            relationship_type: row.get(3)?,
+            to_entity_id: row.get(4)?,
+            to_entity_value: row.get(5)?,
+            source_document_id: row.get(6)?,
+            chunk_index: row.get(7)?,
+            confidence: row.get(8)?,
+            extraction_method: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// List relationships, optionally filtered by entity_type prefix and/or relationship_type.
+pub fn list_debug_relationships(
+    conn: &Connection,
+    entity_type: Option<&str>,
+    relationship_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<DebugRelationshipInfo>, rusqlite::Error> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='extracted_entity_relationships_view'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_table {
+        return Ok(vec![]);
+    }
+    let limit = limit.min(500) as i64;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(DebugRelationshipInfo {
+            relationship_id: row.get(0)?,
+            from_entity_id: row.get(1)?,
+            from_entity_value: row.get(2)?,
+            relationship_type: row.get(3)?,
+            to_entity_id: row.get(4)?,
+            to_entity_value: row.get(5)?,
+            source_document_id: row.get(6)?,
+            chunk_index: row.get(7)?,
+            confidence: row.get(8)?,
+            extraction_method: row.get(9)?,
+        })
+    };
+    match (entity_type, relationship_type) {
+        (Some(et), Some(rt)) => {
+            let prefix = format!("{}:", et);
+            let mut stmt = conn.prepare(
+                "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                        to_entity_id, to_entity_value, source_document_id, chunk_index,
+                        confidence, extraction_method
+                 FROM extracted_entity_relationships_view
+                 WHERE relationship_type = ?1
+                   AND (from_entity_id LIKE ?2 OR to_entity_id LIKE ?2)
+                 ORDER BY created_at_ms DESC
+                 LIMIT ?3",
+            )?;
+            let iter = stmt.query_map(
+                rusqlite::params![rt, format!("{}%", prefix), limit],
+                map_row,
+            )?;
+            iter.collect()
+        }
+        (Some(et), None) => {
+            let prefix = format!("{}:", et);
+            let mut stmt = conn.prepare(
+                "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                        to_entity_id, to_entity_value, source_document_id, chunk_index,
+                        confidence, extraction_method
+                 FROM extracted_entity_relationships_view
+                 WHERE from_entity_id LIKE ?1 OR to_entity_id LIKE ?1
+                 ORDER BY created_at_ms DESC
+                 LIMIT ?2",
+            )?;
+            let iter = stmt.query_map(rusqlite::params![format!("{}%", prefix), limit], map_row)?;
+            iter.collect()
+        }
+        (None, Some(rt)) => {
+            let mut stmt = conn.prepare(
+                "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                        to_entity_id, to_entity_value, source_document_id, chunk_index,
+                        confidence, extraction_method
+                 FROM extracted_entity_relationships_view
+                 WHERE relationship_type = ?1
+                 ORDER BY created_at_ms DESC
+                 LIMIT ?2",
+            )?;
+            let iter = stmt.query_map(rusqlite::params![rt, limit], map_row)?;
+            iter.collect()
+        }
+        (None, None) => {
+            let mut stmt = conn.prepare(
+                "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                        to_entity_id, to_entity_value, source_document_id, chunk_index,
+                        confidence, extraction_method
+                 FROM extracted_entity_relationships_view
+                 ORDER BY created_at_ms DESC
+                 LIMIT ?1",
+            )?;
+            let iter = stmt.query_map([limit], map_row)?;
+            iter.collect()
+        }
+    }
 }
 
 fn map_row_to_entity_info(row: &rusqlite::Row<'_>) -> Result<DebugEntityInfo, rusqlite::Error> {
@@ -293,9 +516,10 @@ fn map_row_to_entity_info(row: &rusqlite::Row<'_>) -> Result<DebugEntityInfo, ru
         entity_value: row.get(2)?,
         normalized_value: row.get(3)?,
         extraction_method: row.get(4)?,
-        confidence: row.get(5)?,
-        source_document_id: row.get(6)?,
-        chunk_index: row.get(7)?,
+        classification_method: row.get(5)?,
+        confidence: row.get(6)?,
+        source_document_id: row.get(7)?,
+        chunk_index: row.get(8)?,
     })
 }
 
@@ -320,7 +544,7 @@ pub fn list_debug_entities(
         Ok(rows)
     } else {
         let mut stmt = conn.prepare(
-            "SELECT entity_id, entity_type, entity_value, normalized_value, extraction_method, confidence, document_id, chunk_index
+            "SELECT entity_id, entity_type, entity_value, normalized_value, extraction_method, classification_method, confidence, document_id, chunk_index
              FROM entities_view
              ORDER BY created_at_ms DESC
              LIMIT ?1",
@@ -330,6 +554,88 @@ pub fn list_debug_entities(
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugVocabEntry {
+    pub normalized_phrase: String,
+    pub entity_type: String,
+    pub confidence: f64,
+    pub occurrence_count: i64,
+    pub source_method: String,
+}
+
+/// List vocabulary entries for debug inspection.
+pub fn list_debug_vocabulary(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<DebugVocabEntry>, rusqlite::Error> {
+    let limit = limit.min(500) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT normalized_phrase, entity_type, confidence, occurrence_count, source_method
+         FROM entity_vocabulary
+         ORDER BY last_seen DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok(DebugVocabEntry {
+            normalized_phrase: row.get(0)?,
+            entity_type: row.get(1)?,
+            confidence: row.get(2)?,
+            occurrence_count: row.get(3)?,
+            source_method: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Provenance for an evidence item (document chunk). Used by GET /v1/evidence/:id/source.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceSourceProvenance {
+    pub artifact_id: String,
+    pub document_id: String,
+    pub source_id: String,
+    pub source_locator: String,
+    pub source_open_target: String,
+    pub source_origin_label: String,
+    pub source_file: String,
+}
+
+/// Get provenance for an evidence item (artifact_id). Returns None if not a document chunk.
+pub fn get_evidence_source(
+    conn: &Connection,
+    artifact_id: &str,
+) -> Result<Option<EvidenceSourceProvenance>, rusqlite::Error> {
+    let has_cols: bool = conn
+        .prepare("PRAGMA table_info(document_chunks_view)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(names.contains(&"source_locator".to_string()))
+        })
+        .unwrap_or(false);
+    if !has_cols {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT artifact_id, document_id, source_id, source_locator, source_open_target, source_origin_label, source_file
+         FROM document_chunks_view WHERE artifact_id = ?1",
+    )?;
+    let mut rows = stmt.query([artifact_id])?;
+    if let Ok(Some(r)) = rows.next() {
+        return Ok(Some(EvidenceSourceProvenance {
+            artifact_id: r.get(0)?,
+            document_id: r.get(1)?,
+            source_id: r.get(2)?,
+            source_locator: r.get(3)?,
+            source_open_target: r.get(4)?,
+            source_origin_label: r.get(5)?,
+            source_file: r.get(6)?,
+        }));
+    }
+    Ok(None)
 }
 
 /// Get ask session by case_id.
@@ -436,6 +742,13 @@ pub fn store_entity_correction(
             created_at_ms,
         ],
     )?;
+    if !corrected_type.is_empty() {
+        let _ = crate::vocabulary::vocab_learn_correction(
+            conn,
+            &crate::vocabulary::normalize_phrase(corrected_value),
+            corrected_type,
+        );
+    }
     Ok(correction_id)
 }
 
@@ -526,8 +839,8 @@ mod tests {
     fn test_store_and_effective_entity_correction() {
         let conn = setup();
         conn.execute(
-            "INSERT INTO entities_view (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence, extraction_method, created_at_ms)
-             VALUES ('person:jane', 'person', 'Jane Doe', 'jane doe', 'doc1.pdf', 0, 0.9, 'rule_based', 1000)",
+            "INSERT INTO entities_view (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index, confidence, extraction_method, classification_method, created_at_ms)
+             VALUES ('person:jane', 'person', 'Jane Doe', 'jane doe', 'doc1.pdf', 0, 0.9, 'rule_based', 'rule_based', 1000)",
             [],
         )
         .unwrap();

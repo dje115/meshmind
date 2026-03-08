@@ -53,6 +53,11 @@ fn normalize_company_suffix(s: &str) -> String {
     collapse_whitespace(&s)
 }
 
+/// Normalize a phrase for vocabulary lookup (lowercase, collapse whitespace).
+pub fn normalize_phrase_for_vocab(s: &str) -> String {
+    collapse_whitespace(s.trim()).to_lowercase()
+}
+
 /// Stable hash of normalized value for entity_id when value is very long.
 #[allow(dead_code)]
 pub fn hash_for_id(s: &str) -> u64 {

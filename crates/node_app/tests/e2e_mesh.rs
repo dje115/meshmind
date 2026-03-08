@@ -78,6 +78,7 @@ fn create_node_state(
         federated_rounds: Arc::new(RwLock::new(std::collections::HashMap::new())),
         federated_config: node_federated::FederatedConfig::new("router"),
         federated_policy: policy,
+        ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     (state, tmp)

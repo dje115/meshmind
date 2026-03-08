@@ -247,6 +247,25 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (from_entity_id, to_entity_id, relationship_type)
         );
 
+        -- Document-derived entity-to-entity relationships (extracted from chunks)
+        CREATE TABLE IF NOT EXISTS extracted_entity_relationships_view (
+            relationship_id     TEXT NOT NULL PRIMARY KEY,
+            from_entity_id      TEXT NOT NULL,
+            from_entity_value   TEXT NOT NULL DEFAULT '',
+            relationship_type  TEXT NOT NULL,
+            to_entity_id       TEXT NOT NULL,
+            to_entity_value    TEXT NOT NULL DEFAULT '',
+            source_document_id TEXT NOT NULL,
+            chunk_index        INTEGER NOT NULL,
+            confidence         REAL NOT NULL DEFAULT 0.0,
+            extraction_method  TEXT NOT NULL DEFAULT 'rule_based',
+            created_at_ms      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_extracted_rel_from ON extracted_entity_relationships_view(from_entity_id);
+        CREATE INDEX IF NOT EXISTS idx_extracted_rel_to ON extracted_entity_relationships_view(to_entity_id);
+        CREATE INDEX IF NOT EXISTS idx_extracted_rel_type ON extracted_entity_relationships_view(relationship_type);
+        CREATE INDEX IF NOT EXISTS idx_extracted_rel_doc ON extracted_entity_relationships_view(source_document_id);
+
         -- Type-specific views (aliases for entity_cards_view)
         CREATE VIEW IF NOT EXISTS customers_view AS
             SELECT * FROM entity_cards_view WHERE entity_type = 'customer';
@@ -262,19 +281,32 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 
         -- Extracted entities from document chunks (Phase B)
         CREATE TABLE IF NOT EXISTS entities_view (
-            entity_id         TEXT NOT NULL,
-            entity_type       TEXT NOT NULL,
-            entity_value      TEXT NOT NULL,
-            normalized_value  TEXT NOT NULL,
-            document_id       TEXT NOT NULL,
-            chunk_index       INTEGER NOT NULL,
-            confidence        REAL NOT NULL DEFAULT 0.0,
-            extraction_method TEXT NOT NULL DEFAULT 'rule_based',
-            created_at_ms     INTEGER NOT NULL,
+            entity_id              TEXT NOT NULL,
+            entity_type            TEXT NOT NULL,
+            entity_value           TEXT NOT NULL,
+            normalized_value       TEXT NOT NULL,
+            document_id            TEXT NOT NULL,
+            chunk_index            INTEGER NOT NULL,
+            confidence             REAL NOT NULL DEFAULT 0.0,
+            extraction_method      TEXT NOT NULL DEFAULT 'rule_based',
+            classification_method  TEXT NOT NULL DEFAULT 'rule_based',
+            created_at_ms          INTEGER NOT NULL,
             PRIMARY KEY (entity_id, document_id, chunk_index)
         );
         CREATE INDEX IF NOT EXISTS idx_entities_view_type ON entities_view(entity_type);
         CREATE INDEX IF NOT EXISTS idx_entities_view_normalized ON entities_view(normalized_value, entity_type);
+
+        -- Vocabulary: learned phrase -> entity_type for classification reuse
+        CREATE TABLE IF NOT EXISTS entity_vocabulary (
+            normalized_phrase   TEXT NOT NULL PRIMARY KEY,
+            entity_type         TEXT NOT NULL,
+            confidence          REAL NOT NULL DEFAULT 0.0,
+            first_seen          INTEGER NOT NULL,
+            last_seen           INTEGER NOT NULL,
+            occurrence_count    INTEGER NOT NULL DEFAULT 1,
+            source_method       TEXT NOT NULL DEFAULT 'rule_based'
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_vocabulary_type ON entity_vocabulary(entity_type);
 
         CREATE TABLE IF NOT EXISTS documents_entities_view (
             document_id       TEXT NOT NULL,
@@ -297,6 +329,9 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             page_number       INTEGER NOT NULL DEFAULT 0,
             ocr_used          INTEGER NOT NULL DEFAULT 0,
             source_id         TEXT NOT NULL DEFAULT '',
+            source_locator    TEXT NOT NULL DEFAULT '',
+            source_open_target TEXT NOT NULL DEFAULT '',
+            source_origin_label TEXT NOT NULL DEFAULT '',
             created_at_ms     INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_document_chunks_doc ON document_chunks_view(document_id);
@@ -347,8 +382,26 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
                  ORDER BY c.created_at_ms DESC LIMIT 1),
                 e.normalized_value
             ) AS normalized_value,
-            e.document_id, e.chunk_index, e.confidence, e.extraction_method, e.created_at_ms
+            e.document_id, e.chunk_index, e.confidence, e.extraction_method,
+            CASE WHEN (SELECT 1 FROM corrections_view c WHERE c.target_document_id = e.document_id AND c.target_entity_id = e.entity_id AND c.target_chunk_index = e.chunk_index AND c.correction_type = 'entity' AND c.is_valid = 1 LIMIT 1) IS NOT NULL THEN 'corrected' ELSE e.classification_method END AS classification_method,
+            e.created_at_ms
         FROM entities_view e;
+
+        -- Per-file ingest results (document folder ingestion)
+        CREATE TABLE IF NOT EXISTS ingest_file_results (
+            ingest_id        TEXT NOT NULL,
+            source_id        TEXT NOT NULL,
+            filename         TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            detected_type    TEXT NOT NULL DEFAULT '',
+            status           TEXT NOT NULL DEFAULT '',
+            failure_reason   TEXT,
+            ocr_attempted    INTEGER NOT NULL DEFAULT 0,
+            chunks_created   INTEGER NOT NULL DEFAULT 0,
+            created_at_ms    INTEGER NOT NULL,
+            PRIMARY KEY (ingest_id, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ingest_file_results_source ON ingest_file_results(source_id);
 
         CREATE TABLE IF NOT EXISTS debug_ask_sessions (
             case_id           TEXT NOT NULL PRIMARY KEY,
@@ -367,6 +420,13 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE VIEW IF NOT EXISTS companies_view AS
             SELECT * FROM entities_view WHERE entity_type = 'company';
+
+        -- Effective entity relationships (for future corrections; mirrors extracted for now)
+        CREATE VIEW IF NOT EXISTS effective_entity_relationships_view AS
+            SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                   to_entity_id, to_entity_value, source_document_id, chunk_index,
+                   confidence, extraction_method, created_at_ms
+            FROM extracted_entity_relationships_view;
 
         -- Knowledge shards (distributed memory)
         CREATE TABLE IF NOT EXISTS shards_view (
@@ -532,6 +592,8 @@ pub fn open_db(path: &std::path::Path) -> Result<Connection> {
     migrate_artifacts_summary(&conn)?;
     migrate_source_profiles_mapping(&conn)?;
     migrate_debug_tables(&conn)?;
+    migrate_document_chunks_provenance(&conn)?;
+    migrate_entities_classification_and_vocabulary(&conn)?;
     create_schema(&conn)?;
     Ok(conn)
 }
@@ -573,6 +635,9 @@ fn migrate_debug_tables(conn: &Connection) -> Result<()> {
                 page_number INTEGER NOT NULL DEFAULT 0,
                 ocr_used INTEGER NOT NULL DEFAULT 0,
                 source_id TEXT NOT NULL DEFAULT '',
+                source_locator TEXT NOT NULL DEFAULT '',
+                source_open_target TEXT NOT NULL DEFAULT '',
+                source_origin_label TEXT NOT NULL DEFAULT '',
                 created_at_ms INTEGER NOT NULL
             )",
         ),
@@ -619,6 +684,83 @@ fn migrate_debug_tables(conn: &Connection) -> Result<()> {
             conn.execute(sql, [])?;
         }
     }
+    Ok(())
+}
+
+/// Add source provenance columns to document_chunks_view for "Open original" / "Where did this come from?"
+fn migrate_document_chunks_provenance(conn: &Connection) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_chunks_view'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !exists {
+        return Ok(());
+    }
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(document_chunks_view)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for col in ["source_locator", "source_open_target", "source_origin_label"] {
+        if !cols.contains(&col.to_string()) {
+            let _ = conn.execute(
+                &format!(
+                    "ALTER TABLE document_chunks_view ADD COLUMN {} TEXT NOT NULL DEFAULT ''",
+                    col
+                ),
+                [],
+            );
+        }
+    }
+    Ok(())
+}
+
+fn migrate_entities_classification_and_vocabulary(conn: &Connection) -> Result<()> {
+    let entities_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entities_view'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|_| true)
+        .unwrap_or(false);
+
+    if entities_exists {
+        let has_classification: bool = conn
+            .prepare("PRAGMA table_info(entities_view)")
+            .and_then(|mut stmt| {
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(names.contains(&"classification_method".to_string()))
+            })
+            .unwrap_or(false);
+
+        if !has_classification {
+            conn.execute(
+                "ALTER TABLE entities_view ADD COLUMN classification_method TEXT NOT NULL DEFAULT 'rule_based'",
+                [],
+            )?;
+            conn.execute("DROP VIEW IF EXISTS effective_entities_view", [])?;
+        }
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_vocabulary (
+            normalized_phrase   TEXT NOT NULL PRIMARY KEY,
+            entity_type         TEXT NOT NULL,
+            confidence          REAL NOT NULL DEFAULT 0.0,
+            first_seen          INTEGER NOT NULL,
+            last_seen           INTEGER NOT NULL,
+            occurrence_count    INTEGER NOT NULL DEFAULT 1,
+            source_method       TEXT NOT NULL DEFAULT 'rule_based'
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_vocabulary_type ON entity_vocabulary(entity_type);",
+    )?;
     Ok(())
 }
 

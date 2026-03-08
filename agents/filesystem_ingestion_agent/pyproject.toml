@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meshmind-filesystem-ingestion-agent"
+version = "0.1.0"
+description = "Local-only filesystem ingestion agent for MeshMind"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]

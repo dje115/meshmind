@@ -233,11 +233,23 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                                     &chunk_idx,
                                     chunk_text,
                                 )?;
-                                // Populate document_chunks_view for debug (OCR, source_file, etc.)
+                                // Populate document_chunks_view for debug (OCR, source_file, provenance)
                                 let source_file = attrs
                                     .get("source_file")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
+                                let source_locator = attrs
+                                    .get("source_locator")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(source_file);
+                                let source_open_target = attrs
+                                    .get("source_open_target")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let source_origin_label = attrs
+                                    .get("source_origin_label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(source_file);
                                 let page_number: i64 = attrs
                                     .get("page_number")
                                     .and_then(|v| v.as_str().and_then(|s| s.parse().ok()))
@@ -254,8 +266,8 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                                 let chunk_idx_int: i64 = chunk_idx.parse().unwrap_or(0);
                                 let _ = conn.execute(
                                     "INSERT OR REPLACE INTO document_chunks_view
-                                     (artifact_id, document_id, chunk_index, chunk_text, source_file, page_number, ocr_used, source_id, created_at_ms)
-                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                     (artifact_id, document_id, chunk_index, chunk_text, source_file, page_number, ocr_used, source_id, source_locator, source_open_target, source_origin_label, created_at_ms)
+                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                                     params![
                                         ap.artifact_id,
                                         doc_id,
@@ -265,6 +277,9 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                                         page_number,
                                         ocr_used,
                                         ap.source_ref,
+                                        source_locator,
+                                        source_open_target,
+                                        source_origin_label,
                                         ts,
                                     ],
                                 );
@@ -664,13 +679,45 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                     ],
                 )?;
             }
+            Payload::ExtractedRelationshipRecorded(er) => {
+                let extraction_method = if er.extraction_method.is_empty() {
+                    "rule_based"
+                } else {
+                    er.extraction_method.as_str()
+                };
+                conn.execute(
+                    "INSERT OR REPLACE INTO extracted_entity_relationships_view
+                     (relationship_id, from_entity_id, from_entity_value, relationship_type,
+                      to_entity_id, to_entity_value, source_document_id, chunk_index,
+                      confidence, extraction_method, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        er.relationship_id,
+                        er.from_entity_id,
+                        er.from_entity_value,
+                        er.relationship_type,
+                        er.to_entity_id,
+                        er.to_entity_value,
+                        er.source_document_id,
+                        er.chunk_index,
+                        er.confidence,
+                        extraction_method,
+                        ts,
+                    ],
+                )?;
+            }
             Payload::ExtractedEntityRecorded(ee) => {
                 let doc_entity_id = format!("document:{}", ee.source_document_id);
+                let classification_method = if ee.classification_method.is_empty() {
+                    "rule_based"
+                } else {
+                    ee.classification_method.as_str()
+                };
                 conn.execute(
                     "INSERT OR REPLACE INTO entities_view
                      (entity_id, entity_type, entity_value, normalized_value, document_id, chunk_index,
-                      confidence, extraction_method, created_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                      confidence, extraction_method, classification_method, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         ee.entity_id,
                         ee.entity_type,
@@ -680,6 +727,7 @@ pub fn apply_event(conn: &Connection, event: &EventEnvelope) -> Result<()> {
                         ee.chunk_index,
                         ee.confidence,
                         ee.extraction_method,
+                        classification_method,
                         ts,
                     ],
                 )?;
@@ -984,6 +1032,12 @@ fn event_summary(event: &EventEnvelope) -> String {
             format!(
                 "entity relationship: {} -[{}]-> {}",
                 err.from_entity_id, err.relationship_type, err.to_entity_id
+            )
+        }
+        Some(Payload::ExtractedRelationshipRecorded(er)) => {
+            format!(
+                "extracted relationship: {} -[{}]-> {}",
+                er.from_entity_id, er.relationship_type, er.to_entity_id
             )
         }
         Some(Payload::ExtractedEntityRecorded(ee)) => {
@@ -1543,6 +1597,68 @@ mod tests {
         assert_eq!(from_id, "invoice:inv001");
         assert_eq!(to_id, "customer:cust-1");
         assert_eq!(rel_type, "belongs_to_customer");
+    }
+
+    #[test]
+    fn project_extracted_relationship_recorded() {
+        let conn = setup();
+        apply_event(
+            &conn,
+            &make_event(
+                "e1",
+                Payload::ExtractedRelationshipRecorded(ExtractedRelationshipRecorded {
+                    relationship_id: "rel-abc123".into(),
+                    from_entity_id: "person:gavin-anthony".into(),
+                    from_entity_value: "Gavin Anthony".into(),
+                    relationship_type: "works_for".into(),
+                    to_entity_id: "company:complete-cabling-systems-ltd".into(),
+                    to_entity_value: "Complete Cabling Systems Ltd".into(),
+                    source_document_id: "doc1.pdf".into(),
+                    chunk_index: 0,
+                    confidence: 0.85,
+                    extraction_method: "rule_based".into(),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let (rel_id, from_id, from_val, rel_type, to_id, to_val, doc_id, method): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT relationship_id, from_entity_id, from_entity_value, relationship_type,
+                         to_entity_id, to_entity_value, source_document_id, extraction_method
+                 FROM extracted_entity_relationships_view WHERE relationship_id = 'rel-abc123'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(rel_id, "rel-abc123");
+        assert_eq!(from_id, "person:gavin-anthony");
+        assert_eq!(from_val, "Gavin Anthony");
+        assert_eq!(rel_type, "works_for");
+        assert_eq!(to_id, "company:complete-cabling-systems-ltd");
+        assert_eq!(to_val, "Complete Cabling Systems Ltd");
+        assert_eq!(doc_id, "doc1.pdf");
+        assert_eq!(method, "rule_based");
     }
 
     #[test]

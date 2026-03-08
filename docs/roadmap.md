@@ -100,7 +100,21 @@
 
 ---
 
-**Current status**: All phases complete (v2 spec + Internet Mode + BI extensions).
+**Current status**: All phases complete (v2 spec + Internet Mode + BI extensions + Ingestion Agents).
+
+## Ingestion Agents (Phases 0–12)
+
+| Phase | Description |
+|-------|-------------|
+| 0 | Design / gap review — INGESTION_AGENT_ARCHITECTURE.md |
+| 1 | Normalized IngestedItem contract (node_ingest_contract) |
+| 2 | Python filesystem ingestion agent (agents/filesystem_ingestion_agent/) |
+| 3 | Watcher, extraction pipeline, publisher |
+| 4–6 | Core ingest API (POST /v1/ingest/items/batch), SSE progress |
+| 7–8 | One-shot flow, debug ingest endpoints, Ingestion tab |
+| 9 | Source provenance (source_locator, source_open_target) in evidence |
+| 10 | Source agents documentation (XeroAgent, OutlookAgent) |
+| 11–12 | Testing, documentation updates |
 
 ## BI Extensions (Phases 2–9)
 
@@ -118,6 +132,9 @@
 **API endpoints implemented**:
 - GET /status, /peers, /search, /insights, /admin/sources, /admin/models, /admin/datasets, /admin/logs
 - POST /ask, /ask/confirm, /admin/event, /admin/sources/approve, /admin/train, /admin/models/rollback
+- POST /v1/ingest/items/batch — IngestedItem batch from source agents
+- GET /v1/ingest/stream — SSE ingest progress
+- GET /v1/evidence/:id/source, GET /v1/source-items/:id — Source provenance
 
 **Crate summary (19 crates)**:
 | Crate | Purpose | Tests |

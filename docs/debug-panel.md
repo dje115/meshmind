@@ -15,8 +15,14 @@ The Debug Panel provides inspection capabilities for document ingestion, OCR sta
 | `GET /v1/debug/documents/:id` | Detailed document metadata, chunks, entities |
 | `GET /v1/debug/documents/:id/chunks` | Chunk list with previews, OCR status, page numbers |
 | `GET /v1/debug/documents/:id/entities` | Entities extracted from the document |
+| `GET /v1/debug/ingest-results?source_id=X` | Per-file ingest results (ingested, skipped, failed) |
+| `GET /v1/debug/ingest/sources` | List sources with last ingest status |
+| `GET /v1/debug/ingest/jobs` | List ingest jobs (ingests_view) |
+| `GET /v1/debug/ingest/items?source_id=&ingest_id=&limit=` | Per-file items from ingest_file_results |
+| `GET /v1/debug/ingest/items/:id` | Single ingest item by file_path or filename |
 | `GET /v1/debug/ask/:case_id` | Ask session: question, plan, evidence, confidence, source types |
 | `GET /v1/debug/entities?entity_type=X` | List entities, optionally filtered by type |
+| `GET /v1/debug/vocabulary?limit=N` | Learned phrase → type vocabulary (phrase, entity_type, confidence, occurrence_count, source_method) |
 
 ## Inspecting OCR Results
 
@@ -28,10 +34,42 @@ When a scanned PDF is ingested with OCR fallback:
 
 If `document_chunks_view` is empty (older ingest), the API falls back to `documents_fts` (no OCR metadata).
 
+## Ingestion Tab
+
+The **Ingestion** tab (Debug panel) shows sources, jobs, and per-file items:
+
+- **Sources** — All sources with last ingest status
+- **Jobs** — Ingest jobs from `ingests_view`
+- **Items** — Per-file results with optional source filter
+
+## Inspecting Ingest Results
+
+The **Ingest Results** tab shows per-file status from the last document folder ingest:
+
+- **filename**, **detected_type** — File and format
+- **status** — `ingested`, `skipped_unsupported`, `failed_extraction`, `failed_ocr`, `failed_unknown`
+- **ocr_attempted** — Whether OCR was tried (scanned PDFs)
+- **chunks_created** — Number of chunks produced
+- **failure_reason** — When status is failed, the reason (e.g. "OCR failed", "Format not supported")
+
+Select a document source from the dropdown and click Load. See [ingestion.md](ingestion.md) for supported formats and failure reporting.
+
 ## Inspecting Chunks and Entities
 
 - **Chunks**: `chunk_text_preview` (first 200 chars), `source_file`, `page_number`, `ocr_used`.
-- **Entities**: `entity_type`, `entity_value`, `normalized_value`, `extraction_method`, `confidence`, `source_document_id`, `chunk_index`.
+- **Entities**: `entity_type`, `entity_value`, `normalized_value`, `extraction_method`, `classification_method` (rule_based | vocabulary_lookup | llm_assisted | corrected), `confidence`, `source_document_id`, `chunk_index`.
+
+## Classification Summary and LLM Usage
+
+The **document detail** (`GET /v1/debug/documents/:id`) includes a `classification_summary` object:
+
+- **rule_based** — Count of entities classified by strong rules or context-aware heuristics.
+- **vocabulary_lookup** — Count classified by learned vocabulary.
+- **llm_assisted** — Count classified by the LLM (when unknown entities reached the LLM helper).
+- **corrected** — Count with user corrections.
+- **unknown_count** — Count still unresolved (entity_type = unknown).
+
+Use this to verify that the LLM classifier is being used: when `llm_assisted` &gt; 0, unknown entities are reaching the LLM and being resolved. If `unknown_count` is high and `llm_assisted` is 0, check that an inference backend is configured and `enable_llm_entity_extraction` is true (default).
 
 ## Inspecting Ask Plan and Evidence
 

@@ -38,7 +38,7 @@ A production-grade, local-first, cross-platform distributed AI node system built
 - **Document Intelligence** — Chunking for long documents (1500 chars, 200 overlap), full chunk text in FTS5, entity extraction (people, companies, emails, phones, money, invoices) with optional LLM augmentation
 - **Peer-to-Peer Mesh** — mDNS LAN discovery, membership states (Alive/Suspect/Dead/Quarantined), pull-based replication
 - **Policy Engine** — Tenant isolation, sensitivity levels, default-deny replication, ingestion approval, column redaction, dataset presets
-- **Data Pipeline** — Connectors: SQLite, CSV, JSON, Document (PDF/DOCX/TXT/MD), Image (EXIF), OneDrive; schema inspection, PII/secrets classification, batched ingestion with checkpointing
+- **Data Pipeline** — Connectors: SQLite, CSV, JSON, Document (PDF/DOCX/TXT/MD), Image (EXIF), OneDrive; schema inspection, PII/secrets classification, batched ingestion with checkpointing; **source agents** (filesystem ingestion agent) POST normalized IngestedItem batches via `POST /v1/ingest/items/batch`
 - **Dataset Manifests** — Reproducible training datasets with 5 presets, provenance tracking, CAS-stored manifests
 - **Pluggable AI Inference** — Swap backends at runtime (Ollama, mock, future: llama.cpp)
 - **Peer Consult** — ASK/ANSWER forwarding across nodes with budget enforcement (TTL hops, deadlines, context limits)
@@ -97,7 +97,7 @@ Full documentation is in `docs/`. See **[docs/DOCUMENTATION_INDEX.md](docs/DOCUM
 | [Architecture](docs/architecture/overview.md) | Overview, storage, event log, CAS, replication, mesh, security |
 | [Document Intelligence](docs/document-intelligence.md) | Chunking, FTS5 indexing, entity extraction (Phase A+B) |
 | [Entity Graph](docs/entity-graph.md) | Document-derived entities, rule-based/LLM extraction, queries |
-| [Ingestion](docs/ingestion/discovery.md) | Discovery, connectors, normalization, entity cards |
+| [Ingestion](docs/ingestion/discovery.md) | Discovery, connectors, normalization, entity cards, [ingestion agents](docs/INGESTION_AGENT_ARCHITECTURE.md), [source provenance](docs/source-provenance.md) |
 | [Intelligence](docs/intelligence/business-intelligence.md) | Business intelligence, training, router/tagger/ranker models |
 | [Workflows](docs/workflows/ask-flow.md) | Ask flow, web research, peer consult, dataset manifests |
 | [Use Cases](docs/use-cases/quoting.md) | Quoting, customer intelligence, accounting, operations |
@@ -448,6 +448,20 @@ Roll back a model to a previous version.
 #### `GET /admin/datasets`
 List all dataset manifests with source, preset, item count, and size.
 
+### Ingestion & Source Provenance
+
+#### `POST /v1/ingest/items/batch`
+Accept a batch of `IngestedItem` from source agents (e.g. filesystem ingestion agent). Requires admin auth.
+
+#### `GET /v1/ingest/stream`
+SSE stream for ingest progress (optional live status).
+
+#### `GET /v1/evidence/:id/source`
+Provenance for an evidence artifact (source_locator, source_open_target). Admin auth.
+
+#### `GET /v1/source-items/:id`
+Lookup source item by document_id or file path. Admin auth.
+
 ---
 
 ## Testing
@@ -563,6 +577,8 @@ meshmind/
 │   ├── use-cases/            # Quoting, customer, accounting, operations
 │   ├── operations/           # Configuration, snapshots, recovery, scaling
 │   └── development/          # Crate architecture, adding connectors/models, testing
+├── agents/
+│   └── filesystem_ingestion_agent/   # Python agent: scan, extract, publish IngestedItem
 ├── proto/
 │   ├── common.proto          # Shared types
 │   ├── cas.proto             # CAS object headers
@@ -736,6 +752,7 @@ See [docs/roadmap.md](docs/roadmap.md) for detailed progress. For documentation 
 | 15. Tauri UI | Done | 7-page desktop app, dark theme, status polling |
 | 16. Internet Mode | Done | Rendezvous + relay server, WAN discovery, HybridTransport — 12 tests |
 | 17. Document Entity Extraction (Phase B) | Done | Entity extraction from chunks (person, company, email, phone, money, invoice), entities_view, optional LLM augmentation |
+| Ingestion Agents (Phases 0–12) | Done | Filesystem agent, IngestedItem contract, source provenance, POST /v1/ingest/items/batch |
 
 ---
 

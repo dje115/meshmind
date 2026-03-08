@@ -38,7 +38,14 @@ pub trait Connector: Send + Sync {
 
 ---
 
+## Legacy vs Source Agents
+
+**Legacy connectors** (DocumentConnector, CsvFolderConnector, etc.) run inside MeshMind core and are triggered by `POST /admin/ingest` with a source_id. They use the `Connector` trait above.
+
+**Source agents** (e.g. `agents/filesystem_ingestion_agent/`) are separate processes that POST normalized `IngestedItem` to `POST /v1/ingest/items/batch`. They own extraction, chunking, and provenance. See [source-agents.md](./source-agents.md).
+
 ## References
 
 - `crates/node_connectors` — Existing connectors
 - [docs/ingestion/connectors.md](../ingestion/connectors.md) — Connector interface
+- [source-agents.md](./source-agents.md) — Source agent pattern
