@@ -1360,9 +1360,13 @@ async function renderDebug(el) {
         <div class="card-header"><span class="card-title">Ingestion Overview</span></div>
         <p class="text-muted" style="margin-bottom:12px">Sources, jobs, and per-file items. Agent ingest and legacy connector results.</p>
         <div class="ingestion-tabs">
+          <button class="ingestion-tab" data-subtab="agent">Agent</button>
           <button class="ingestion-tab active" data-subtab="sources">Sources</button>
           <button class="ingestion-tab" data-subtab="jobs">Jobs</button>
           <button class="ingestion-tab" data-subtab="items">Items</button>
+        </div>
+        <div id="ingestion-agent" class="ingestion-subpanel">
+          <div id="ingestion-agent-body"><div class="empty-state"><div class="empty-state-text">Loading…</div></div></div>
         </div>
         <div id="ingestion-sources" class="ingestion-subpanel active">
           <div id="ingestion-sources-body"><div class="spinner"></div></div>
@@ -1452,10 +1456,57 @@ async function renderDebug(el) {
       tab.classList.add('active');
       const subId = 'ingestion-' + tab.dataset.subtab;
       document.getElementById(subId)?.classList.add('active');
+      if (tab.dataset.subtab === 'agent') loadIngestionAgent();
       if (tab.dataset.subtab === 'sources') loadIngestionSources();
       if (tab.dataset.subtab === 'jobs') loadIngestionJobs();
     });
   });
+
+  async function loadIngestionAgent() {
+    const body = document.getElementById('ingestion-agent-body');
+    if (!body) return;
+    body.innerHTML = '<div class="spinner"></div>';
+    try {
+      const s = await api.getIngestAgentStatus();
+      const running = s.status === 'running';
+      const available = s.agent_available === true;
+      body.innerHTML = `
+        <div class="form-group" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span><strong>Status:</strong> ${running ? '<span class="badge badge-green">Running</span>' : '<span class="badge badge-muted">Stopped</span>'}</span>
+            <span class="text-muted">Agent ${available ? 'available' : 'not configured'}</span>
+            ${available ? `
+              <button type="button" class="btn ${running ? 'btn-secondary' : 'btn-primary'}" id="ingestion-agent-start" ${running ? 'disabled' : ''}>Start</button>
+              <button type="button" class="btn ${running ? 'btn-secondary' : 'btn-primary'}" id="ingestion-agent-stop" ${!running ? 'disabled' : ''}>Stop</button>
+            ` : ''}
+          </div>
+          <p class="text-muted" style="margin-top:8px;font-size:12px">Filesystem ingestion agent watches folders and publishes to core. Configure [[agent_sources]] in meshmind.toml.</p>
+        </div>
+      `;
+      document.getElementById('ingestion-agent-start')?.addEventListener('click', async () => {
+        try {
+          await api.startIngestAgent();
+          toast('Agent started', 'success');
+          loadIngestionAgent();
+        } catch (e) {
+          toast(e.message || 'Failed to start agent', 'error');
+          loadIngestionAgent();
+        }
+      });
+      document.getElementById('ingestion-agent-stop')?.addEventListener('click', async () => {
+        try {
+          await api.stopIngestAgent();
+          toast('Agent stopped', 'success');
+          loadIngestionAgent();
+        } catch (e) {
+          toast(e.message || 'Failed to stop agent', 'error');
+          loadIngestionAgent();
+        }
+      });
+    } catch (e) {
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">${escapeHtml(e.message)}</div></div>`;
+    }
+  }
 
   async function loadIngestionSources() {
     const body = document.getElementById('ingestion-sources-body');

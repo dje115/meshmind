@@ -88,7 +88,7 @@ recursion = true
 
 ## Ingestion Agent Service Control
 
-The main app can start and stop the filesystem ingestion agent (watch mode):
+The main app can start and stop the filesystem ingestion agent (watch mode). See [agent-lifecycle.md](agent-lifecycle.md) for full lifecycle and troubleshooting.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

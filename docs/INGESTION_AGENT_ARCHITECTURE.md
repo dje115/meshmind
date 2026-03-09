@@ -187,13 +187,15 @@ Each agent:
 ### Primary: HTTP/JSON
 
 - **Why**: Language-neutral, transport-neutral, easy to test, firewall-friendly for localhost
-- **Endpoints** (to be implemented):
+- **Endpoints** (implemented):
   - `POST /v1/ingest/jobs` — Start ingest job
   - `POST /v1/ingest/items` — Submit single normalized item
-  - `POST /v1/ingest/items/batch` — Submit batch
+  - `POST /v1/ingest/items/batch` — Submit batch (used by agent)
   - `GET /v1/ingest/status` — Job status
+  - `GET /v1/ingest/stream` — SSE stream for progress
   - `GET /v1/ingest/sources` — Watched sources
   - `GET /v1/ingest/results` — Per-item results
+  - `GET /v1/ingest/agent/config` — Agent sources (admin)
 
 ### Secondary: SSE (or WebSocket)
 
@@ -236,6 +238,19 @@ Each emits the same `IngestedItem` shape with:
 - `source_locator`: machine-readable reference (path, id, key)
 - `source_open_target`: how to open original (file://, outlook://, xero://, etc.)
 - `source_origin_label`: human-readable origin
+
+### SourceAgent abstraction (future)
+
+Future agents can implement a common pattern:
+
+1. **Config**: Fetch from `GET /v1/ingest/agent/config` (main app returns `agent_sources` per agent type)
+2. **Discover**: List items from source (API, folder, mailbox, etc.)
+3. **Extract**: Read content locally; optionally use ingestion-time LLM
+4. **Normalize**: Produce `IngestedItem[]` with full provenance
+5. **Publish**: `POST /v1/ingest/items/batch`
+6. **Watch**: Poll or subscribe for changes; repeat discover→extract→normalize→publish
+
+The main app config may extend `[[agent_sources]]` with `agent_type` (e.g. `filesystem`, `xero`) so each agent only receives its relevant sources.
 
 ---
 
@@ -334,9 +349,10 @@ The agent is a **child process** or **supervised service** of the main app, not 
 The filesystem ingestion agent (`agents/filesystem_ingestion_agent/`):
 
 - **One-shot**: `python main.py --one-shot /path/to/folder [--source-id src-1]`
-- **Watch**: `--watch` (TODO: full implementation)
-- **Config**: Currently CLI/env (`WATCH_DIRS`, `MESHMIND_API_URL`, `MESHMIND_ADMIN_TOKEN`)
-- **Target**: Fetches config from main app via `GET /v1/ingest/agent/config` (to be implemented)
+- **Config-from-API**: `--config-from-api` — fetches sources from main app, runs one-shot per source
+- **Watch**: `--watch` — runs filesystem watcher, fetches config from `GET /v1/ingest/agent/config`
+- **Config**: Main app owns `[[agent_sources]]` in meshmind.toml; agent fetches via config API
+- **Env**: `MESHMIND_API_URL`, `MESHMIND_ADMIN_TOKEN`
 - **Publish**: POSTs `IngestedItem` to `POST /v1/ingest/items/batch`
 
 ---

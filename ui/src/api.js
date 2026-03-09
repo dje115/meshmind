@@ -169,6 +169,9 @@ export const api = {
     return request('GET', `/debug/ingest/items${q ? '?' + q : ''}`);
   },
   getDebugIngestItem: (id) => request('GET', `/debug/ingest/items/${encodeURIComponent(id)}`),
+  getIngestAgentStatus: () => request('GET', '/admin/ingest-agent/status'),
+  startIngestAgent: () => request('POST', '/admin/ingest-agent/start'),
+  stopIngestAgent: () => request('POST', '/admin/ingest-agent/stop'),
   getDebugAskSession: (caseId) => request('GET', `/debug/ask/${encodeURIComponent(caseId)}`),
   getDebugEntities: (entityType, limit = 100) =>
     request('GET', `/debug/entities?limit=${limit}${entityType ? `&entity_type=${encodeURIComponent(entityType)}` : ''}`),
