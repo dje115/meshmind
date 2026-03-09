@@ -6,5 +6,6 @@
 pub mod types;
 
 pub use types::{
-    IngestItemStatus, IngestJob, IngestJobCounts, IngestedChunk, IngestedItem, SourceWatch,
+    AgentSourceConfig, IngestItemStatus, IngestJob, IngestJobCounts, IngestedChunk, IngestedItem,
+    SourceWatch,
 };

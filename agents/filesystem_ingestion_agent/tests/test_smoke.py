@@ -80,6 +80,25 @@ class TestSmoke(unittest.TestCase):
             self.assertEqual(item.source_id, "agent-fs")
             self.assertEqual(item.source_type, "filesystem")
 
+    def test_watch_mode_no_sources_exits_zero(self: "TestSmoke") -> None:
+        """Watch mode with no configured sources exits 0."""
+        import main
+
+        with patch.object(main, "fetch_agent_config", return_value=([], None)):
+            with patch("sys.argv", ["main", "--watch"]):
+                # fetch returns empty sources -> exits 0
+                rc = main.main()
+            self.assertEqual(rc, 0)
+
+    def test_watch_mode_config_fetch_error_exits_one(self: "TestSmoke") -> None:
+        """Watch mode when config fetch fails exits 1."""
+        import main
+
+        with patch.object(main, "fetch_agent_config", return_value=([], "connection refused")):
+            with patch("sys.argv", ["main", "--watch"]):
+                rc = main.main()
+            self.assertEqual(rc, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

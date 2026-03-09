@@ -921,6 +921,16 @@ pub fn ingest_contract_item(
             "source_origin_label".into(),
             item.source_origin_label.clone(),
         );
+        columns.insert(
+            "llm_helper_used".into(),
+            if item.llm_helper_used { "1" } else { "0" }.into(),
+        );
+        if !item.llm_helper_steps.is_empty() {
+            columns.insert(
+                "llm_helper_steps".into(),
+                serde_json::to_string(&item.llm_helper_steps).unwrap_or_default(),
+            );
+        }
 
         let entity_id = format!("{}-chunk-{}", document_id, chunk.chunk_index);
         let json = serde_json::to_vec(&columns)?;

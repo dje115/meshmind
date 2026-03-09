@@ -1942,6 +1942,7 @@ dependencies = [
  "node_crypto",
  "node_federated",
  "node_ingest",
+ "node_ingest_contract",
  "node_mesh",
  "node_policy",
  "node_proto",

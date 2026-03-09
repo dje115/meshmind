@@ -79,6 +79,9 @@ fn create_node_state(
         federated_config: node_federated::FederatedConfig::new("router"),
         federated_policy: policy,
         ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
+        agent_sources: vec![],
+        ingest_agent_command: None,
+        ingest_agent_child: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     (state, tmp)

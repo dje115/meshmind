@@ -56,6 +56,8 @@ class IngestedItem:
     ingested_at: int
     content_hash: str
     pipeline_version: int = PIPELINE_VERSION
+    llm_helper_used: bool = False
+    llm_helper_steps: Optional[list[str]] = None
     source_parent: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
     warnings: Optional[list[str]] = None
@@ -84,6 +86,8 @@ class IngestedItem:
             "ocr_attempted": self.ocr_attempted,
             "ocr_used": self.ocr_used,
             "extraction_method": self.extraction_method,
+            "llm_helper_used": self.llm_helper_used,
+            "llm_helper_steps": self.llm_helper_steps or [],
             "warnings": self.warnings,
             "ingest_status": self.ingest_status,
             "source_modified_at": self.source_modified_at,

@@ -108,7 +108,43 @@ All of this is **file-system–specific, extraction-specific** logic that belong
 
 ---
 
-## 5. Proposed Agent Boundaries
+## 5. Responsibility Boundaries (Formal)
+
+### A. MeshMind Core Responsibilities
+
+- CAS (content-addressed storage)
+- Event log (source of truth)
+- SQLite projections (rebuildable from events)
+- Entity graph and relationships
+- Planner / Ask pipeline
+- Training orchestration
+- Policy engine (ingest/share/web/train)
+- Answer provenance assembly
+- UI / debug / status display
+
+### B. Ingestion Agent Responsibilities
+
+- Watch sources (folders, endpoints)
+- Detect changes (new, modified, deleted)
+- Read files / fetch records
+- OCR (local, no cloud)
+- Use ingestion-time LLM helpers where configured
+- Normalize to IngestedItem contract
+- Publish normalized items to core
+- Report status / errors / progress via API or SSE
+
+### C. Main App Responsibilities
+
+- Store ingestion configuration (source watches)
+- Start / stop / pause / resume agents
+- Set rate limits and concurrency
+- Surface live status in UI
+- Show ingest debug information (jobs, items, provenance)
+- Allow source configuration changes
+
+---
+
+## 6. Proposed Agent Boundaries
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -174,7 +210,7 @@ Each agent:
 
 ---
 
-## 7. Why HTTP/JSON Primary, SSE/WebSocket Secondary
+## 8. Why HTTP/JSON Primary, SSE/WebSocket Secondary
 
 1. **Durability**: POST is request/response; retries are straightforward.
 2. **Language-agnostic**: Python, Rust, Node agents can all use HTTP.
@@ -203,7 +239,7 @@ Each emits the same `IngestedItem` shape with:
 
 ---
 
-## 9. Source Provenance Storage and Exposure
+## 10. Source Provenance Storage and Exposure
 
 ### Current State
 
@@ -239,7 +275,82 @@ Every ingested item and evidence item must retain:
 
 ---
 
-## 10. Summary
+---
+
+## 11. Why Ingestion-Time LLM Helpers Belong in the Agent
+
+Ingestion-time LLM helpers are used only for *upstream extraction and classification*, not for answering questions:
+
+| Agent-side (allowed) | Core-side (not allowed in ingest) |
+|----------------------|-----------------------------------|
+| Document type classification | General Q&A / Ask planning |
+| Entity classification/disambiguation | Answer generation |
+| Relationship extraction assistance | Evidence ranking |
+| OCR cleanup / post-OCR structuring | Peer consult decisions |
+| Metadata enrichment | Training data selection |
+| Ambiguity resolution (e.g. "Acme Corp" vs "Acme Corporation") | — |
+
+**Reasons:**
+
+1. **Separation of concerns**: Core is reasoning/memory. Ingestion is extraction/normalization.
+2. **Different failure modes**: Agent LLM fails → item is skipped or flagged; core LLM fails → answer quality degrades.
+3. **Configurability**: Agents can enable/disable ingestion-time LLM per source; core Ask flow stays simple.
+4. **Provenance**: `llm_helper_used` and `llm_helper_steps` are recorded per item; debug can show exactly what the agent did.
+5. **Local-only**: Both agent and core use local inference; no cloud.
+
+---
+
+## 12. Why Configuration Belongs in the Main App
+
+| Owner | Responsibility |
+|-------|----------------|
+| **Main app** | Source watches (folders, endpoints), include/exclude, recursion, OCR on/off, LLM helper on/off, rate limits, concurrency, retry limits, polling interval, agent enabled/disabled, agent startup mode |
+| **Agent** | Executes the config; does not invent or override source lists |
+
+**Reasons:**
+
+1. **Single source of truth**: User configures ingestion in one place (UI or meshmind.toml); agent fetches config.
+2. **Service lifecycle**: Main app starts/stops agents; it must know what they should do.
+3. **Policy gating**: Main app applies policies; config can reflect approval state.
+4. **Multi-agent consistency**: Future Xero, Outlook, etc. agents all receive config from main app.
+5. **Auditability**: Changes to watched sources are visible in main app logs/config.
+
+---
+
+## 12. Why the Main App Controls Service Lifecycle
+
+- **Start**: Main app spawns the ingestion agent process when enabled.
+- **Stop**: Main app terminates the agent on shutdown or user request.
+- **Restart**: Main app can restart the agent after config changes or on failure.
+- **Pause/Resume**: Main app can signal the agent to pause (e.g. rate limiting).
+- **Monitor**: Main app polls agent health and displays status in the UI.
+
+The agent is a **child process** or **supervised service** of the main app, not a standalone daemon that runs independently.
+
+---
+
+## 14. Current Python Agent Path
+
+The filesystem ingestion agent (`agents/filesystem_ingestion_agent/`):
+
+- **One-shot**: `python main.py --one-shot /path/to/folder [--source-id src-1]`
+- **Watch**: `--watch` (TODO: full implementation)
+- **Config**: Currently CLI/env (`WATCH_DIRS`, `MESHMIND_API_URL`, `MESHMIND_ADMIN_TOKEN`)
+- **Target**: Fetches config from main app via `GET /v1/ingest/agent/config` (to be implemented)
+- **Publish**: POSTs `IngestedItem` to `POST /v1/ingest/items/batch`
+
+---
+
+## 14. Current Legacy Rust Ingestion Path
+
+- **Trigger**: `POST /admin/ingest` with `{ source_id }`
+- **Flow**: `node_connectors` (DocumentConnector, etc.) → `node_ingest::run_ingest` → CAS, EventLog, projector
+- **Status**: Still supported for SQLite, CSV, JSON, Document folder. Document folder extraction will be deprecated in favor of the filesystem agent.
+- **Retention**: Legacy connectors remain for structured data (SQLite, CSV, JSON); document-folder extraction moves to agent.
+
+---
+
+## 16. Summary
 
 | Aspect | Decision |
 |--------|----------|
@@ -249,4 +360,7 @@ Every ingested item and evidence item must retain:
 | Secondary communication | SSE for progress (optional) |
 | Extraction philosophy | Direct reading first, OCR locally, no cloud |
 | Provenance | Mandatory; source_locator, source_open_target, source_origin_label |
+| Configuration | Main app owns; agent fetches |
+| Service lifecycle | Main app starts/stops/monitors agents |
+| Ingestion-time LLM | Agent only; core does not use LLM for ingest |
 | Cloud | Never; all processing local |

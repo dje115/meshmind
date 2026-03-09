@@ -704,7 +704,11 @@ fn migrate_document_chunks_provenance(conn: &Connection) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(1))?
         .filter_map(|r| r.ok())
         .collect();
-    for col in ["source_locator", "source_open_target", "source_origin_label"] {
+    for col in [
+        "source_locator",
+        "source_open_target",
+        "source_origin_label",
+    ] {
         if !cols.contains(&col.to_string()) {
             let _ = conn.execute(
                 &format!(

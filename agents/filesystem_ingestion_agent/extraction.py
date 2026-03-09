@@ -337,6 +337,7 @@ def extract_and_normalize(
     source_id: str,
     source_parent: str | None,
     providers: list[ExtractionProvider] | None = None,
+    llm_helper_enabled: bool = False,
 ) -> IngestedItem:
     """
     Extract content and normalize into IngestedItem.
@@ -365,6 +366,18 @@ def extract_and_normalize(
     ingested_at_ms = int(time.time() * 1000)
     content_hash = compute_file_hash(path)
 
+    llm_helper_used = False
+    llm_helper_steps: list[str] = []
+    if llm_helper_enabled:
+        from llm_helper import classify_document_type
+
+        doc_type = classify_document_type(result.text[:8000], str(path))
+        llm_helper_used = True
+        llm_helper_steps = [f"classify_document_type:{doc_type}"]
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["document_type"] = doc_type
+
     return IngestedItem(
         source_id=source_id,
         source_type="filesystem",
@@ -380,6 +393,8 @@ def extract_and_normalize(
         ocr_attempted=result.ocr_attempted,
         ocr_used=result.ocr_used,
         extraction_method=result.extraction_method,
+        llm_helper_used=llm_helper_used,
+        llm_helper_steps=llm_helper_steps,
         ingest_status="ingested",
         source_modified_at=mtime_ms,
         ingested_at=ingested_at_ms,
@@ -416,6 +431,8 @@ def _make_failed_item(
         ocr_attempted=False,
         ocr_used=False,
         extraction_method="none",
+        llm_helper_used=False,
+        llm_helper_steps=[],
         ingest_status=status,
         source_modified_at=mtime_ms,
         ingested_at=ingested_at_ms,

@@ -55,6 +55,8 @@ class WatchedSource:
     recursion: bool = True
     include_patterns: list[str] = field(default_factory=lambda: ["*"])
     exclude_patterns: list[str] = field(default_factory=list)
+    ocr_enabled: bool = True
+    llm_helper_enabled: bool = False
 
 
 def compute_content_hash(path: Path) -> str:

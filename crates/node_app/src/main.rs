@@ -12,6 +12,7 @@ use node_ai_ollama::OllamaBackend;
 use node_api::AppState;
 use node_crypto::DevCa;
 use node_federated::FederatedConfig;
+use node_ingest_contract::AgentSourceConfig;
 use node_mesh::tcp_transport::{EnvelopeHandler, TcpServer, TcpTransport};
 use node_mesh::{ConsultConfig, PeerDirectory};
 use node_policy::{PolicyConfig, PolicyEngine};
@@ -53,6 +54,15 @@ struct NodeConfig {
     /// If false, /status will not include admin_token (for production).
     #[serde(default = "default_true")]
     expose_admin_token: bool,
+    /// Agent source configuration (folders to watch). Ingestion agents fetch via GET /v1/ingest/agent/config.
+    #[serde(default)]
+    agent_sources: Vec<AgentSourceConfig>,
+    /// Path to Python for ingestion agent (default: "python").
+    #[serde(default)]
+    ingest_agent_python: Option<String>,
+    /// Path to agent main.py (default: ./agents/filesystem_ingestion_agent/main.py).
+    #[serde(default)]
+    ingest_agent_script: Option<PathBuf>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -94,8 +104,45 @@ impl Default for NodeConfig {
             relay_only: false,
             public_addr: None,
             expose_admin_token: true,
+            agent_sources: vec![],
+            ingest_agent_python: None,
+            ingest_agent_script: None,
         }
     }
+}
+
+/// Resolve ingestion agent script path.
+fn resolve_agent_script(config: &NodeConfig) -> Option<(String, PathBuf)> {
+    let python = config
+        .ingest_agent_python
+        .clone()
+        .unwrap_or_else(|| "python".to_string());
+    if let Some(ref p) = config.ingest_agent_script {
+        if p.exists() {
+            return Some((python, p.clone()));
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let default = cwd
+        .join("agents")
+        .join("filesystem_ingestion_agent")
+        .join("main.py");
+    if default.exists() {
+        return Some((python, default));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..5 {
+        let candidate = dir
+            .join("agents")
+            .join("filesystem_ingestion_agent")
+            .join("main.py");
+        if candidate.exists() {
+            return Some((python, candidate));
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 /// Resolve ui/dist path: try cwd-relative, then exe-relative (for when running from target/...).
@@ -491,6 +538,7 @@ async fn main() -> Result<()> {
     let trainer = Arc::new(Trainer::new(train_policy.clone(), model_registry.clone()));
 
     let data_dir = config.data_dir.clone();
+    let ingest_agent_command = resolve_agent_script(&config);
     let listen_base_url = {
         let s = &config.listen;
         let host = if s.starts_with("0.0.0.0") {
@@ -530,6 +578,9 @@ async fn main() -> Result<()> {
         federated_config: FederatedConfig::new("router"),
         federated_policy: train_policy,
         ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
+        agent_sources: config.agent_sources.clone(),
+        ingest_agent_command,
+        ingest_agent_child: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     // Start TCP mesh server

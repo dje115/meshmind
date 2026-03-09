@@ -645,6 +645,12 @@ pub struct AppState {
     pub federated_policy: Arc<node_policy::PolicyEngine>,
     /// Latest ingest progress for SSE streaming (job_id, processed, failed, current_file, etc.).
     pub ingest_progress: Arc<tokio::sync::RwLock<Option<IngestProgress>>>,
+    /// Agent source configuration (from meshmind.toml). Agents fetch via GET /v1/ingest/agent/config.
+    pub agent_sources: Vec<node_ingest_contract::AgentSourceConfig>,
+    /// Ingestion agent process (when main app has started it). (python, script_path).
+    pub ingest_agent_command: Option<(String, std::path::PathBuf)>,
+    /// Running ingestion agent child process. Used for stop/restart.
+    pub ingest_agent_child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 }
 
 /// Live ingest job progress (for SSE stream).
@@ -943,6 +949,113 @@ async fn handle_ingest_results_get(
     Ok(Json(serde_json::json!({ "results": results })))
 }
 
+async fn handle_ingest_agent_start(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some((ref python, ref script)) = state.ingest_agent_command else {
+        return Err(ApiError::bad_request(
+            "Ingestion agent script not found. Set ingest_agent_script in meshmind.toml.",
+        ));
+    };
+    let mut child_guard = state.ingest_agent_child.lock().await;
+    if child_guard.is_some() {
+        return Err(ApiError::bad_request("Ingestion agent already running"));
+    }
+    let api_url = state.listen_base_url.clone();
+    let token = state.admin_token.clone();
+    let script = script.clone();
+    let python = python.clone();
+
+    let mut cmd = tokio::process::Command::new(&python);
+    cmd.arg(&script)
+        .arg("--watch")
+        .env("MESHMIND_API_URL", api_url)
+        .env("MESHMIND_ADMIN_TOKEN", token)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    match cmd.spawn() {
+        Ok(child) => {
+            *child_guard = Some(child);
+            Ok(Json(serde_json::json!({
+                "status": "started",
+                "message": "Ingestion agent started"
+            })))
+        }
+        Err(e) => Err(ApiError::internal(format!("Failed to start agent: {e}"))),
+    }
+}
+
+async fn handle_ingest_agent_stop(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut child_guard = state.ingest_agent_child.lock().await;
+    if let Some(mut child) = child_guard.take() {
+        let _ = child.start_kill();
+        Ok(Json(serde_json::json!({
+            "status": "stopped",
+            "message": "Ingestion agent stopped"
+        })))
+    } else {
+        Ok(Json(serde_json::json!({
+            "status": "stopped",
+            "message": "Ingestion agent was not running"
+        })))
+    }
+}
+
+async fn handle_ingest_agent_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut child_guard = state.ingest_agent_child.lock().await;
+    let running = if let Some(ref mut c) = *child_guard {
+        match c.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                *child_guard = None;
+                false
+            }
+            Err(_) => true,
+        }
+    } else {
+        false
+    };
+    Ok(Json(serde_json::json!({
+        "status": if running { "running" } else { "stopped" },
+        "agent_available": state.ingest_agent_command.is_some()
+    })))
+}
+
+async fn handle_ingest_agent_config_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let api_url = state.listen_base_url.clone();
+    let sources: Vec<serde_json::Value> = state
+        .agent_sources
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "source_id": s.source_id,
+                "path": s.path,
+                "recursion": s.recursion,
+                "include_patterns": s.include_patterns,
+                "exclude_patterns": s.exclude_patterns,
+                "max_file_size": s.max_file_size,
+                "ocr_enabled": s.ocr_enabled,
+                "llm_helper_enabled": s.llm_helper_enabled,
+                "rate_limit": s.rate_limit,
+                "concurrency_limit": s.concurrency_limit,
+                "retry_limit": s.retry_limit,
+                "polling_interval_secs": s.polling_interval_secs,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "api_url": api_url,
+        "sources": sources
+    })))
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let localhost_origins = [
         "http://127.0.0.1:9900".parse().unwrap(),
@@ -1038,6 +1151,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ingest/stream", get(handle_ingest_stream_get))
         .route("/ingest/sources", get(handle_ingest_sources_get))
         .route("/ingest/results", get(handle_ingest_results_get))
+        .route("/ingest/agent/config", get(handle_ingest_agent_config_get))
+        .route("/admin/ingest-agent/start", post(handle_ingest_agent_start))
+        .route("/admin/ingest-agent/stop", post(handle_ingest_agent_stop))
+        .route(
+            "/admin/ingest-agent/status",
+            get(handle_ingest_agent_status),
+        )
         .route("/debug/documents", get(handle_debug_documents))
         .route("/debug/documents/:id", get(handle_debug_document_detail))
         .route(
@@ -2754,8 +2874,8 @@ async fn handle_evidence_source_get(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let conn = rusqlite::Connection::open(&state.db_path)
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let prov = debug::get_evidence_source(&conn, &id)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let prov =
+        debug::get_evidence_source(&conn, &id).map_err(|e| ApiError::internal(e.to_string()))?;
     match prov {
         Some(p) => Ok(Json(serde_json::json!({
             "artifact_id": p.artifact_id,
@@ -2787,7 +2907,9 @@ async fn handle_source_items_get(
         .collect();
     let has_cols = cols.contains(&"source_locator".to_string());
     if !has_cols {
-        return Err(ApiError::not_found("source-items view not available".to_string()));
+        return Err(ApiError::not_found(
+            "source-items view not available".to_string(),
+        ));
     }
     let mut stmt = conn
         .prepare(
@@ -6059,6 +6181,9 @@ mod tests {
                 ..Default::default()
             })),
             ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
+            agent_sources: vec![],
+            ingest_agent_command: None,
+            ingest_agent_child: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -6325,6 +6450,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_agent_status_stopped() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/admin/ingest-agent/status")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["status"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn ingest_agent_config_returns_sources() {
+        let state = create_test_state();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/v1/ingest/agent/config")
+                    .header("authorization", TEST_AUTH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(data.get("api_url").is_some());
+        assert!(data.get("sources").is_some());
+        assert!(data["sources"].as_array().is_some());
+    }
+
+    #[tokio::test]
     async fn ingest_stream_returns_sse() {
         let state = create_test_state();
         let app = build_router(state);
@@ -6376,6 +6545,8 @@ mod tests {
             ocr_attempted: false,
             ocr_used: false,
             extraction_method: "text".into(),
+            llm_helper_used: false,
+            llm_helper_steps: vec![],
             warnings: vec![],
             ingest_status: IngestItemStatus::Ingested,
             failure_reason: None,
@@ -6532,6 +6703,9 @@ mod tests {
                 ..Default::default()
             })),
             ingest_progress: Arc::new(tokio::sync::RwLock::new(None)),
+            agent_sources: vec![],
+            ingest_agent_command: None,
+            ingest_agent_child: Arc::new(tokio::sync::Mutex::new(None)),
         });
 
         let app = build_router(state);

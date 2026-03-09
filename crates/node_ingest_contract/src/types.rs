@@ -72,6 +72,12 @@ pub struct IngestedItem {
     pub ocr_used: bool,
     /// Extraction method used (e.g. "pdf_oxide", "tesseract", "docx-rust").
     pub extraction_method: String,
+    /// Whether an ingestion-time LLM helper was used.
+    #[serde(default)]
+    pub llm_helper_used: bool,
+    /// Steps where LLM was used (e.g. classify_entity, classify_document_type, infer_relationships).
+    #[serde(default)]
+    pub llm_helper_steps: Vec<String>,
     /// Non-fatal warnings.
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -119,7 +125,7 @@ pub struct SourceWatch {
     /// Root path or endpoint (for filesystem: folder path).
     pub root: String,
     pub enabled: bool,
-    /// Polling or watch mode.
+    /// Polling or watch mode (e.g. "poll", "watch").
     pub mode: String,
     /// Include patterns (glob).
     #[serde(default)]
@@ -133,10 +139,59 @@ pub struct SourceWatch {
     /// Change detection rules (e.g. mtime, hash).
     #[serde(default)]
     pub change_detection: Vec<String>,
+    /// Max file size in bytes (0 = no limit).
+    #[serde(default)]
+    pub max_file_size: u64,
+    /// Rate limit: max items per minute (0 = no limit).
+    #[serde(default)]
+    pub rate_limit: u32,
+    /// Max concurrent extractions.
+    #[serde(default)]
+    pub concurrency_limit: u32,
+    /// Retry limit for failed extractions.
+    #[serde(default)]
+    pub retry_limit: u32,
+    /// Polling interval in seconds (when mode is "poll").
+    #[serde(default)]
+    pub polling_interval_secs: u32,
+    /// OCR enabled for scanned PDFs.
+    #[serde(default = "default_true")]
+    pub ocr_enabled: bool,
+    /// Ingestion-time LLM helper enabled.
+    #[serde(default)]
+    pub llm_helper_enabled: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Agent source configuration (from main app config). Agents fetch this via GET /v1/ingest/agent/config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSourceConfig {
+    pub source_id: String,
+    /// Root path (filesystem) or endpoint (API agents).
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub recursion: bool,
+    #[serde(default)]
+    pub include_patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+    #[serde(default)]
+    pub max_file_size: u64,
+    #[serde(default = "default_true")]
+    pub ocr_enabled: bool,
+    #[serde(default)]
+    pub llm_helper_enabled: bool,
+    #[serde(default)]
+    pub rate_limit: u32,
+    #[serde(default)]
+    pub concurrency_limit: u32,
+    #[serde(default)]
+    pub retry_limit: u32,
+    #[serde(default)]
+    pub polling_interval_secs: u32,
 }
 
 #[cfg(test)]
@@ -166,6 +221,8 @@ mod tests {
             ocr_attempted: false,
             ocr_used: false,
             extraction_method: "pdf_oxide".into(),
+            llm_helper_used: false,
+            llm_helper_steps: vec![],
             warnings: vec![],
             ingest_status: IngestItemStatus::Ingested,
             failure_reason: None,

@@ -21,6 +21,7 @@ node_trainer = { workspace = true }
 node_federated = { workspace = true }
 node_relay = { workspace = true }
 node_api = { workspace = true }
+node_ingest_contract = { path = "../node_ingest_contract" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
